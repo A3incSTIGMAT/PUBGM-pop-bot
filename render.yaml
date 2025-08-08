@@ -2,8 +2,9 @@ services:
   - type: web
     name: pubg-pop-bot
     runtime: python
+    runtimeVersion: "3.11"
     envVars:
-      TOKEN:
+      - key: TOKEN
         fromDatabase: true
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
