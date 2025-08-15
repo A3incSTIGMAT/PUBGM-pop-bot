@@ -5,7 +5,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from datetime import datetime, timedelta
 
 # === НАСТРОЙКА ТОКЕНА ===
-TOKEN = "8364745841:AAF2g6-4_GVxZRpDzUh-qtatfxp5_gH17QI"
+TOKEN = 
 
 # Хранилище данных (в реальном проекте — используй базу)
 users = {}
