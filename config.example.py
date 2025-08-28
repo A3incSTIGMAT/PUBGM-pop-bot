@@ -1,6 +1,9 @@
-BOT_TOKEN = "ваш_токен"
+# config.example.py — Шаблон настроек
+BOT_TOKEN = "ваш_токен_от_botfather"
 CURRENCY = "RUB"
 
-MERCHANT_ID = 123456
-SECRET_1 = "ваш_secret1"
-SECRET_2 = "ваш_secret2"
+# Free-Kassa
+MERCHANT_ID = 64786
+SECRET_1 = "YOHO&]cA-i6]Q1-"
+SECRET_2 = "Ej+7]0)%8u1N$jj"
+
