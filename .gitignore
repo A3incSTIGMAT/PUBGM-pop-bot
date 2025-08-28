@@ -1,4 +1,19 @@
-nano config.example.pyconfig.py
+# Секреты
+config.py
+
+# База данных
 users.db
+*.db
+
+# Логи
 *.log
 nohup.out
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Виртуальное окружение
+venv/
+env/
