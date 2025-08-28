@@ -1,0 +1,20 @@
+# Секретные файлы
+config.py
+webhook_secret.py
+
+# База данных
+users.db
+*.db
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Логи
+*.log
+nohup.out
+
+# Виртуальное окружение
+venv/
+env/
