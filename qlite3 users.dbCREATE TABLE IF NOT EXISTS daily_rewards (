@@ -1,0 +1,11 @@
+[0;1;32m●[0m pubg-bot.service - PUBG Popularity Bot
+     Loaded: loaded (]8;;file://5468605-ma10428/etc/systemd/system/pubg-bot.service/etc/systemd/system/pubg-bot.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Mon 2025-08-18 11:11:50 MSK; 14s ago
+   Main PID: 76370 (python3)
+      Tasks: 2 (limit: 2298)
+     Memory: 94.1M (peak: 94.3M)
+        CPU: 2.245s
+     CGroup: /system.slice/pubg-bot.service
+             └─[0;38;5;245m76370 /usr/bin/python3 /root/PUBGM-pop-bot/bot.py[0m
+
+Aug 18 11:11:50 5468605-ma10428 systemd[1]: Started pubg-bot.service - PUBG Popularity Bot.

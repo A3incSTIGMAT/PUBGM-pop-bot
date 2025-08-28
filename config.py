@@ -1,9 +1,6 @@
-from dotenv import load_dotenv
-import os
+BOT_TOKEN = "8364745841:AAFVWBVBaPL-SisVFYK4b2dJfx2dLfLdnVU"
+CURRENCY = "RUB"
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-FK_ID = os.getenv("FK_ID")
-FK_SECRET1 = os.getenv("FK_SECRET1")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+MERCHANT_ID = 64786
+SECRET_1 = "YOHO&]cA-i6]Q1-"
+SECRET_2 = "Ej+7]0)%8u1N$jj"

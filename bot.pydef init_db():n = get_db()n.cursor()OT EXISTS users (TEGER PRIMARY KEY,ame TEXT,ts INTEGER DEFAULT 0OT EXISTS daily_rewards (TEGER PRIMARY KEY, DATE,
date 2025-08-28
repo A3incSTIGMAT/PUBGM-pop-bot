@@ -1,0 +1,150 @@
+# bot.py — PUBG Mobile: Битва Популярности
+# Полностью отлаженная версия с ежедневными наградами и SQLite
+
+import sqlite3
+import logging
+from datetime import date
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters
+)
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# === РАБОТА С БАЗОЙ ДАННЫХ ===
+DB_NAME = "users.db"
+
+def get_db():
+    return sqlite3.connect(DB_NAME)cle DATE
+        )
+    """)
+    conn.commit()
+    conn.close()
+    logger.info("✅ База данных инициализирована")
+
+def get_or_create_user(user_id, username):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        cursor.execute(
+            "INSERT INTO users (user_id, username, popular_points) VALUES (?, ?, 0)",
+            (user_id, username)
+        )
+        # Создаём запись в daily_rewards
+        cursor.execute(
+            "INSERT INTO daily_rewards (user_id, last_chicken, last_motorcycle) VALUES (?, NULL, NULL)",
+            (user_id,)
+        )
+    conn.commit()
+    conn.close()def add_points(user_id, points):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET popular_points = popular_points + ? WHERE user_id = ?",
+        (points, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_points(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT popular_points FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def get_last_rewards(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_chicken, last_motorcycle FROM daily_rewards WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"chicken": row[0], "motorcycle": row[1]}
+    return {"chicken": None, "motorcycle": None}
+
+def update_last_reward(user_id, reward_type):
+    today = date.today().isoformat()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"UPDATE daily_rewards SET last_{reward_type} = ? WHERE user_id = ?",
+        (today, user_id)
+    )
+    conn.commit()
+    conn.close()# === ОБРАБОТЧИКИ КОМАНД ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    get_or_create_user(user.id, user.username)
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Моя популярность", callback_data="popular")],
+        [InlineKeyboardButton("🎁 Ежедневные награды", callback_data="daily")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🎮 Привет, {user.first_name}! Добро пожаловать в битву популярности!",
+        reply_markup=reply_markup
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    if query.data == "popular":
+        points = get_points(user_id)
+        await query.edit_message_text(f"🌟 Ваша популярность: {points} очков")
+    
+    elif query.data == "daily":
+        status = get_last_rewards(user_id)
+        today = date.today().isoformat()
+        buttons = []
+        
+        if status["chicken"] != today:
+            buttons.append(InlineKeyboardButton("🍗 Получить курицу (+10)", callback_data="get_chicken"))
+        if status["motorcycle"] != today:
+            buttons.append(InlineKeyboardButton("🏍 Получить мотоцикл (+200)", callback_data="get_motorcycle"))
+        
+        if not buttons:
+            await query.edit_message_text("⏳ Вы уже получили все награды сегодня.")
+            return
+            
+        reply_markup = InlineKeyboardMarkup([buttons])
+        await query.edit_message_text("🎁 Ежедневные награды:", reply_markup=reply_markup)
+    
+    elif query.data == "get_chicken":
+        update_last_reward(user_id, "chicken")
+        add_points(user_id, 10)
+        await query.edit_message_text("🍗 Вы получили курицу! +10 популярности")
+    
+    elif query.data == "get_motorcycle":
+        update_last_reward(user_id, "motorcycle")
+        add_points(user_id, 200)
+        await query.edit_message_text("🏍 Вы получили мотоцикл! +200 популярности")# === ЗАПУСК БОТА ===
+def main():
+    # Инициализируем базу
+    init_db()
+    
+    # Создаём приложение
+    app = Application.builder().token("8364745841:AAFVWBVBaPL-SisVFYK4b2dJfx2dLfLdnVU").build()
+    
+    # Добавляем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    logger.info("✅ Бот запущен и готов к работе!")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

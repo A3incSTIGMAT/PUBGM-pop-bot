@@ -1,4 +1,6 @@
-# bot.py — PUBG Popularity Bot (полностью отлаженная версия)
+# bot.py — PUBG Mobile: Битва Популярности
+# Полностью отлаженная версия с ежедневными наградами и SQLite
+
 import sqlite3
 import logging
 from datetime import date
@@ -7,15 +9,19 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    MessageHandler,
+    filters
 )
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Имя базы данных
-DB_NAME = "users.db"def get_db():
+# === РАБОТА С БАЗОЙ ДАННЫХ ===
+DB_NAME = "users.db"
+
+def get_db():
     return sqlite3.connect(DB_NAME)
 
 def init_db():
@@ -27,8 +33,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            popular_points INTEGER DEFAULT 0,
-            referrer_id INTEGER
+            popular_points INTEGER DEFAULT 0
         )
     """)
     # Таблица ежедневных наград
@@ -42,27 +47,25 @@ def init_db():
     conn.commit()
     conn.close()
     logger.info("✅ База данных инициализирована")
-def get_or_create_user(user_id, username, referrer_id=None):
-    """Создаёт пользователя и начисляет бонус рефереру"""
+
+def get_or_create_user(user_id, username):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
     if not cursor.fetchone():
         cursor.execute(
-            "INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?)",
-            (user_id, username, referrer_id)
+            "INSERT INTO users (user_id, username, popular_points) VALUES (?, ?, 0)",
+            (user_id, username)
         )
-        # Начислить 10 очков рефереру
-        if referrer_id:
-            cursor.execute(
-                "UPDATE users SET popular_points = popular_points + 10 WHERE user_id = ?",
-                (referrer_id,)
-            )
+        # Создаём запись в daily_rewards
+        cursor.execute(
+            "INSERT INTO daily_rewards (user_id, last_chicken, last_motorcycle) VALUES (?, NULL, NULL)",
+            (user_id,)
+        )
     conn.commit()
     conn.close()
 
 def add_points(user_id, points):
-    """Начисляет очки популярности"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
@@ -73,15 +76,14 @@ def add_points(user_id, points):
     conn.close()
 
 def get_points(user_id):
-    """Возвращает количество очков"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT popular_points FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
 def get_last_rewards(user_id):
-    """Возвращает даты последних наград"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT last_chicken, last_motorcycle FROM daily_rewards WHERE user_id = ?", (user_id,))
@@ -92,18 +94,37 @@ def get_last_rewards(user_id):
     return {"chicken": None, "motorcycle": None}
 
 def update_last_reward(user_id, reward_type):
-    """Обновляет дату получения награды"""
     today = date.today().isoformat()
     conn = get_db()
     cursor = conn.cursor()
-    # Вставляем или заменяем запись
-    cursor.execute("""
-        INSERT OR REPLACE INTO daily_rewards (user_id, last_chicken, last_motorcycle)
-        VALUES (?, 
-                CASE WHEN ? = 'chicken' THEN ? ELSE COALESCE((SELECT last_chicken FROM daily_rewards WHERE user_id = ?), NULL) END,
-                CASE WHEN ? = 'motorcycle' THEN ? ELSE COALESCE((SELECT last_motorcycle FROM daily_rewards WHERE user_id = ?), NULL) END
-        )
-    """, (user_id, reward_type, today, user_id, reward_type, today, user_id))
+    cursor.execute(
+        f"UPDATE daily_rewards SET last_{reward_type} = ? WHERE user_id = ?",
+        (today, user_id)
+    )
     conn.commit()
     conn.close()
 
+# === ОБРАБОТЧИКИ КОМАНД ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    get_or_create_user(user.id, user.username)
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Моя популярность", callback_data="popular")],
+        [InlineKeyboardButton("🎁 Ежедневные награды", callback_data="daily")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🎮 Привет, {user.first_name}! Добро пожаловать в битву популярности!",
+        reply_markup=reply_markup
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    if query.data == "popular":
+        points = get_points(user_id)
+        await query.edit_m
