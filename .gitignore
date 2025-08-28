@@ -1,4 +1,4 @@
-config.py
+nano config.example.pyconfig.py
 users.db
 *.log
 nohup.out
