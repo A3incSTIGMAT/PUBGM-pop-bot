@@ -27,7 +27,7 @@ class FreeKassaHandler(BaseHTTPRequestHandler):
             return
         
         try:
-            content_length = int(content_length_header)
+            content_length = int(self.headers.get('Content-Length', 0))
         except ValueError:
             logger.warning("❌ Неверное значение Content-Length")
             self.send_response(400)
