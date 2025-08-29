@@ -18,8 +18,8 @@ except ImportError:
 
 class FreeKassaHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # Исправлено: безопасное получение Content-Length
-        content_length = int(self.headers.get('Content-Length', 0))
+        # Получаем Content-Length (безопасно)
+        content_length_header = self.headers.get('Content-Length')
         if content_length_header is None:
             logger.warning("❌ Нет заголовка Content-Length")
             self.send_response(400)
@@ -27,8 +27,8 @@ class FreeKassaHandler(BaseHTTPRequestHandler):
             return
         
         try:
-            content_length = int(self.headers.get('Content-Length', 0))
-        except ValueError:
+            content_length = int(content_length_header)
+        except (ValueError, TypeError):
             logger.warning("❌ Неверное значение Content-Length")
             self.send_response(400)
             self.end_headers()
