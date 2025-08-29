@@ -3,7 +3,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 import hashlib
 import logging
+import sqlite3
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -16,15 +18,39 @@ except ImportError:
 
 class FreeKassaHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length).decode('utf-8')
-        data = urllib.parse.parse_qs(post_data)
+        # Исправлено: безопасное получение Content-Length
+        content_length_header = self.headers.get('Content-Length')
+        if content_length_header is None:
+            logger.warning("❌ Нет заголовка Content-Length")
+            self.send_response(400)
+            self.end_headers()
+            return
+        
+        try:
+            content_length = int(content_length_header)
+        except ValueError:
+            logger.warning("❌ Неверное значение Content-Length")
+            self.send_response(400)
+            self.end_headers()
+            return
 
+        # Читаем тело запроса
+        try:
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            data = urllib.parse.parse_qs(post_data)
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения данных: {e}")
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        # Извлекаем данные
         try:
             order_id = data.get('MERCHANT_ORDER_ID', [''])[0]
             amount = data.get('AMOUNT', [''])[0]
             sign = data.get('SIGN', [''])[0]
 
+            # Проверяем подпись
             sign_check = hashlib.md5(f"{MERCHANT_ID}:{amount}:{SECRET_1}:{order_id}".encode()).hexdigest()
             if sign.lower() != sign_check.lower():
                 logger.warning("❌ Неверная подпись")
@@ -32,6 +58,7 @@ class FreeKassaHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+            # Обработка платежа
             if "_" in order_id:
                 user_id_str, item = order_id.split("_", 1)
                 try:
@@ -58,17 +85,19 @@ class FreeKassaHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     logger.error(f"❌ Ошибка обработки: {e}")
 
+            # Отправляем ответ Free-Kassa
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b"YES")
+            self.wfile.write(b"YES")  # Обязательный ответ
+
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             self.send_response(500)
             self.end_headers()
 
+# === ЗАПУСК СЕРВЕРА ===
 if __name__ == "__main__":
-    from config import MERCHANT_ID, SECRET_1, SECRET_2
     server = HTTPServer(('0.0.0.0', 8000), FreeKassaHandler)
     logger.info("🚀 Вебхук запущен на порту 8000")
     server.serve_forever()
