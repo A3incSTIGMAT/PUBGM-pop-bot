@@ -174,7 +174,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
         count = cursor.fetchone()[0]
-        ref_link = f"https://t.me/PUBGPopularityBot?start=ref_{user_id}"
+        ref_link = f"https://t.me/PUBGPopBattleBot?start=ref_{user_id}"
         await query.edit_message_text(
             f"👥 Вы пригласили: {count} человек\n"
             f"🔗 Ваша реферальная ссылка:\n{ref_link}\n"
