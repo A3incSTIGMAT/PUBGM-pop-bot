@@ -1,4 +1,4 @@
-# bot.py — PUBG Popularity Bot
+# bot.py — PUBG Popularity Battle Bot
 import sqlite3
 import logging
 from datetime import date
@@ -21,6 +21,11 @@ try:
     from config import BOT_TOKEN, MERCHANT_ID, SECRET_1, SECRET_2
 except ImportError:
     logger.error("❌ Не найден config.py — используй config.example.py как образец")
+    exit()
+
+# Проверка токена
+if not BOT_TOKEN:
+    logger.error("❌ Не задан BOT_TOKEN в config.py")
     exit()
 
 # Имя базы
@@ -60,9 +65,10 @@ def get_or_create_user(user_id, username, referrer_id=None):
             "INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?)",
             (user_id, username, referrer_id)
         )
+        # Награда за приглашённого — 1000 очков
         if referrer_id:
             cursor.execute(
-                "UPDATE users SET popular_points = popular_points + 10 WHERE user_id = ?",
+                "UPDATE users SET popular_points = popular_points + 1000 WHERE user_id = ?",
                 (referrer_id,)
             )
     conn.commit()
@@ -178,24 +184,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"👥 Вы пригласили: {count} человек\n"
             f"🔗 Ваша реферальная ссылка:\n{ref_link}\n"
-            f"🎁 Получаете 10 очков за каждого приглашённого!"
+            f"🎁 Получаете 1000 очков за каждого приглашённого!"
         )
 
     elif query.data == "shop":
         shop_text = """
 🛒 **Магазин подарков:**
 - 🏍 Мотоцикл: 10₽ → 200 очков
-- 🏵 Слиток золота: 50₽ → 800 очков
-- 🚗 Машинка: 100₽ → 2000 очков
-- 💰 Денежная пушка: 150₽ → 3000 очков
-- 💋 Воздушный поцелуй: 200₽ → 4000 очков
+- 🏵 Слиток золота: 20₽ → 800 очков
+- 🚗 Машинка: 50₽ → 2000 очков
+- 💰 Денежная пушка: 70₽ → 3000 очков
+- 💋 Воздушный поцелуй: 90₽ → 4000 очков
+- 🏆 Кубок победителя: 120₽ → 6000 очков
+- ✈️ Самолет: 500₽ → 25000 очков
+- 🎈 Дирежабль: 750₽ → 50000 очков
+- 🚁 Вертолет: 1500₽ → 125000 очков
+- 🛩 Частный самолет: 3000₽ → 300000 очков
 """
         keyboard = [
             [InlineKeyboardButton("🏍 Мотоцикл (10₽)", callback_data="buy_motorcycle")],
-            [InlineKeyboardButton("🏵 Слиток золота (50₽)", callback_data="buy_gold")],
-            [InlineKeyboardButton("🚗 Машинка (100₽)", callback_data="buy_car")],
-            [InlineKeyboardButton("💰 Денежная пушка (150₽)", callback_data="buy_money_gun")],
-            [InlineKeyboardButton("💋 Воздушный поцелуй (200₽)", callback_data="buy_kiss")],
+            [InlineKeyboardButton("🏵 Слиток золота (20₽)", callback_data="buy_gold")],
+            [InlineKeyboardButton("🚗 Машинка (50₽)", callback_data="buy_car")],
+            [InlineKeyboardButton("💰 Денежная пушка (70₽)", callback_data="buy_money_gun")],
+            [InlineKeyboardButton("💋 Воздушный поцелуй (90₽)", callback_data="buy_kiss")],
+            [InlineKeyboardButton("🏆 Кубок победителя (120₽)", callback_data="buy_trophy")],
+            [InlineKeyboardButton("✈️ Самолет (500₽)", callback_data="buy_plane")],
+            [InlineKeyboardButton("🎈 Дирежабль (750₽)", callback_data="buy_blimp")],
+            [InlineKeyboardButton("🚁 Вертолет (1500₽)", callback_data="buy_helicopter")],
+            [InlineKeyboardButton("🛩 Частный самолет (3000₽)", callback_data="buy_private_jet")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(shop_text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -204,10 +220,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item = query.data.split("_")[1]
         prices = {
             "motorcycle": 10,
-            "gold": 50,
-            "car": 100,
-            "money_gun": 150,
-            "kiss": 200
+            "gold": 20,
+            "car": 50,
+            "money_gun": 70,
+            "kiss": 90,
+            "trophy": 120,
+            "plane": 500,
+            "blimp": 750,
+            "helicopter": 1500,
+            "private_jet": 3000
+        }
+        points_map = {
+            "motorcycle": 200,
+            "gold": 800,
+            "car": 2000,
+            "money_gun": 3000,
+            "kiss": 4000,
+            "trophy": 6000,
+            "plane": 25000,
+            "blimp": 50000,
+            "helicopter": 125000,
+            "private_jet": 300000
         }
         if item in prices:
             price = prices[item]
