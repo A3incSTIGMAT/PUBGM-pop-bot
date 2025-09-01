@@ -108,14 +108,3 @@ if __name__ == "__main__":
     server = HTTPServer(('0.0.0.0', 8000), FreeKassaHandler)
     logger.info("🚀 Вебхук запущен на порту 8000")
     server.serve_forever()
-
-except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            self.send_response(500)
-            self.end_headers()
-
-# === ЗАПУСК СЕРВЕРА ===
-if __name__ == "__main__":
-    server = HTTPServer(('0.0.0.0', 8000), FreeKassaHandler)
-    logger.info("🚀 Вебхук запущен на порту 8000")
-    server.serve_forever()
