@@ -18,6 +18,13 @@ except ImportError:
 
 class FreeKassaHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # Проверяем, что запрос на /webhook
+        if self.path != '/webhook':
+            logger.warning(f"❌ Неверный путь: {self.path}")
+            self.send_response(404)
+            self.end_headers()
+            return
+
         # Получаем Content-Length (безопасно)
         content_length_header = self.headers.get('Content-Length')
         if content_length_header is None:
@@ -90,6 +97,17 @@ class FreeKassaHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b"YES")  # Обязательный ответ
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+# === ЗАПУСК СЕРВЕРА ===
+if __name__ == "__main__":
+    server = HTTPServer(('0.0.0.0', 8000), FreeKassaHandler)
+    logger.info("🚀 Вебхук запущен на порту 8000")
+    server.serve_forever()
 
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
