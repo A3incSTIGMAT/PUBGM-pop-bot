@@ -109,7 +109,7 @@ if __name__ == "__main__":
     logger.info("🚀 Вебхук запущен на порту 8000")
     server.serve_forever()
 
-        except Exception as e:
+except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             self.send_response(500)
             self.end_headers()
