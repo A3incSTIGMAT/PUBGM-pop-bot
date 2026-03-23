@@ -1,1 +1,8 @@
-from . import admin, user, games, economy
+from . import admin
+from . import user
+from . import games
+from . import economy
+from . import report
+from . import instructions
+from . import callbacks
+from . import roles
