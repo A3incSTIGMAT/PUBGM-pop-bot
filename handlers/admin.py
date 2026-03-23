@@ -11,59 +11,12 @@ from database.db import (
     add_chat_moderator, remove_chat_moderator, get_chat_moderators,
     is_chat_moderator
 )
+from handlers.roles import can_ban, can_mute, can_configure, can_assign_moderator, get_user_role
 from keyboards.setup_menu import get_setup_menu
-from utils.logger import log_admin, log_attack
+from utils.logger import log_admin
 
 router = Router()
 bot = Bot(current_bot.token)
-
-# ========== ПРОВЕРКА ПРАВ ==========
-
-async def get_user_role(chat_id: int, user_id: int) -> str:
-    """
-    Определяет роль пользователя в чате.
-    Возвращает: 'global_admin', 'creator', 'admin', 'moderator', 'user'
-    """
-    # 1. Глобальный супер-админ
-    if user_id in ADMIN_IDS:
-        return 'global_admin'
-    
-    # 2. Получаем информацию о чате
-    try:
-        chat = await bot.get_chat(chat_id)
-        member = await chat.get_member(user_id)
-        
-        # 3. Владелец чата (creator)
-        if member.status == 'creator':
-            return 'creator'
-        
-        # 4. Администратор чата (назначенный в Telegram)
-        if member.status == 'administrator':
-            return 'admin'
-        
-        # 5. Проверяем, есть ли роль модератора в БД
-        if is_chat_moderator(chat_id, user_id):
-            return 'moderator'
-        
-        return 'user'
-    except Exception:
-        return 'user'
-
-async def can_ban(chat_id: int, user_id: int) -> bool:
-    role = await get_user_role(chat_id, user_id)
-    return role in ['global_admin', 'creator', 'admin']
-
-async def can_mute(chat_id: int, user_id: int) -> bool:
-    role = await get_user_role(chat_id, user_id)
-    return role in ['global_admin', 'creator', 'admin', 'moderator']
-
-async def can_configure(chat_id: int, user_id: int) -> bool:
-    role = await get_user_role(chat_id, user_id)
-    return role in ['global_admin', 'creator', 'admin']
-
-async def can_assign_moderator(chat_id: int, user_id: int) -> bool:
-    role = await get_user_role(chat_id, user_id)
-    return role in ['global_admin', 'creator', 'admin']
 
 async def log_action(chat_id: int, action_text: str):
     log_channel_id = get_log_channel(chat_id)
@@ -241,7 +194,6 @@ async def add_moderator(message: Message):
     target_user = message.reply_to_message.from_user
     target_id = target_user.id
     
-    # Проверяем, не является ли пользователь уже админом Telegram
     try:
         chat = await bot.get_chat(message.chat.id)
         member = await chat.get_member(target_id)
