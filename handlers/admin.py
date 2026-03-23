@@ -5,6 +5,7 @@ from aiogram.types import Message, ChatPermissions
 from aiogram.exceptions import TelegramAPIError
 
 from config import ADMIN_IDS
+from database.db import get_welcome_message, set_chat_welcome
 
 router = Router()
 
@@ -99,3 +100,31 @@ async def mute_user(message: Message):
         await message.answer(f"🔇 Пользователь {user_name} заглушен на {duration} минут.")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
+
+# Настройка приветственного сообщения для чата
+@router.message(Command("setwelcome"))
+async def set_welcome_message(message: Message):
+    if not await is_admin(message):
+        await message.answer("❌ Только администраторы могут использовать эту команду.")
+        return
+    
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "📝 **Настройка приветствия**\n\n"
+            "Использование: /setwelcome [текст]\n\n"
+            "Переменные:\n"
+            "• `{user}` — имя нового участника\n"
+            "• `{chat}` — название чата\n\n"
+            "Пример: /setwelcome Добро пожаловать, {user}! Рады видеть в {chat}!\n\n"
+            f"Текущее приветствие: {get_welcome_message(message.chat.id) or 'не установлено'}"
+        )
+        return
+    
+    welcome_text = args[1]
+    
+    # Сохраняем в базу данных
+    set_chat_welcome(message.chat.id, welcome_text)
+    
+    await message.answer(f"✅ Приветственное сообщение установлено:\n\n{welcome_text}")
