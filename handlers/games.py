@@ -20,7 +20,8 @@ async def rps_game(message: Message):
         await message.answer(
             "🎮 Камень-ножницы-бумага\n\n"
             "Использование: /rps [камень|ножницы|бумага]\n"
-            "Пример: /rps камень"
+            "Пример: /rps камень\n\n"
+            "💰 Ставка: игра бесплатная"
         )
         return
     
@@ -54,9 +55,11 @@ async def roulette(message: Message):
     
     if len(args) < 3:
         await message.answer(
-            "🎲 Рулетка\n\n"
+            "🎲 РУЛЕТКА NEXUS\n\n"
             "Использование: /roulette [сумма] [red/black]\n"
-            "Пример: /roulette 100 red"
+            "Пример: /roulette 100 red\n\n"
+            "💰 Ставка в NCoin\n"
+            "🎯 Выигрыш: x2 от ставки"
         )
         return
     
@@ -67,6 +70,10 @@ async def roulette(message: Message):
         await message.answer("❌ Неверный формат. Используйте: /roulette 100 red")
         return
     
+    if bet <= 0:
+        await message.answer("❌ Сумма ставки должна быть больше 0")
+        return
+    
     if color not in ["red", "black"]:
         await message.answer("❌ Ставить можно только на red или black")
         return
@@ -75,16 +82,37 @@ async def roulette(message: Message):
     
     if result == color:
         win = bet * 2
-        await message.answer(f"🎲 Выпало {result}! Поздравляю! Вы выиграли {win} монет!")
+        await message.answer(
+            f"🎲 Колесо остановилось на {result.upper()}!\n\n"
+            f"🎉 ПОБЕДА! Вы выиграли {win} NCoin!"
+        )
     else:
-        await message.answer(f"🎲 Выпало {result}. Вы проиграли {bet} монет.")
+        await message.answer(
+            f"🎲 Колесо остановилось на {result.upper()}!\n\n"
+            f"😔 Вы проиграли {bet} NCoin."
+        )
 
-# Дуэль (заглушка)
+# Дуэль (заглушка, будет доработана)
 @router.message(Command("duel"))
 async def duel(message: Message):
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.answer(
+            "⚔️ ДУЭЛЬ\n\n"
+            "Использование: /duel @username [сумма]\n"
+            "Пример: /duel @ivan 100\n\n"
+            "💰 Ставка в NCoin\n"
+            "🎯 Победитель забирает банк"
+        )
+        return
+    
+    target = args[1]
+    amount = args[2] if len(args) > 2 else 50
+    
     await message.answer(
-        "⚔️ Дуэль\n\n"
-        "Использование: /duel @username [сумма]\n"
-        "Пример: /duel @ivan 100\n\n"
-        "💰 Экономика еще настраивается. Скоро будет доступно!"
+        f"⚔️ Вызов на дуэль!\n\n"
+        f"{message.from_user.full_name} вызывает @{target.replace('@', '')} на дуэль!\n"
+        f"💰 Ставка: {amount} NCoin\n\n"
+        f"✅ Скоро будет доступно полноценное PvP!"
     )
