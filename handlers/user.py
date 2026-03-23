@@ -1,6 +1,6 @@
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Router, Bot
 from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION, IS_NOT_MEMBER, IS_MEMBER
 from aiogram.types import Message, ChatMemberUpdated
@@ -8,10 +8,10 @@ from aiogram.types import Message, ChatMemberUpdated
 from database.db import (
     get_welcome_message, add_user, update_user_stats,
     save_captcha, get_captcha, delete_captcha,
-    set_birthday, get_birthday, get_today_birthdays, get_user_stats
+    set_birthday, get_user_stats
 )
 from keyboards.main_menu import get_main_menu
-from handlers.admin import get_user_role, can_configure
+from handlers.roles import get_user_role, can_configure
 from utils.antispam import is_spam, is_rate_limited, is_temp_banned, add_temp_ban, add_warning, should_mute
 from utils.logger import log_user, log_attack, measure_time
 
@@ -107,7 +107,6 @@ async def cmd_help(message: Message):
 
 @router.message(Command("myrole"))
 async def show_my_role(message: Message):
-    """Показать роль пользователя в чате"""
     role = await get_user_role(message.chat.id, message.from_user.id)
     
     role_names = {
@@ -185,7 +184,6 @@ async def set_birthday_command(message: Message):
     member_status_changed=JOIN_TRANSITION
 ))
 async def on_bot_added_to_chat(event: ChatMemberUpdated):
-    """Когда бота добавляют в чат"""
     chat = event.chat
     chat_id = chat.id
     
@@ -236,7 +234,6 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
     member_status_changed=IS_NOT_MEMBER >> IS_MEMBER
 ))
 async def captcha_on_join(event: ChatMemberUpdated):
-    """Капча при входе нового пользователя"""
     user = event.new_chat_member.user
     if user.is_bot:
         return
@@ -273,14 +270,12 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
 
 @router.message()
 async def check_captcha_and_spam(message: Message):
-    """Проверка ответа на капчу и антиспам"""
     if not message.text:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Проверка капчи
     captcha = get_captcha(user_id, chat_id)
     if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
         delete_captcha(user_id, chat_id)
@@ -291,7 +286,6 @@ async def check_captcha_and_spam(message: Message):
         await message.answer("❌ **Неверный ответ.** Попробуйте еще раз. Напишите число.")
         return
     
-    # Антиспам для обычных сообщений
     spam, count = is_spam(user_id)
     if spam:
         warnings = add_warning(user_id, "спам сообщениями")
@@ -303,5 +297,4 @@ async def check_captcha_and_spam(message: Message):
             await message.answer(f"⚠️ Не флудите! Предупреждение {warnings}/3.")
         return
     
-    # Обновляем статистику
     update_user_stats(user_id, chat_id)
