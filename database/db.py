@@ -39,7 +39,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS chats (
                 chat_id INTEGER PRIMARY KEY,
                 chat_name TEXT,
-                welcome_message TEXT DEFAULT 'Добро пожаловать в чат!',
+                welcome_message TEXT,
                 language TEXT DEFAULT 'ru'
             )
         """)
@@ -84,7 +84,6 @@ def get_balance(user_id: int, chat_id: int) -> int:
 def update_balance(user_id: int, chat_id: int, delta: int):
     """Изменить баланс пользователя"""
     with get_db() as conn:
-        # Проверяем, существует ли пользователь
         exists = conn.execute(
             "SELECT 1 FROM users WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id)
@@ -112,5 +111,34 @@ def add_user(user_id: int, chat_id: int, username: str = None):
         if not exists:
             conn.execute(
                 "INSERT INTO users (user_id, chat_id, username, balance) VALUES (?, ?, ?, ?)",
-                (user_id, chat_id, username, 100)  # Бонус 100 монет новым пользователям
+                (user_id, chat_id, username, 100)  # Приветственный бонус 100 NCoin
+            )
+            print(f"✅ Новый пользователь {username} добавлен в чат {chat_id}, бонус 100 NCoin")
+
+def get_welcome_message(chat_id: int) -> str:
+    """Получить приветственное сообщение для чата"""
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT welcome_message FROM chats WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+        return result["welcome_message"] if result else None
+
+def set_chat_welcome(chat_id: int, message: str):
+    """Установить приветственное сообщение для чата"""
+    with get_db() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM chats WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+        
+        if exists:
+            conn.execute(
+                "UPDATE chats SET welcome_message = ? WHERE chat_id = ?",
+                (message, chat_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO chats (chat_id, welcome_message) VALUES (?, ?)",
+                (chat_id, message)
             )
