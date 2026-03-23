@@ -1,5 +1,5 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from handlers.admin import get_user_role
+from handlers.roles import get_user_role
 
 async def get_main_menu(chat_id: int, user_id: int):
     """Возвращает меню в зависимости от роли пользователя"""
