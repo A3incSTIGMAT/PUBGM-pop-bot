@@ -6,9 +6,9 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from config import BOT_TOKEN, ADMIN_IDS
-from handlers import admin, user, games, economy, report, instructions, callbacks
+from handlers import admin, user, games, economy, report, instructions, callbacks, roles
 from database.db import init_db
-from utils.logger import log_info, log_error, log_attack
+from utils.logger import log_info, log_attack
 from utils.antispam import cleanup_old_data
 
 # Настройка логирования
@@ -26,6 +26,7 @@ admin.bot = bot
 user.bot = bot
 report.bot = bot
 callbacks.bot = bot
+roles.set_bot(bot)  # Устанавливаем бота для модуля ролей
 
 # Инициализируем базу данных
 init_db()
