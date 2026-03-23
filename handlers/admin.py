@@ -1,31 +1,83 @@
 import asyncio
-from aiogram import Router
+from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions
 from aiogram.exceptions import TelegramAPIError
 
 from config import ADMIN_IDS
-from database.db import get_welcome_message, set_chat_welcome
+from database.db import (
+    get_welcome_message, set_chat_welcome,
+    get_log_channel, set_log_channel,
+    add_chat_moderator, remove_chat_moderator, get_chat_moderators,
+    is_chat_moderator
+)
+from keyboards.setup_menu import get_setup_menu
+from utils.logger import log_admin, log_attack
 
 router = Router()
+bot = Bot(current_bot.token)
 
-# Проверка прав админа
-async def is_admin(message: Message) -> bool:
-    # Глобальные админы из .env
-    if message.from_user.id in ADMIN_IDS:
-        return True
+# ========== ПРОВЕРКА ПРАВ ==========
+
+async def get_user_role(chat_id: int, user_id: int) -> str:
+    """
+    Определяет роль пользователя в чате.
+    Возвращает: 'global_admin', 'creator', 'admin', 'moderator', 'user'
+    """
+    # 1. Глобальный супер-админ
+    if user_id in ADMIN_IDS:
+        return 'global_admin'
     
-    # Проверка прав в чате
+    # 2. Получаем информацию о чате
     try:
-        member = await message.chat.get_member(message.from_user.id)
-        return member.status in ["administrator", "creator"]
-    except:
-        return False
+        chat = await bot.get_chat(chat_id)
+        member = await chat.get_member(user_id)
+        
+        # 3. Владелец чата (creator)
+        if member.status == 'creator':
+            return 'creator'
+        
+        # 4. Администратор чата (назначенный в Telegram)
+        if member.status == 'administrator':
+            return 'admin'
+        
+        # 5. Проверяем, есть ли роль модератора в БД
+        if is_chat_moderator(chat_id, user_id):
+            return 'moderator'
+        
+        return 'user'
+    except Exception:
+        return 'user'
 
-# /all — тегирование всех участников
+async def can_ban(chat_id: int, user_id: int) -> bool:
+    role = await get_user_role(chat_id, user_id)
+    return role in ['global_admin', 'creator', 'admin']
+
+async def can_mute(chat_id: int, user_id: int) -> bool:
+    role = await get_user_role(chat_id, user_id)
+    return role in ['global_admin', 'creator', 'admin', 'moderator']
+
+async def can_configure(chat_id: int, user_id: int) -> bool:
+    role = await get_user_role(chat_id, user_id)
+    return role in ['global_admin', 'creator', 'admin']
+
+async def can_assign_moderator(chat_id: int, user_id: int) -> bool:
+    role = await get_user_role(chat_id, user_id)
+    return role in ['global_admin', 'creator', 'admin']
+
+async def log_action(chat_id: int, action_text: str):
+    log_channel_id = get_log_channel(chat_id)
+    if log_channel_id:
+        try:
+            await bot.send_message(log_channel_id, action_text)
+        except:
+            pass
+
+# ========== КОМАНДЫ ==========
+
 @router.message(Command("all"))
 async def tag_all(message: Message):
-    if not await is_admin(message):
+    if not await can_ban(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут использовать эту команду.")
         return
     
@@ -38,20 +90,19 @@ async def tag_all(message: Message):
             members.append(mention)
     
     if members:
-        # Отправляем частями, чтобы не превысить лимит сообщения
         text = "🔔 ВНИМАНИЕ ВСЕМ!\n\n" + "\n".join(members[:50])
         await message.answer(text)
-        
         if len(members) > 50:
             await message.answer("\n".join(members[50:100]))
+        
+        await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата")
     else:
         await message.answer("❌ Не удалось получить список участников.")
 
-# /ban — забанить пользователя
 @router.message(Command("ban"))
 async def ban_user(message: Message):
-    if not await is_admin(message):
-        await message.answer("❌ Только администраторы могут использовать эту команду.")
+    if not await can_ban(message.chat.id, message.from_user.id):
+        await message.answer("❌ У вас нет прав банить пользователей.")
         return
     
     if not message.reply_to_message:
@@ -61,27 +112,27 @@ async def ban_user(message: Message):
     user = message.reply_to_message.from_user
     user_id = user.id
     user_name = user.full_name
+    admin_name = message.from_user.full_name
     
     try:
         await message.chat.ban(user_id)
         await message.answer(f"✅ Пользователь {user_name} забанен.")
+        await log_action(message.chat.id, f"🔨 {admin_name} забанил {user_name}")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
 
-# /mute — заглушить пользователя
 @router.message(Command("mute"))
 async def mute_user(message: Message):
-    if not await is_admin(message):
-        await message.answer("❌ Только администраторы могут использовать эту команду.")
+    if not await can_mute(message.chat.id, message.from_user.id):
+        await message.answer("❌ У вас нет прав мутить пользователей.")
         return
     
     if not message.reply_to_message:
         await message.answer("❌ Ответьте на сообщение пользователя, которого хотите заглушить.")
         return
     
-    # Парсим время из команды /mute 10m
     args = message.text.split()
-    duration = 10  # минут по умолчанию
+    duration = 10
     
     if len(args) > 1:
         try:
@@ -92,20 +143,21 @@ async def mute_user(message: Message):
     user = message.reply_to_message.from_user
     user_id = user.id
     user_name = user.full_name
+    admin_name = message.from_user.full_name
     
     try:
         permissions = ChatPermissions(can_send_messages=False)
         until_date = asyncio.get_event_loop().time() + duration * 60
         await message.chat.restrict(user_id, permissions, until_date=until_date)
         await message.answer(f"🔇 Пользователь {user_name} заглушен на {duration} минут.")
+        await log_action(message.chat.id, f"🔇 {admin_name} заглушил {user_name} на {duration} минут")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
 
-# Настройка приветственного сообщения для чата
 @router.message(Command("setwelcome"))
 async def set_welcome_message(message: Message):
-    if not await is_admin(message):
-        await message.answer("❌ Только администраторы могут использовать эту команду.")
+    if not await can_configure(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы чата могут настраивать приветствие.")
         return
     
     args = message.text.split(maxsplit=1)
@@ -123,8 +175,123 @@ async def set_welcome_message(message: Message):
         return
     
     welcome_text = args[1]
-    
-    # Сохраняем в базу данных
     set_chat_welcome(message.chat.id, welcome_text)
-    
     await message.answer(f"✅ Приветственное сообщение установлено:\n\n{welcome_text}")
+    await log_action(message.chat.id, f"✏️ {message.from_user.full_name} изменил приветствие чата")
+
+@router.message(Command("setlogchannel"))
+async def set_log_channel_command(message: Message):
+    if not await can_configure(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы чата могут настраивать лог-канал.")
+        return
+    
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.answer(
+            "📝 **Настройка лог-канала**\n\n"
+            "Использование: /setlogchannel @channel\n"
+            "Пример: /setlogchannel @mychannel_logs\n\n"
+            "Все действия бота (баны, муты, жалобы) будут отправляться в этот канал.\n"
+            "Бот должен быть администратором канала!"
+        )
+        return
+    
+    channel_username = args[1].replace("@", "")
+    try:
+        chat = await bot.get_chat(f"@{channel_username}")
+        set_log_channel(message.chat.id, chat.id)
+        await message.answer(f"✅ Лог-канал установлен: @{channel_username}")
+        await log_action(message.chat.id, f"📋 {message.from_user.full_name} установил лог-канал @{channel_username}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}\n\nУбедитесь, что бот добавлен в канал как администратор.")
+
+@router.message(Command("setup"))
+async def setup_bot(message: Message):
+    """Мастер настройки бота"""
+    if not await can_configure(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы могут настраивать бота.")
+        return
+    
+    chat_id = message.chat.id
+    
+    log_channel = get_log_channel(chat_id)
+    reports_enabled = log_channel is not None
+    
+    status_text = (
+        "⚙️ **Текущие настройки NEXUS**\n\n"
+        f"🛡 Анонимные репорты: {'✅ Включены' if reports_enabled else '❌ Не настроены'}\n"
+        f"📋 Лог-канал: {'✅ ' + str(log_channel) if log_channel else '❌ Не настроен'}\n\n"
+        "Выберите, что хотите настроить:"
+    )
+    
+    await message.answer(status_text, reply_markup=get_setup_menu())
+
+@router.message(Command("addmod"))
+async def add_moderator(message: Message):
+    """Назначить модератора бота"""
+    if not await can_assign_moderator(message.chat.id, message.from_user.id):
+        await message.answer("❌ У вас нет прав назначать модераторов.")
+        return
+    
+    if not message.reply_to_message:
+        await message.answer("❌ Ответьте на сообщение пользователя, которого хотите назначить модератором.")
+        return
+    
+    target_user = message.reply_to_message.from_user
+    target_id = target_user.id
+    
+    # Проверяем, не является ли пользователь уже админом Telegram
+    try:
+        chat = await bot.get_chat(message.chat.id)
+        member = await chat.get_member(target_id)
+        
+        if member.status in ['creator', 'administrator']:
+            await message.answer(f"❌ {target_user.full_name} уже является администратором Telegram.")
+            return
+    except:
+        pass
+    
+    add_chat_moderator(message.chat.id, target_id, message.from_user.id)
+    await message.answer(f"✅ {target_user.full_name} назначен модератором бота.")
+    await log_action(message.chat.id, f"👮 {message.from_user.full_name} назначил модератором {target_user.full_name}")
+
+@router.message(Command("removemod"))
+async def remove_moderator(message: Message):
+    """Удалить модератора бота"""
+    if not await can_assign_moderator(message.chat.id, message.from_user.id):
+        await message.answer("❌ У вас нет прав удалять модераторов.")
+        return
+    
+    if not message.reply_to_message:
+        await message.answer("❌ Ответьте на сообщение пользователя, которого хотите лишить прав модератора.")
+        return
+    
+    target_user = message.reply_to_message.from_user
+    target_id = target_user.id
+    
+    remove_chat_moderator(message.chat.id, target_id)
+    await message.answer(f"✅ {target_user.full_name} лишен прав модератора.")
+    await log_action(message.chat.id, f"👮 {message.from_user.full_name} лишил прав модератора {target_user.full_name}")
+
+@router.message(Command("mods"))
+async def list_moderators(message: Message):
+    """Список модераторов бота"""
+    if not await can_configure(message.chat.id, message.from_user.id):
+        await message.answer("❌ У вас нет прав просматривать список модераторов.")
+        return
+    
+    moderators = get_chat_moderators(message.chat.id)
+    
+    if not moderators:
+        await message.answer("📋 В этом чате нет назначенных модераторов.")
+        return
+    
+    mod_list = []
+    for mod in moderators:
+        username = mod['username'] or f"user_{mod['user_id']}"
+        mod_list.append(f"• {username} (назначен {mod['assigned_at'][:10]})")
+    
+    await message.answer(
+        f"👮 **Модераторы бота в этом чате:**\n\n" + "\n".join(mod_list)
+    )
