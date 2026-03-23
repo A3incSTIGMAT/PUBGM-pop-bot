@@ -1,268 +1,31 @@
-# bot.py — PUBG Popularity Battle Bot
-import sqlite3
+import asyncio
 import logging
-from datetime import date
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    CallbackQueryHandler
-)
-import hashlib
-import urllib.parse
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+from config import BOT_TOKEN
+from handlers import admin, user, games, economy
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Подключаем настройки
-try:
-    from config import BOT_TOKEN, MERCHANT_ID, SECRET_1, SECRET_2
-except ImportError:
-    logger.error("❌ Не найден config.py — используй config.example.py как образец")
-    exit()
+# Создаем бота и диспетчер
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
 
-# Проверка токена
-if not BOT_TOKEN:
-    logger.error("❌ Не задан BOT_TOKEN в config.py")
-    exit()
+# Регистрируем обработчики
+dp.include_router(admin.router)
+dp.include_router(user.router)
+dp.include_router(games.router)
+dp.include_router(economy.router)
 
-# Имя базы
-DB_NAME = "users.db"
-
-def get_db():
-    return sqlite3.connect(DB_NAME)
-
-def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            popular_points INTEGER DEFAULT 0,
-            referrer_id INTEGER
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS daily_rewards (
-            user_id INTEGER PRIMARY KEY,
-            last_chicken DATE,
-            last_motorcycle DATE
-        )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("✅ База данных инициализирована")
-
-def get_or_create_user(user_id, username, referrer_id=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
-    if not cursor.fetchone():
-        cursor.execute(
-            "INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?)",
-            (user_id, username, referrer_id)
-        )
-        # Награда за приглашённого — 1000 очков
-        if referrer_id:
-            cursor.execute(
-                "UPDATE users SET popular_points = popular_points + 1000 WHERE user_id = ?",
-                (referrer_id,)
-            )
-    conn.commit()
-    conn.close()
-
-def add_points(user_id, points):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE users SET popular_points = popular_points + ? WHERE user_id = ?",
-        (points, user_id)
-    )
-    conn.commit()
-    conn.close()
-
-def get_points(user_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT popular_points FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def get_last_rewards(user_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT last_chicken, last_motorcycle FROM daily_rewards WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {"chicken": row[0], "motorcycle": row[1]}
-    return {"chicken": None, "motorcycle": None}
-
-def update_last_reward(user_id, reward_type):
-    today = date.today().isoformat()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO daily_rewards (user_id, last_chicken, last_motorcycle)
-        VALUES (?, 
-                CASE WHEN ? = 'chicken' THEN ? ELSE COALESCE((SELECT last_chicken FROM daily_rewards WHERE user_id = ?), NULL) END,
-                CASE WHEN ? = 'motorcycle' THEN ? ELSE COALESCE((SELECT last_motorcycle FROM daily_rewards WHERE user_id = ?), NULL) END
-        )
-    """, (user_id, reward_type, today, user_id, reward_type, today, user_id))
-    conn.commit()
-    conn.close()
-
-# === ОБРАБОТЧИКИ ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    referrer_id = None
-    if context.args and context.args[0].startswith("ref_"):
-        try:
-            referrer_id = int(context.args[0].split("_")[1])
-            if referrer_id == user.id:
-                referrer_id = None
-        except:
-            referrer_id = None
-
-    get_or_create_user(user.id, user.username, referrer_id)
-
-    keyboard = [
-        [InlineKeyboardButton("📊 Моя популярность", callback_data="popular")],
-        [InlineKeyboardButton("🎁 Ежедневные награды", callback_data="daily")],
-        [InlineKeyboardButton("📨 Рефералы", callback_data="ref")],
-        [InlineKeyboardButton("🛒 Магазин", callback_data="shop")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"🎮 Привет, {user.first_name}! Добро пожаловать в битву популярности!",
-        reply_markup=reply_markup
-    )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "popular":
-        points = get_points(user_id)
-        await query.edit_message_text(f"🌟 Ваша популярность: {points} очков")
-
-    elif query.data == "daily":
-        status = get_last_rewards(user_id)
-        today = date.today().isoformat()
-        buttons = []
-        if status["chicken"] != today:
-            buttons.append(InlineKeyboardButton("🍗 Получить курицу (+10)", callback_data="get_chicken"))
-        if status["motorcycle"] != today:
-            buttons.append(InlineKeyboardButton("🏍 Получить мотоцикл (+200)", callback_data="get_motorcycle"))
-        if not buttons:
-            await query.edit_message_text("⏳ Вы уже получили все награды сегодня.")
-            return
-        reply_markup = InlineKeyboardMarkup([buttons])
-        await query.edit_message_text("🎁 Ежедневные награды:", reply_markup=reply_markup)
-
-    elif query.data == "get_chicken":
-        update_last_reward(user_id, "chicken")
-        add_points(user_id, 10)
-        await query.edit_message_text("✅ Вы получили курицу! +10 популярности")
-
-    elif query.data == "get_motorcycle":
-        update_last_reward(user_id, "motorcycle")
-        add_points(user_id, 200)
-        await query.edit_message_text("✅ Вы получили мотоцикл! +200 популярности")
-
-    elif query.data == "ref":
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
-        count = cursor.fetchone()[0]
-        ref_link = f"https://t.me/PUBGPopBattleBot?start=ref_{user_id}"
-        await query.edit_message_text(
-            f"👥 Вы пригласили: {count} человек\n"
-            f"🔗 Ваша реферальная ссылка:\n{ref_link}\n"
-            f"🎁 Получаете 1000 очков за каждого приглашённого!"
-        )
-
-    elif query.data == "shop":
-        shop_text = """
-🛒 **Магазин подарков:**
-- 🏍 Мотоцикл: 10₽ → 200 очков
-- 🏵 Слиток золота: 20₽ → 800 очков
-- 🚗 Машинка: 50₽ → 2000 очков
-- 💰 Денежная пушка: 70₽ → 3000 очков
-- 💋 Воздушный поцелуй: 90₽ → 4000 очков
-- 🏆 Кубок победителя: 120₽ → 6000 очков
-- ✈️ Самолет: 500₽ → 25000 очков
-- 🎈 Дирежабль: 750₽ → 50000 очков
-- 🚁 Вертолет: 1500₽ → 125000 очков
-- 🛩 Частный самолет: 3000₽ → 300000 очков
-"""
-        keyboard = [
-            [InlineKeyboardButton("🏍 Мотоцикл (10₽)", callback_data="buy_motorcycle")],
-            [InlineKeyboardButton("🏵 Слиток золота (20₽)", callback_data="buy_gold")],
-            [InlineKeyboardButton("🚗 Машинка (50₽)", callback_data="buy_car")],
-            [InlineKeyboardButton("💰 Денежная пушка (70₽)", callback_data="buy_money_gun")],
-            [InlineKeyboardButton("💋 Воздушный поцелуй (90₽)", callback_data="buy_kiss")],
-            [InlineKeyboardButton("🏆 Кубок победителя (120₽)", callback_data="buy_trophy")],
-            [InlineKeyboardButton("✈️ Самолет (500₽)", callback_data="buy_plane")],
-            [InlineKeyboardButton("🎈 Дирежабль (750₽)", callback_data="buy_blimp")],
-            [InlineKeyboardButton("🚁 Вертолет (1500₽)", callback_data="buy_helicopter")],
-            [InlineKeyboardButton("🛩 Частный самолет (3000₽)", callback_data="buy_private_jet")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(shop_text, reply_markup=reply_markup, parse_mode="Markdown")
-
-    elif query.data.startswith("buy_"):
-        item = query.data.split("_")[1]
-        prices = {
-            "motorcycle": 10,
-            "gold": 20,
-            "car": 50,
-            "money_gun": 70,
-            "kiss": 90,
-            "trophy": 120,
-            "plane": 500,
-            "blimp": 750,
-            "helicopter": 1500,
-            "private_jet": 3000
-        }
-        points_map = {
-            "motorcycle": 200,
-            "gold": 800,
-            "car": 2000,
-            "money_gun": 3000,
-            "kiss": 4000,
-            "trophy": 6000,
-            "plane": 25000,
-            "blimp": 50000,
-            "helicopter": 125000,
-            "private_jet": 300000
-        }
-        if item in prices:
-            price = prices[item]
-            payload = f"{user_id}_{item}"
-            sign = hashlib.md5(f"{MERCHANT_ID}:{price}:{SECRET_1}:{payload}".encode()).hexdigest()
-            url = f"https://free-kassa.ru/merchant/cash.php?m={MERCHANT_ID}&oa={price}&o={payload}&s={sign}&lang=ru"
-            keyboard = [[InlineKeyboardButton("💳 Оплатить", url=url)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                f"Оплатите {price}₽ за {item}\n"
-                "После оплаты очки будут начислены автоматически.",
-                reply_markup=reply_markup
-            )
-
-# === ЗАПУСК ===
-def main():
-    init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("✅ Бот запущен и работает!")
-    app.run_polling()
+async def main():
+    print("🤖 NEXUS-bot запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
