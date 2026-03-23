@@ -1,19 +1,7 @@
-# Секреты
-config.py
-
-# База данных
-users.db
-*.db
-
-# Логи
-*.log
-nohup.out
-
-# Кэш Python
+.env
 __pycache__/
 *.pyc
-*.pyo
-
-# Виртуальное окружение
-venv/
-env/
+*.db
+*.sqlite
+data/
+.DS_Store
