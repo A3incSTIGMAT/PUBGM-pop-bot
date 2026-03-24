@@ -7,5 +7,5 @@ from . import report
 from . import instructions
 from . import callbacks
 from . import roles
-from . import birthday_handler
-from . import games_interactive  # ← ДОБАВИТЬ
+from . import birthday_calendar  # ← ЗАМЕНЯЕМ birthday_handler на birthday_calendar
+from . import games_interactive
