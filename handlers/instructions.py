@@ -1,8 +1,12 @@
+"""
+Руководство для администраторов NEXUS бота.
+"""
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from handlers.admin import get_user_role, can_configure
+from handlers.roles import get_user_role, can_configure
 
 router = Router()
 
