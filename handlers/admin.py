@@ -4,7 +4,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions
 from aiogram.exceptions import TelegramAPIError
 
-from config import ADMIN_IDS
 from database.db import (
     get_welcome_message, set_chat_welcome,
     get_log_channel, set_log_channel,
