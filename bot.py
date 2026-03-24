@@ -26,6 +26,8 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
+print("✅ Бот создан")
+
 # ========== ПЕРЕДАЧА БОТА ВО ВСЕ МОДУЛИ ==========
 admin.set_bot(bot)
 user.set_bot(bot)
@@ -33,11 +35,15 @@ report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 
+print("✅ Бот передан во все модули")
+
 # ========== СОЗДАНИЕ ДИСПЕТЧЕРА ==========
 dp = Dispatcher()
+print("✅ Диспетчер создан")
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 init_db()
+print("✅ База данных инициализирована")
 
 # ========== РЕГИСТРАЦИЯ ВСЕХ РОУТЕРОВ ==========
 dp.include_router(admin.router)
@@ -48,20 +54,26 @@ dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
-# ========== ПРОВЕРКА РЕГИСТРАЦИИ ==========
-print("✅ Зарегистрированы роутеры:")
-print(f"   - admin: {admin.router}")
-print(f"   - user: {user.router}")
-print(f"   - games: {games.router}")
-print(f"   - economy: {economy.router}")
-print(f"   - report: {report.router}")
-print(f"   - instructions: {instructions.router}")
-print(f"   - callbacks: {callbacks.router}")
+print("✅ Все роутеры зарегистрированы")
+print(f"   - economy router: {economy.router}")
+print(f"   - games router: {games.router}")
+
+# ========== ПРОВЕРКА ОБРАБОТЧИКОВ ==========
+print("\n📋 Проверка обработчиков economy.py:")
+for handler in economy.router.message_handlers:
+    if hasattr(handler, 'commands'):
+        print(f"   - Команда: /{handler.commands[0]}")
+
+print("\n📋 Проверка обработчиков games.py:")
+for handler in games.router.message_handlers:
+    if hasattr(handler, 'commands'):
+        print(f"   - Команда: /{handler.commands[0]}")
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
-    print("🤖 NEXUS-bot запущен!")
+    print("\n🤖 NEXUS-bot запущен!")
     print("📋 Доступные команды: /start, /help, /balance, /daily, /rps, /roulette, /stats, /myrole, /gift, /top")
+    print("⏳ Ожидание сообщений...\n")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
