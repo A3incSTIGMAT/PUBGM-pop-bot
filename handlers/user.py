@@ -24,7 +24,6 @@ def set_bot(bot_instance: Bot):
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 
 @router.message(Command("start"))
-@measure_time
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -56,15 +55,14 @@ async def cmd_start(message: Message):
         "/setlogchannel — установить лог-канал\n"
         "/setup — мастер настройки"
     )
-    add_user(message.from_user.id, message.chat.id, message.from_user.username)
+    add_user(user_id, chat_id, message.from_user.username)
     log_user(message.from_user.full_name, "/start")
 
 @router.message(Command("help"))
-@measure_time
 async def cmd_help(message: Message):
     banned, wait_time = is_temp_banned(message.from_user.id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} сек.")
+        await message.answer(f"❌ Вы временно заблокированы.")
         return
     
     await message.answer(
@@ -90,12 +88,10 @@ async def cmd_help(message: Message):
         "/removemod — удалить модератора (ответом)\n"
         "/mods — список модераторов\n\n"
         "🎮 Игры:\n"
-        "/duel — дуэль\n"
         "/rps — камень-ножницы-бумага\n"
         "/roulette — рулетка\n\n"
         "💰 Экономика:\n"
-        "/top — топ богачей\n"
-        "/shop — магазин подарков"
+        "/top — топ богачей"
     )
     log_user(message.from_user.full_name, "/help")
 
@@ -112,15 +108,14 @@ async def show_my_role(message: Message):
     }
     
     role_text = role_names.get(role, '👤 Обычный участник')
-    await message.answer(f"**Ваша роль:**\n\n{role_text}")
+    await message.answer(f"**Ваша роль:** {role_text}")
 
 @router.message(Command("stats"))
-@measure_time
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
     banned, wait_time = is_temp_banned(user_id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} сек.")
+        await message.answer(f"❌ Вы временно заблокированы.")
         return
     
     stats = get_user_stats(user_id, message.chat.id)
@@ -139,7 +134,6 @@ async def cmd_stats(message: Message):
     log_user(message.from_user.full_name, "/stats")
 
 @router.message(Command("setbirthday"))
-@measure_time
 async def set_birthday_command(message: Message):
     user_id = message.from_user.id
     banned, wait_time = is_temp_banned(user_id)
@@ -163,7 +157,7 @@ async def set_birthday_command(message: Message):
         await message.answer("❌ Неверный формат. Используйте ДД.ММ")
         return
     
-    set_birthday(message.from_user.id, message.chat.id, birthday)
+    set_birthday(user_id, message.chat.id, birthday)
     await message.answer(f"✅ День рождения {birthday} сохранен!")
 
 # ========== ПРИВЕТСТВИЕ ПРИ ДОБАВЛЕНИИ БОТА ==========
@@ -175,39 +169,17 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
     chat = event.chat
     chat_id = chat.id
     
-    try:
-        bot_member = await chat.get_member(bot.id)
-        has_admin_rights = bot_member.status == "administrator"
-    except:
-        has_admin_rights = False
-    
     welcome_text = (
         f"🤖 **NEXUS Chat Manager**\n\n"
         f"Привет! Я мощный чат-менеджер с защитой приватности.\n\n"
         f"🛡 **Ключевая фишка — Анонимные репорты**\n"
-        f"Участники могут сообщать о нарушениях, не раскрывая себя.\n"
-    )
-    
-    if not has_admin_rights:
-        welcome_text += (
-            f"\n⚠️ **Важно!** У меня нет прав администратора.\n"
-            f"Назначьте меня администратором в настройках чата!\n"
-        )
-    
-    welcome_text += (
-        f"\n🔧 **Быстрая настройка:** /setup\n"
+        f"Участники могут сообщать о нарушениях, не раскрывая себя.\n\n"
+        f"🔧 **Быстрая настройка:** /setup\n"
         f"📖 **Справка:** /help\n\n"
         f"🚀 Готов сделать ваш чат безопаснее!"
     )
     
     await event.answer(welcome_text)
-    
-    from keyboards.setup_menu import get_setup_menu
-    await bot.send_message(
-        chat_id,
-        "⚙️ **Для настройки анонимных репортов нажмите кнопку ниже:**",
-        reply_markup=get_setup_menu()
-    )
     add_user(chat_id, chat_id, chat.title)
 
 # ========== КАПЧА ==========
@@ -254,6 +226,7 @@ async def check_captcha_and_spam(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
+    # Проверка капчи
     captcha = get_captcha(user_id, chat_id)
     if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
         delete_captcha(user_id, chat_id)
