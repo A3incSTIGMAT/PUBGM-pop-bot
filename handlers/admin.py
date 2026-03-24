@@ -4,7 +4,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions
 from aiogram.exceptions import TelegramAPIError
 
-from config import ADMIN_IDS
 from database.db import (
     get_welcome_message, set_chat_welcome,
     get_log_channel, set_log_channel,
@@ -18,7 +17,6 @@ router = Router()
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
-    """Установить экземпляр бота"""
     global bot
     bot = bot_instance
 
@@ -51,7 +49,6 @@ async def tag_all(message: Message):
         await message.answer(text)
         if len(members) > 50:
             await message.answer("\n".join(members[50:100]))
-        
         await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата")
     else:
         await message.answer("❌ Не удалось получить список участников.")
@@ -150,7 +147,7 @@ async def set_log_channel_command(message: Message):
             "📝 **Настройка лог-канала**\n\n"
             "Использование: /setlogchannel @channel\n"
             "Пример: /setlogchannel @mychannel_logs\n\n"
-            "Все действия бота (баны, муты, жалобы) будут отправляться в этот канал.\n"
+            "Все действия бота будут отправляться в этот канал.\n"
             "Бот должен быть администратором канала!"
         )
         return
