@@ -11,12 +11,17 @@ from database.db import (
     set_birthday, get_user_stats
 )
 from keyboards.main_menu import get_main_menu
-from handlers.roles import get_user_role, can_configure
+from handlers.roles import get_user_role
 from utils.antispam import is_spam, is_rate_limited, is_temp_banned, add_temp_ban, add_warning, should_mute
 from utils.logger import log_user, log_attack, measure_time
 
 router = Router()
-bot = Bot(current_bot.token)
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    """Установить экземпляр бота"""
+    global bot
+    bot = bot_instance
 
 # ========== КОМАНДЫ ==========
 
@@ -178,12 +183,13 @@ async def set_birthday_command(message: Message):
     await message.answer(f"✅ День рождения {birthday} сохранен! Я поздравлю вас в этот день!")
     log_user(message.from_user.full_name, f"/setbirthday {birthday}")
 
-# ========== ПРИВЕТСТВИЯ ==========
+# ========== ПРИВЕТСТВИЕ ПРИ ДОБАВЛЕНИИ БОТА ==========
 
 @router.my_chat_member(ChatMemberUpdatedFilter(
     member_status_changed=JOIN_TRANSITION
 ))
 async def on_bot_added_to_chat(event: ChatMemberUpdated):
+    """Когда бота добавляют в чат"""
     chat = event.chat
     chat_id = chat.id
     
@@ -228,12 +234,45 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
     
     add_user(chat_id, chat_id, chat.title)
 
+# ========== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ==========
+
+@router.chat_member(ChatMemberUpdatedFilter(
+    member_status_changed=IS_NOT_MEMBER >> IS_MEMBER
+))
+async def on_user_join(event: ChatMemberUpdated):
+    """Когда новый пользователь заходит в чат (без капчи, только приветствие)"""
+    user = event.new_chat_member.user
+    if user.is_bot:
+        return
+    
+    chat_id = event.chat.id
+    
+    welcome_template = get_welcome_message(chat_id)
+    
+    if welcome_template:
+        welcome_text = welcome_template.format(
+            user=user.full_name,
+            chat=event.chat.title or "этот чат"
+        )
+    else:
+        welcome_text = (
+            f"👋 Добро пожаловать, {user.full_name}!\n\n"
+            f"📌 Я NEXUS — чат-менеджер.\n"
+            f"/help — помощь\n"
+            f"/balance — баланс NCoin\n"
+            f"/daily — бонус каждый день!\n\n"
+            f"🎮 Игры: /rps /roulette"
+        )
+    
+    await event.answer(welcome_text)
+
 # ========== КАПЧА ==========
 
 @router.chat_member(ChatMemberUpdatedFilter(
     member_status_changed=IS_NOT_MEMBER >> IS_MEMBER
 ))
 async def captcha_on_join(event: ChatMemberUpdated):
+    """Капча при входе нового пользователя (срабатывает до приветствия)"""
     user = event.new_chat_member.user
     if user.is_bot:
         return
@@ -268,14 +307,18 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
         except Exception as e:
             print(f"Ошибка при кике: {e}")
 
+# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+
 @router.message()
 async def check_captcha_and_spam(message: Message):
+    """Проверка ответа на капчу и антиспам"""
     if not message.text:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
+    # Проверка капчи
     captcha = get_captcha(user_id, chat_id)
     if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
         delete_captcha(user_id, chat_id)
@@ -286,6 +329,7 @@ async def check_captcha_and_spam(message: Message):
         await message.answer("❌ **Неверный ответ.** Попробуйте еще раз. Напишите число.")
         return
     
+    # Антиспам для обычных сообщений
     spam, count = is_spam(user_id)
     if spam:
         warnings = add_warning(user_id, "спам сообщениями")
@@ -297,4 +341,5 @@ async def check_captcha_and_spam(message: Message):
             await message.answer(f"⚠️ Не флудите! Предупреждение {warnings}/3.")
         return
     
+    # Обновляем статистику сообщений
     update_user_stats(user_id, chat_id)
