@@ -35,10 +35,17 @@ def init_db():
                 vip_until INTEGER DEFAULT 0,
                 birthday TEXT,
                 reputation INTEGER DEFAULT 0,
-                last_bonus TEXT,
                 PRIMARY KEY (user_id, chat_id)
             )
         """)
+        
+        # Добавляем колонку last_bonus, если её нет
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN last_bonus TEXT")
+            print("✅ Добавлена колонка last_bonus")
+        except sqlite3.OperationalError:
+            # Колонка уже существует
+            pass
         
         # Таблица чатов
         conn.execute("""
