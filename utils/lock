@@ -1,12 +1,15 @@
 """
 Модуль для защиты от дублирующихся процессов.
 Использует файл-блокировку (lockfile).
+НЕ ЗАВИСИТ ОТ ДРУГИХ МОДУЛЕЙ utils.
 """
 
 import os
 import sys
 import fcntl
 import atexit
+import time
+import signal
 
 LOCK_FILE = "/tmp/nexus_bot.lock"
 lock_fd = None
@@ -54,7 +57,8 @@ def release_lock():
             pass
         
         try:
-            os.remove(LOCK_FILE)
+            if os.path.exists(LOCK_FILE):
+                os.remove(LOCK_FILE)
         except:
             pass
 
@@ -65,27 +69,32 @@ def kill_other_processes():
     """
     try:
         # Читаем PID из файла блокировки
+        if not os.path.exists(LOCK_FILE):
+            return
+            
         with open(LOCK_FILE, 'r') as f:
-            old_pid = int(f.read().strip())
+            content = f.read().strip()
+            if not content:
+                return
+            old_pid = int(content)
         
         # Проверяем, существует ли процесс с таким PID
         try:
             os.kill(old_pid, 0)  # Проверка существования
             # Процесс существует — убиваем его
-            import signal
             os.kill(old_pid, signal.SIGTERM)
             print(f"🔪 Убит старый процесс бота (PID: {old_pid})")
-            import time
             time.sleep(2)  # Ждём завершения
         except OSError:
             # Процесс не существует — просто удаляем блокировку
             pass
         
         # Удаляем старый файл блокировки
-        os.remove(LOCK_FILE)
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
         
-    except (FileNotFoundError, ValueError):
-        # Файла блокировки нет — ничего не делаем
+    except (FileNotFoundError, ValueError, OSError) as e:
+        # Файла блокировки нет или ошибка — ничего не делаем
         pass
     except Exception as e:
         print(f"⚠️ Ошибка при очистке старых процессов: {e}")
