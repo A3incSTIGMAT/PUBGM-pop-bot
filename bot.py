@@ -6,7 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from config import BOT_TOKEN
-from handlers import admin, user, games, economy, balance_handler, report, instructions, callbacks, roles
+from handlers import admin, user, games, economy, balance_handler, report, instructions, callbacks, roles, birthday_handler
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -32,26 +32,22 @@ roles.set_bot(bot)
 dp = Dispatcher()
 init_db()
 
-# ========== ВАЖНО: ПОРЯДОК РЕГИСТРАЦИИ ==========
-# Сначала регистрируем команды (чтобы они имели приоритет)
-dp.include_router(economy.router)      # /balance, /daily, /gift, /top
-dp.include_router(games.router)        # /rps, /roulette
-# Потом регистрируем user (в нём есть универсальный обработчик)
-dp.include_router(user.router)         # /start, /help, /stats, /myrole, универсальный
-# Затем остальные
+# Регистрация роутеров
+dp.include_router(economy.router)
+dp.include_router(games.router)
+dp.include_router(birthday_handler.router)  # ← НОВЫЙ
+dp.include_router(user.router)
 dp.include_router(admin.router)
 dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
 print("✅ Все роутеры зарегистрированы")
-print(f"   - economy router: {economy.router}")
-print(f"   - games router: {games.router}")
-print(f"   - user router: {user.router}")
+print(f"   - birthday_handler: {birthday_handler.router}")
 
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
-    print("📋 Команды: /balance, /daily, /rps, /roulette, /start, /stats")
+    print("📋 Команды: /start, /help, /balance, /daily, /rps, /roulette, /setbirthday")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
