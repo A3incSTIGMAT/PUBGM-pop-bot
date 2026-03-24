@@ -1,13 +1,11 @@
 """
 Модуль для работы с ролями пользователей.
-Вынесен отдельно для избежания циклических импортов.
 """
 
 from aiogram import Bot
 from config import ADMIN_IDS
 from database.db import is_chat_moderator
 
-# Глобальная переменная для бота (устанавливается в bot.py)
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
@@ -16,28 +14,17 @@ def set_bot(bot_instance: Bot):
     bot = bot_instance
 
 async def get_user_role(chat_id: int, user_id: int) -> str:
-    """
-    Определяет роль пользователя в чате.
-    Возвращает: 'global_admin', 'creator', 'admin', 'moderator', 'user'
-    """
-    # 1. Глобальный супер-админ
     if user_id in ADMIN_IDS:
         return 'global_admin'
     
-    # 2. Получаем информацию о чате
     try:
         chat = await bot.get_chat(chat_id)
         member = await chat.get_member(user_id)
         
-        # 3. Владелец чата (creator)
         if member.status == 'creator':
             return 'creator'
-        
-        # 4. Администратор чата (назначенный в Telegram)
         if member.status == 'administrator':
             return 'admin'
-        
-        # 5. Проверяем, есть ли роль модератора в БД
         if is_chat_moderator(chat_id, user_id):
             return 'moderator'
         
