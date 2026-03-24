@@ -37,71 +37,111 @@ async def tag_all(message: Message):
         await message.answer("❌ Только администраторы могут использовать эту команду.")
         return
     
-    # Проверяем тип чата
-    chat_type = message.chat.type
+    chat = message.chat
+    chat_type = chat.type
     
-    # Для обычных групп
+    # ========== ПРОВЕРКА ТИПА ЧАТА ==========
     if chat_type == "group":
         await message.answer(
-            "⚠️ **Внимание!**\n\n"
-            "Это обычная группа. Для работы команды /all необходимо:\n\n"
-            "1️⃣ Преобразовать группу в **супергруппу**\n"
-            "   (нажмите на название группы → Информация → Преобразовать)\n\n"
-            "2️⃣ Дать боту права **администратора**\n\n"
+            "⚠️ **Это обычная группа.**\n\n"
+            "Для работы команды /all необходимо:\n\n"
+            "1️⃣ **Преобразовать группу в супергруппу**\n"
+            "   Нажмите на название группы → Информация → Преобразовать\n\n"
+            "2️⃣ **Назначить бота администратором**\n"
+            "   Дайте права: `can_restrict_members` и `can_manage_chat`\n\n"
             "После этого команда заработает."
         )
         return
     
-    # Для супергрупп и каналов
+    # ========== ПРОВЕРКА ПРАВ БОТА ==========
     try:
-        # Проверяем права бота
-        bot_member = await message.chat.get_member(bot.id)
+        bot_member = await chat.get_member(bot.id)
         if bot_member.status not in ['administrator', 'creator']:
             await message.answer(
-                "❌ **Бот не является администратором!**\n\n"
+                "❌ **Бот не является администратором чата!**\n\n"
                 "Для работы /all необходимо:\n"
-                "1. Назначить бота администратором чата\n"
-                "2. Включить права: `can_restrict_members` и `can_manage_chat`"
+                "1. Назначить бота администратором\n"
+                "2. Включить права:\n"
+                "   • `can_restrict_members` — для банов и мутов\n"
+                "   • `can_manage_chat` — для просмотра участников\n\n"
+                "После этого повторите команду."
             )
             return
         
-        status_msg = await message.answer("🔄 Получаю список участников...")
+        # Проверяем наличие прав
+        if bot_member.status == 'administrator':
+            if not bot_member.can_restrict_members or not bot_member.can_manage_chat:
+                await message.answer(
+                    "⚠️ **У бота недостаточно прав!**\n\n"
+                    "Включите права:\n"
+                    f"• `can_restrict_members`: {'✅' if bot_member.can_restrict_members else '❌'}\n"
+                    f"• `can_manage_chat`: {'✅' if bot_member.can_manage_chat else '❌'}\n\n"
+                    "Настройте права в управлении группой."
+                )
+                return
         
-        members = []
-        async for member in message.chat.get_chat_members():
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при проверке прав: {e}")
+        return
+    
+    # ========== ПОЛУЧЕНИЕ УЧАСТНИКОВ ==========
+    status_msg = await message.answer("🔄 Получаю список участников...")
+    
+    members = []
+    count = 0
+    
+    try:
+        async for member in chat.get_chat_members():
             if not member.user.is_bot:
-                mention = f"@{member.user.username}" if member.user.username else member.user.full_name
+                if member.user.username:
+                    mention = f"@{member.user.username}"
+                else:
+                    mention = member.user.full_name
                 members.append(mention)
+                count += 1
+                
+                if count % 50 == 0:
+                    try:
+                        await status_msg.edit_text(f"🔄 Получаю список участников... ({count} найдено)")
+                    except:
+                        pass
         
         await status_msg.delete()
         
-        if members:
-            total = len(members)
-            await message.answer(f"👥 **{total} участников** в чате. Отправляю список...")
-            
-            # Отправляем всех участников (разбиваем на части по 50)
-            text = "🔔 **ВНИМАНИЕ ВСЕМ!**\n\n" + "\n".join(members[:50])
+        if not members:
+            await message.answer(
+                "❌ **Не удалось получить список участников.**\n\n"
+                "Возможные причины:\n"
+                "• В чате нет других участников\n"
+                "• Бот не имеет прав на просмотр участников\n"
+                "• Чат слишком большой"
+            )
+            return
+        
+        total = len(members)
+        await message.answer(f"👥 **Найдено {total} участников.** Отправляю список...")
+        
+        # Отправляем всех участников (разбиваем на части по 50)
+        for i in range(0, total, 50):
+            chunk = members[i:i+50]
+            text = f"🔔 **УЧАСТНИКИ** ({i+1}-{min(i+50, total)} из {total}):\n\n" + "\n".join(chunk)
             await message.answer(text)
-            
-            if total > 50:
-                for i in range(50, total, 50):
-                    await message.answer("\n".join(members[i:i+50]))
-            
-            await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата ({total} чел)")
-        else:
-            await message.answer("❌ Не удалось получить список участников.")
-            
+        
+        await log_action(chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата ({total} чел)")
+        
     except Exception as e:
         error_msg = str(e)
-        if "Chat not found" in error_msg:
-            await message.answer("❌ Ошибка: чат не найден или бот не имеет доступа.")
-        elif "Forbidden" in error_msg:
-            await message.answer("❌ Ошибка: недостаточно прав. Убедитесь, что бот является администратором.")
-        else:
-            await message.answer(f"❌ Ошибка: {error_msg[:200]}")
+        await message.answer(
+            f"❌ **Ошибка:** {error_msg[:200]}\n\n"
+            f"Попробуйте:\n"
+            f"• Убедиться, что бот администратор\n"
+            f"• Преобразовать группу в супергруппу\n"
+            f"• Проверить права бота в настройках группы"
+        )
 
 @router.message(Command("ban"))
 async def ban_user(message: Message):
+    """Забанить пользователя"""
     if not await can_ban(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав банить пользователей.")
         return
@@ -124,6 +164,7 @@ async def ban_user(message: Message):
 
 @router.message(Command("mute"))
 async def mute_user(message: Message):
+    """Заглушить пользователя на время"""
     if not await can_mute(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав мутить пользователей.")
         return
@@ -157,6 +198,7 @@ async def mute_user(message: Message):
 
 @router.message(Command("setwelcome"))
 async def set_welcome_message(message: Message):
+    """Настроить приветственное сообщение для новых участников"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать приветствие.")
         return
@@ -169,7 +211,8 @@ async def set_welcome_message(message: Message):
             f"📝 **Настройка приветствия**\n\n"
             f"Использование: /setwelcome [текст]\n\n"
             f"Переменные: {{user}} — имя, {{chat}} — название чата\n\n"
-            f"Текущее: {current or 'не установлено'}"
+            f"Пример: /setwelcome Добро пожаловать, {{user}}! Рады видеть в {{chat}}!\n\n"
+            f"Текущее приветствие: {current or 'не установлено'}"
         )
         return
     
@@ -180,6 +223,7 @@ async def set_welcome_message(message: Message):
 
 @router.message(Command("setlogchannel"))
 async def set_log_channel_command(message: Message):
+    """Установить канал для логов и жалоб"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать лог-канал.")
         return
@@ -190,6 +234,7 @@ async def set_log_channel_command(message: Message):
             "📝 **Настройка лог-канала**\n\n"
             "Использование: /setlogchannel @channel\n"
             "Пример: /setlogchannel @mychannel_logs\n\n"
+            "Все действия бота (баны, муты, жалобы) будут отправляться в этот канал.\n"
             "Бот должен быть администратором канала!"
         )
         return
@@ -201,10 +246,11 @@ async def set_log_channel_command(message: Message):
         await message.answer(f"✅ Лог-канал установлен: @{channel_username}")
         await log_action(message.chat.id, f"📋 {message.from_user.full_name} установил лог-канал")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}\n\nУбедитесь, что бот добавлен в канал как администратор.")
 
 @router.message(Command("setup"))
 async def setup_bot(message: Message):
+    """Мастер настройки бота"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать бота.")
         return
@@ -223,6 +269,7 @@ async def setup_bot(message: Message):
 
 @router.message(Command("addmod"))
 async def add_moderator(message: Message):
+    """Назначить модератора бота"""
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав назначать модераторов.")
         return
@@ -232,12 +279,25 @@ async def add_moderator(message: Message):
         return
     
     target_user = message.reply_to_message.from_user
-    add_chat_moderator(message.chat.id, target_user.id, message.from_user.id)
-    await message.answer(f"✅ {target_user.full_name} назначен модератором.")
+    target_id = target_user.id
+    
+    # Проверяем, не является ли пользователь уже админом
+    try:
+        chat = await bot.get_chat(message.chat.id)
+        member = await chat.get_member(target_id)
+        if member.status in ['creator', 'administrator']:
+            await message.answer(f"❌ {target_user.full_name} уже является администратором Telegram.")
+            return
+    except:
+        pass
+    
+    add_chat_moderator(message.chat.id, target_id, message.from_user.id)
+    await message.answer(f"✅ {target_user.full_name} назначен модератором бота.")
     await log_action(message.chat.id, f"👮 {message.from_user.full_name} назначил модератора {target_user.full_name}")
 
 @router.message(Command("removemod"))
 async def remove_moderator(message: Message):
+    """Удалить модератора бота"""
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав удалять модераторов.")
         return
@@ -247,12 +307,15 @@ async def remove_moderator(message: Message):
         return
     
     target_user = message.reply_to_message.from_user
-    remove_chat_moderator(message.chat.id, target_user.id)
+    target_id = target_user.id
+    
+    remove_chat_moderator(message.chat.id, target_id)
     await message.answer(f"✅ {target_user.full_name} лишен прав модератора.")
     await log_action(message.chat.id, f"👮 {message.from_user.full_name} лишил прав модератора {target_user.full_name}")
 
 @router.message(Command("mods"))
 async def list_moderators(message: Message):
+    """Список модераторов бота"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав просматривать список модераторов.")
         return
@@ -268,4 +331,4 @@ async def list_moderators(message: Message):
         username = mod['username'] or f"user_{mod['user_id']}"
         mod_list.append(f"• {username} (назначен {mod['assigned_at'][:10]})")
     
-    await message.answer(f"👮 **Модераторы:**\n\n" + "\n".join(mod_list))
+    await message.answer(f"👮 **Модераторы бота:**\n\n" + "\n".join(mod_list))
