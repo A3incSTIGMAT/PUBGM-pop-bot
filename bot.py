@@ -58,17 +58,6 @@ print("✅ Все роутеры зарегистрированы")
 print(f"   - economy router: {economy.router}")
 print(f"   - games router: {games.router}")
 
-# ========== ПРОВЕРКА ОБРАБОТЧИКОВ ==========
-print("\n📋 Проверка обработчиков economy.py:")
-for handler in economy.router.message_handlers:
-    if hasattr(handler, 'commands'):
-        print(f"   - Команда: /{handler.commands[0]}")
-
-print("\n📋 Проверка обработчиков games.py:")
-for handler in games.router.message_handlers:
-    if hasattr(handler, 'commands'):
-        print(f"   - Команда: /{handler.commands[0]}")
-
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
