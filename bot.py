@@ -10,64 +10,52 @@ from handlers import admin, user, games, economy, balance_handler, report, instr
 from database.db import init_db
 from utils.lock import acquire_lock
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# ========== ЗАЩИТА ОТ ДУБЛИРУЮЩИХСЯ ПРОЦЕССОВ ==========
 if not acquire_lock():
-    print("❌ Бот уже запущен! Завершаем этот процесс.")
+    print("❌ Бот уже запущен!")
     sys.exit(0)
 
 print("🔒 Блокировка захвачена. Бот запускается...")
 
-# ========== СОЗДАНИЕ БОТА ==========
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
-print("✅ Бот создан")
-
-# ========== ПЕРЕДАЧА БОТА ВО ВСЕ МОДУЛИ ==========
 admin.set_bot(bot)
 user.set_bot(bot)
 report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 
-print("✅ Бот передан во все модули")
-
-# ========== СОЗДАНИЕ ДИСПЕТЧЕРА ==========
 dp = Dispatcher()
-print("✅ Диспетчер создан")
-
-# ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 init_db()
-print("✅ База данных инициализирована")
 
-# ========== РЕГИСТРАЦИЯ ВСЕХ РОУТЕРОВ ==========
+# ========== ВАЖНО: ПОРЯДОК РЕГИСТРАЦИИ ==========
+# Сначала регистрируем команды (чтобы они имели приоритет)
+dp.include_router(economy.router)      # /balance, /daily, /gift, /top
+dp.include_router(games.router)        # /rps, /roulette
+# Потом регистрируем user (в нём есть универсальный обработчик)
+dp.include_router(user.router)         # /start, /help, /stats, /myrole, универсальный
+# Затем остальные
 dp.include_router(admin.router)
-dp.include_router(user.router)
-dp.include_router(games.router)
-dp.include_router(economy.router)
-dp.include_router(balance_handler.router)  # ← НОВЫЙ РОУТЕР
 dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
 print("✅ Все роутеры зарегистрированы")
-print(f"   - balance_handler router: {balance_handler.router}")
+print(f"   - economy router: {economy.router}")
+print(f"   - games router: {games.router}")
+print(f"   - user router: {user.router}")
 
-# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
-    print("📋 Команды: /balance, /daily")
+    print("📋 Команды: /balance, /daily, /rps, /roulette, /start, /stats")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("👋 Бот остановлен вручную")
-    finally:
-        print("🔓 Бот завершен")
+        print("👋 Бот остановлен")
