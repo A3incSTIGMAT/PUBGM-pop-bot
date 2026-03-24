@@ -166,21 +166,30 @@ async def set_birthday_command(message: Message):
     member_status_changed=JOIN_TRANSITION
 ))
 async def on_bot_added_to_chat(event: ChatMemberUpdated):
+    """Когда бота добавляют в чат"""
     chat = event.chat
-    chat_id = chat.id
     
     welcome_text = (
-        f"🤖 **NEXUS Chat Manager**\n\n"
-        f"Привет! Я мощный чат-менеджер с защитой приватности.\n\n"
-        f"🛡 **Ключевая фишка — Анонимные репорты**\n"
-        f"Участники могут сообщать о нарушениях, не раскрывая себя.\n\n"
-        f"🔧 **Быстрая настройка:** /setup\n"
-        f"📖 **Справка:** /help\n\n"
-        f"🚀 Готов сделать ваш чат безопаснее!"
+        f"🤖 **NEXUS** — развивающаяся экосистема для вашего чата\n\n"
+        f"✅ **Уже работает:**\n"
+        f"• 🛡 Модерация: `/ban`, `/mute`, `/all`\n"
+        f"• 💰 Экономика: `/balance`, `/daily`, `/gift`\n"
+        f"• 🎮 Игры: `/rps`, `/roulette`\n"
+        f"• 📊 Статистика активности\n"
+        f"• 🔐 Защита от спама и ботов\n\n"
+        f"🚀 **Скоро появится:**\n"
+        f"• 🎁 Магазин подарков\n"
+        f"• 👥 Кланы и соревнования\n"
+        f"• 💎 VIP-статусы\n"
+        f"• 🎲 Ещё больше игр\n"
+        f"• 💸 Реальные покупки и продажи\n\n"
+        f"🔧 **Настройка:** `/setup`\n"
+        f"📖 **Справка:** `/help`\n\n"
+        f"💡 Дайте мне права администратора для полной функциональности!"
     )
     
     await event.answer(welcome_text)
-    add_user(chat_id, chat_id, chat.title)
+    add_user(chat.id, chat.id, chat.title)
 
 # ========== КАПЧА ==========
 
@@ -218,26 +227,23 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
         except:
             pass
 
-# ========== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (ТОЛЬКО ДЛЯ НЕКОМАНД) ==========
-
 @router.message()
-async def handle_non_command(message: Message):
-    """Обрабатывает только обычные сообщения (не команды)"""
+async def check_captcha_and_spam(message: Message):
     if not message.text:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Проверка капчи (только для новых пользователей)
+    # Проверка капчи
     captcha = get_captcha(user_id, chat_id)
-    if captcha:
-        if message.text.isdigit() and int(message.text) == captcha["answer"]:
-            delete_captcha(user_id, chat_id)
-            await message.answer("✅ **Проверка пройдена!** Добро пожаловать!")
-            add_user(user_id, chat_id, message.from_user.username)
-        else:
-            await message.answer("❌ **Неверный ответ.** Попробуйте еще раз.")
+    if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
+        delete_captcha(user_id, chat_id)
+        await message.answer("✅ **Проверка пройдена!** Добро пожаловать!")
+        add_user(user_id, chat_id, message.from_user.username)
+        return
+    elif captcha:
+        await message.answer("❌ **Неверный ответ.** Попробуйте еще раз.")
         return
     
     # Антиспам
