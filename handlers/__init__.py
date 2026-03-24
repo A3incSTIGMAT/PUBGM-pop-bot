@@ -8,4 +8,4 @@ from . import callbacks
 from . import roles
 from . import birthday_calendar
 from . import games_interactive
-# menu_handler НЕ импортируем здесь!
+from . import menu_handler
