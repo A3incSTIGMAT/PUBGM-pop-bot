@@ -14,34 +14,53 @@ last_daily = {}
 @router.message(Command("balance"))
 async def cmd_balance(message: Message):
     """Обработчик команды /balance"""
+    print("🔥🔥🔥 [DEBUG] КОМАНДА /balance ВЫЗВАНА 🔥🔥🔥")
+    
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    print(f"[DEBUG] user_id: {user_id}, chat_id: {chat_id}")
+    
     balance = get_balance(user_id, chat_id)
+    
+    print(f"[DEBUG] balance: {balance}")
+    
     await message.answer(f"💰 Ваш баланс: {balance} NCoin")
+    print("✅ [DEBUG] Ответ отправлен")
 
 @router.message(Command("daily"))
 async def cmd_daily(message: Message):
     """Обработчик команды /daily"""
+    print("🔥🔥🔥 [DEBUG] КОМАНДА /daily ВЫЗВАНА 🔥🔥🔥")
+    
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    print(f"[DEBUG] user_id: {user_id}, chat_id: {chat_id}")
     
     now = datetime.now()
     last_time = last_daily.get(user_id)
     
     if last_time and now - last_time < timedelta(hours=24):
         remaining = 24 - (now - last_time).seconds // 3600
+        print(f"[DEBUG] Бонус уже получен, ждать {remaining} часов")
         await message.answer(f"⏰ Бонус через {remaining} часов.")
         return
     
+    print("[DEBUG] Начисляем бонус 50 NCoin")
     update_balance(user_id, chat_id, 50)
     last_daily[user_id] = now
     add_user(user_id, chat_id, message.from_user.username)
     
+    new_balance = get_balance(user_id, chat_id)
+    print(f"[DEBUG] Новый баланс: {new_balance}")
+    
     await message.answer(
         f"🎁 **Ежедневный бонус!**\n\n"
         f"+50 NCoin\n"
-        f"💰 Баланс: {get_balance(user_id, chat_id)} NCoin"
+        f"💰 Баланс: {new_balance} NCoin"
     )
+    print("✅ [DEBUG] Ответ отправлен")
 
 @router.message(Command("gift"))
 async def cmd_gift(message: Message):
