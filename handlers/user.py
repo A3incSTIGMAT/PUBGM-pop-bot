@@ -10,7 +10,6 @@ from database.db import (
     save_captcha, get_captcha, delete_captcha,
     set_birthday, get_user_stats
 )
-from keyboards.main_menu import get_main_menu
 from handlers.roles import get_user_role
 from utils.antispam import is_spam, is_rate_limited, is_temp_banned, add_temp_ban, add_warning, should_mute
 from utils.logger import log_user, log_attack, measure_time
@@ -19,11 +18,10 @@ router = Router()
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
-    """Установить экземпляр бота"""
     global bot
     bot = bot_instance
 
-# ========== КОМАНДЫ ==========
+# ========== ОСНОВНЫЕ КОМАНДЫ ==========
 
 @router.message(Command("start"))
 @measure_time
@@ -33,11 +31,8 @@ async def cmd_start(message: Message):
     
     banned, wait_time = is_temp_banned(user_id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} секунд.")
+        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} сек.")
         return
-    
-    role = await get_user_role(chat_id, user_id)
-    keyboard = await get_main_menu(chat_id, user_id)
     
     await message.answer(
         "👋 Добро пожаловать в NEXUS!\n\n"
@@ -52,15 +47,14 @@ async def cmd_start(message: Message):
         "/report @username [причина] — анонимная жалоба\n\n"
         "🎮 Игры:\n"
         "/duel @username 50 — вызвать на дуэль\n"
-        "/rps — камень-ножницы-бумага\n"
+        "/rps камень — камень-ножницы-бумага\n"
         "/roulette 100 red — рулетка\n\n"
         "🛡 Админ-команды:\n"
         "/all — отметить всех\n"
-        "/ban @username — забанить\n"
-        "/mute @username 10m — заглушить\n"
+        "/ban — забанить (ответом)\n"
+        "/mute — заглушить (ответом)\n"
         "/setlogchannel — установить лог-канал\n"
-        "/setup — мастер настройки",
-        reply_markup=keyboard
+        "/setup — мастер настройки"
     )
     add_user(message.from_user.id, message.chat.id, message.from_user.username)
     log_user(message.from_user.full_name, "/start")
@@ -68,14 +62,10 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 @measure_time
 async def cmd_help(message: Message):
-    user_id = message.from_user.id
-    banned, wait_time = is_temp_banned(user_id)
+    banned, wait_time = is_temp_banned(message.from_user.id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} секунд.")
+        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} сек.")
         return
-    
-    role = await get_user_role(message.chat.id, user_id)
-    keyboard = await get_main_menu(message.chat.id, user_id)
     
     await message.answer(
         "📖 Справка NEXUS\n\n"
@@ -91,7 +81,7 @@ async def cmd_help(message: Message):
         "/myrole — показать мою роль в чате\n\n"
         "🛡 Админ-команды:\n"
         "/all — отметить всех участников\n"
-        "/ban — забанить (ответом на сообщение)\n"
+        "/ban — забанить (ответом)\n"
         "/mute [время] — заглушить (ответом)\n"
         "/setwelcome [текст] — настроить приветствие\n"
         "/setlogchannel — установить лог-канал\n"
@@ -100,13 +90,12 @@ async def cmd_help(message: Message):
         "/removemod — удалить модератора (ответом)\n"
         "/mods — список модераторов\n\n"
         "🎮 Игры:\n"
-        "/duel — дуэль с другим игроком\n"
+        "/duel — дуэль\n"
         "/rps — камень-ножницы-бумага\n"
         "/roulette — рулетка\n\n"
         "💰 Экономика:\n"
         "/top — топ богачей\n"
-        "/shop — магазин подарков",
-        reply_markup=keyboard
+        "/shop — магазин подарков"
     )
     log_user(message.from_user.full_name, "/help")
 
@@ -123,11 +112,7 @@ async def show_my_role(message: Message):
     }
     
     role_text = role_names.get(role, '👤 Обычный участник')
-    
-    await message.answer(
-        f"**Ваша роль в этом чате:**\n\n{role_text}\n\n"
-        f"📌 Используйте /help для списка доступных команд."
-    )
+    await message.answer(f"**Ваша роль:**\n\n{role_text}")
 
 @router.message(Command("stats"))
 @measure_time
@@ -135,7 +120,7 @@ async def cmd_stats(message: Message):
     user_id = message.from_user.id
     banned, wait_time = is_temp_banned(user_id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} секунд.")
+        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} сек.")
         return
     
     stats = get_user_stats(user_id, message.chat.id)
@@ -150,7 +135,7 @@ async def cmd_stats(message: Message):
             f"🎂 ДР: {stats['birthday'] or 'не указан'}"
         )
     else:
-        await message.answer("📊 Статистика пока пуста. Напишите несколько сообщений!")
+        await message.answer("📊 Статистика пока пуста.")
     log_user(message.from_user.full_name, "/stats")
 
 @router.message(Command("setbirthday"))
@@ -159,7 +144,7 @@ async def set_birthday_command(message: Message):
     user_id = message.from_user.id
     banned, wait_time = is_temp_banned(user_id)
     if banned:
-        await message.answer(f"❌ Вы временно заблокированы. Повторите через {wait_time} секунд.")
+        await message.answer(f"❌ Вы временно заблокированы.")
         return
     
     args = message.text.split()
@@ -167,8 +152,7 @@ async def set_birthday_command(message: Message):
         await message.answer(
             "📅 **Установка дня рождения**\n\n"
             "Использование: /setbirthday DD.MM\n"
-            "Пример: /setbirthday 15.07\n\n"
-            "В день вашего рождения я поздравлю вас в чате!"
+            "Пример: /setbirthday 15.07"
         )
         return
     
@@ -176,12 +160,11 @@ async def set_birthday_command(message: Message):
     try:
         datetime.strptime(birthday, "%d.%m")
     except ValueError:
-        await message.answer("❌ Неверный формат. Используйте ДД.ММ, например: 15.07")
+        await message.answer("❌ Неверный формат. Используйте ДД.ММ")
         return
     
     set_birthday(message.from_user.id, message.chat.id, birthday)
-    await message.answer(f"✅ День рождения {birthday} сохранен! Я поздравлю вас в этот день!")
-    log_user(message.from_user.full_name, f"/setbirthday {birthday}")
+    await message.answer(f"✅ День рождения {birthday} сохранен!")
 
 # ========== ПРИВЕТСТВИЕ ПРИ ДОБАВЛЕНИИ БОТА ==========
 
@@ -189,7 +172,6 @@ async def set_birthday_command(message: Message):
     member_status_changed=JOIN_TRANSITION
 ))
 async def on_bot_added_to_chat(event: ChatMemberUpdated):
-    """Когда бота добавляют в чат"""
     chat = event.chat
     chat_id = chat.id
     
@@ -204,67 +186,29 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
         f"Привет! Я мощный чат-менеджер с защитой приватности.\n\n"
         f"🛡 **Ключевая фишка — Анонимные репорты**\n"
         f"Участники могут сообщать о нарушениях, не раскрывая себя.\n"
-        f"Это идеально для крупных чатов, где важна безопасность.\n\n"
     )
     
     if not has_admin_rights:
         welcome_text += (
-            f"⚠️ **Важно!** У меня нет прав администратора.\n"
-            f"Для полноценной работы мне нужны права:\n"
-            f"• `can_restrict_members` — для банов и мутов\n"
-            f"• `can_manage_chat` — для лог-канала и скрытых функций\n\n"
-            f"Назначьте меня администратором в настройках чата!\n\n"
+            f"\n⚠️ **Важно!** У меня нет прав администратора.\n"
+            f"Назначьте меня администратором в настройках чата!\n"
         )
     
     welcome_text += (
-        f"🔧 **Быстрая настройка:** /setup\n"
-        f"📖 **Справка по функциям:** /help\n\n"
+        f"\n🔧 **Быстрая настройка:** /setup\n"
+        f"📖 **Справка:** /help\n\n"
         f"🚀 Готов сделать ваш чат безопаснее!"
     )
     
     await event.answer(welcome_text)
     
     from keyboards.setup_menu import get_setup_menu
-    
     await bot.send_message(
         chat_id,
-        "⚙️ **Для настройки анонимных репортов и лог-канала нажмите кнопку ниже:**",
+        "⚙️ **Для настройки анонимных репортов нажмите кнопку ниже:**",
         reply_markup=get_setup_menu()
     )
-    
     add_user(chat_id, chat_id, chat.title)
-
-# ========== ПРИВЕТСТВИЕ НОВЫХ УЧАСТНИКОВ ==========
-
-@router.chat_member(ChatMemberUpdatedFilter(
-    member_status_changed=IS_NOT_MEMBER >> IS_MEMBER
-))
-async def on_user_join(event: ChatMemberUpdated):
-    """Когда новый пользователь заходит в чат (без капчи, только приветствие)"""
-    user = event.new_chat_member.user
-    if user.is_bot:
-        return
-    
-    chat_id = event.chat.id
-    
-    welcome_template = get_welcome_message(chat_id)
-    
-    if welcome_template:
-        welcome_text = welcome_template.format(
-            user=user.full_name,
-            chat=event.chat.title or "этот чат"
-        )
-    else:
-        welcome_text = (
-            f"👋 Добро пожаловать, {user.full_name}!\n\n"
-            f"📌 Я NEXUS — чат-менеджер.\n"
-            f"/help — помощь\n"
-            f"/balance — баланс NCoin\n"
-            f"/daily — бонус каждый день!\n\n"
-            f"🎮 Игры: /rps /roulette"
-        )
-    
-    await event.answer(welcome_text)
 
 # ========== КАПЧА ==========
 
@@ -272,28 +216,24 @@ async def on_user_join(event: ChatMemberUpdated):
     member_status_changed=IS_NOT_MEMBER >> IS_MEMBER
 ))
 async def captcha_on_join(event: ChatMemberUpdated):
-    """Капча при входе нового пользователя (срабатывает до приветствия)"""
     user = event.new_chat_member.user
     if user.is_bot:
         return
-    
-    chat_id = event.chat.id
     
     num1 = random.randint(1, 10)
     num2 = random.randint(1, 10)
     answer = num1 + num2
     
-    save_captcha(user.id, chat_id, answer)
+    save_captcha(user.id, event.chat.id, answer)
     
     await event.answer(
         f"🔐 **Проверка на бота**\n\n"
         f"Привет, {user.full_name}!\n"
-        f"Для подтверждения, что вы не бот, решите пример:\n\n"
-        f"**{num1} + {num2} = ?**\n\n"
-        f"⏱ У вас 60 секунд. Напишите ответ в чат."
+        f"Решите пример: **{num1} + {num2} = ?**\n\n"
+        f"⏱ У вас 60 секунд."
     )
     
-    asyncio.create_task(kick_if_not_verified(user.id, chat_id))
+    asyncio.create_task(kick_if_not_verified(user.id, event.chat.id))
 
 async def kick_if_not_verified(user_id: int, chat_id: int):
     await asyncio.sleep(60)
@@ -303,43 +243,36 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
         try:
             await bot.ban_chat_member(chat_id, user_id)
             await bot.unban_chat_member(chat_id, user_id)
-            await bot.send_message(chat_id, f"❌ Пользователь был удален за невыполнение капчи.")
-        except Exception as e:
-            print(f"Ошибка при кике: {e}")
-
-# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+        except:
+            pass
 
 @router.message()
 async def check_captcha_and_spam(message: Message):
-    """Проверка ответа на капчу и антиспам"""
     if not message.text:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Проверка капчи
     captcha = get_captcha(user_id, chat_id)
     if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
         delete_captcha(user_id, chat_id)
-        await message.answer("✅ **Проверка пройдена!** Добро пожаловать в чат!")
+        await message.answer("✅ **Проверка пройдена!** Добро пожаловать!")
         add_user(user_id, chat_id, message.from_user.username)
         return
     elif captcha:
-        await message.answer("❌ **Неверный ответ.** Попробуйте еще раз. Напишите число.")
+        await message.answer("❌ **Неверный ответ.** Попробуйте еще раз.")
         return
     
-    # Антиспам для обычных сообщений
+    # Антиспам
     spam, count = is_spam(user_id)
     if spam:
-        warnings = add_warning(user_id, "спам сообщениями")
-        log_attack(f"Пользователь {message.from_user.full_name} спамит (сообщений: {count})")
+        warnings = add_warning(user_id, "спам")
         if warnings >= 3:
             add_temp_ban(user_id, 300)
-            await message.answer("❌ Вы временно заблокированы за флуд на 5 минут.")
+            await message.answer("❌ Вы заблокированы за флуд на 5 минут.")
         else:
             await message.answer(f"⚠️ Не флудите! Предупреждение {warnings}/3.")
         return
     
-    # Обновляем статистику сообщений
     update_user_stats(user_id, chat_id)
