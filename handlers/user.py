@@ -12,7 +12,7 @@ from database.db import (
 )
 from handlers.roles import get_user_role
 from utils.antispam import is_spam, is_rate_limited, is_temp_banned, add_temp_ban, add_warning, should_mute
-from utils.logger import log_user, log_attack, measure_time
+from utils.logger import log_user, log_attack
 
 router = Router()
 bot: Bot = None
