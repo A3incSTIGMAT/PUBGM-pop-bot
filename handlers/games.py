@@ -6,7 +6,8 @@ from aiogram.types import Message
 router = Router()
 
 @router.message(Command("rps"))
-async def rps_game(message: Message):
+async def cmd_rps(message: Message):
+    """Обработчик команды /rps"""
     args = message.text.split()
     if len(args) < 2:
         await message.answer(
@@ -41,7 +42,8 @@ async def rps_game(message: Message):
     )
 
 @router.message(Command("roulette"))
-async def roulette(message: Message):
+async def cmd_roulette(message: Message):
+    """Обработчик команды /roulette"""
     args = message.text.split()
     if len(args) < 3:
         await message.answer(
