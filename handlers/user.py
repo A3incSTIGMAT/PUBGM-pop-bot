@@ -218,23 +218,26 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
         except:
             pass
 
+# ========== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (ТОЛЬКО ДЛЯ НЕКОМАНД) ==========
+
 @router.message()
-async def check_captcha_and_spam(message: Message):
+async def handle_non_command(message: Message):
+    """Обрабатывает только обычные сообщения (не команды)"""
     if not message.text:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Проверка капчи
+    # Проверка капчи (только для новых пользователей)
     captcha = get_captcha(user_id, chat_id)
-    if captcha and message.text.isdigit() and int(message.text) == captcha["answer"]:
-        delete_captcha(user_id, chat_id)
-        await message.answer("✅ **Проверка пройдена!** Добро пожаловать!")
-        add_user(user_id, chat_id, message.from_user.username)
-        return
-    elif captcha:
-        await message.answer("❌ **Неверный ответ.** Попробуйте еще раз.")
+    if captcha:
+        if message.text.isdigit() and int(message.text) == captcha["answer"]:
+            delete_captcha(user_id, chat_id)
+            await message.answer("✅ **Проверка пройдена!** Добро пожаловать!")
+            add_user(user_id, chat_id, message.from_user.username)
+        else:
+            await message.answer("❌ **Неверный ответ.** Попробуйте еще раз.")
         return
     
     # Антиспам
