@@ -15,11 +15,6 @@ last_daily = {}
 @router.message(Command("balance"))
 async def show_balance(message: Message):
     user_id = message.from_user.id
-    banned, wait_time = is_temp_banned(user_id)
-    if banned:
-        await message.answer(f"❌ Вы заблокированы.")
-        return
-    
     balance = get_balance(user_id, message.chat.id)
     await message.answer(f"💰 Ваш баланс: {balance} NCoin")
 
@@ -27,16 +22,6 @@ async def show_balance(message: Message):
 async def daily_bonus(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    
-    banned, wait_time = is_temp_banned(user_id)
-    if banned:
-        await message.answer(f"❌ Вы заблокированы.")
-        return
-    
-    limited, wait = is_rate_limited(user_id, "daily")
-    if limited:
-        await message.answer(f"⏰ Бонус раз в сутки. Повторите через {wait} сек.")
-        return
     
     now = datetime.now()
     last_time = last_daily.get(user_id)
@@ -59,13 +44,6 @@ async def daily_bonus(message: Message):
 
 @router.message(Command("gift"))
 async def send_gift(message: Message):
-    user_id = message.from_user.id
-    
-    banned, wait_time = is_temp_banned(user_id)
-    if banned:
-        await message.answer(f"❌ Вы заблокированы.")
-        return
-    
     args = message.text.split()
     if len(args) < 3:
         await message.answer(
@@ -86,24 +64,19 @@ async def send_gift(message: Message):
         await message.answer("❌ Сумма должна быть больше 0")
         return
     
-    sender_balance = get_balance(user_id, message.chat.id)
+    sender_balance = get_balance(message.from_user.id, message.chat.id)
     if sender_balance < amount:
         await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {sender_balance}")
         return
     
     await message.answer(
         f"🎁 Вы подарили {amount} NCoin пользователю @{target_username}\n\n"
-        f"✨ Полноценный перевод скоро будет доступен!"
+        f"✨ Функция в разработке!"
     )
     log_economy(message.from_user.full_name, "gift", amount, target_username)
 
 @router.message(Command("top"))
 async def show_top(message: Message):
-    banned, wait_time = is_temp_banned(message.from_user.id)
-    if banned:
-        await message.answer(f"❌ Вы заблокированы.")
-        return
-    
     await message.answer(
         "🏆 **ТОП ПОЛЬЗОВАТЕЛЕЙ ПО NCoin** 🏆\n\n"
         "1. 👑 — 5000 NCoin\n"
