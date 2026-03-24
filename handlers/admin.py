@@ -39,7 +39,7 @@ async def tag_all(message: Message):
     await message.answer("🔔 Получаю список участников...")
     
     members = []
-    async for member in message.chat.get_members():
+    async for member in message.chat.get_chat_members():
         if not member.user.is_bot:
             mention = f"@{member.user.username}" if member.user.username else member.user.full_name
             members.append(mention)
