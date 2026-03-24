@@ -8,19 +8,25 @@ from config import ADMIN_IDS
 from database.db import (
     get_welcome_message, set_chat_welcome,
     get_log_channel, set_log_channel,
-    add_chat_moderator, remove_chat_moderator, get_chat_moderators,
-    is_chat_moderator
+    add_chat_moderator, remove_chat_moderator, get_chat_moderators
 )
-from handlers.roles import can_ban, can_mute, can_configure, can_assign_moderator, get_user_role
+from handlers.roles import can_ban, can_mute, can_configure, can_assign_moderator
 from keyboards.setup_menu import get_setup_menu
 from utils.logger import log_admin
 
 router = Router()
-bot = Bot(current_bot.token)
+
+# Бот будет установлен из bot.py
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    """Установить экземпляр бота"""
+    global bot
+    bot = bot_instance
 
 async def log_action(chat_id: int, action_text: str):
     log_channel_id = get_log_channel(chat_id)
-    if log_channel_id:
+    if log_channel_id and bot:
         try:
             await bot.send_message(log_channel_id, action_text)
         except:
