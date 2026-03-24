@@ -4,8 +4,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from database.db import get_balance, update_balance, add_user, init_db
-from utils.antispam import is_spam, is_rate_limited, is_temp_banned, add_temp_ban, add_warning
-from utils.logger import log_economy, log_attack
+from utils.antispam import is_temp_banned, is_rate_limited
+from utils.logger import log_economy
 
 router = Router()
 init_db()
@@ -17,7 +17,7 @@ async def show_balance(message: Message):
     user_id = message.from_user.id
     banned, wait_time = is_temp_banned(user_id)
     if banned:
-        await message.answer(f"❌ Вы заблокированы. Повторите через {wait_time} сек.")
+        await message.answer(f"❌ Вы заблокированы.")
         return
     
     balance = get_balance(user_id, message.chat.id)
@@ -33,7 +33,6 @@ async def daily_bonus(message: Message):
         await message.answer(f"❌ Вы заблокированы.")
         return
     
-    # Rate limiting для daily
     limited, wait = is_rate_limited(user_id, "daily")
     if limited:
         await message.answer(f"⏰ Бонус раз в сутки. Повторите через {wait} сек.")
@@ -61,16 +60,10 @@ async def daily_bonus(message: Message):
 @router.message(Command("gift"))
 async def send_gift(message: Message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
     
     banned, wait_time = is_temp_banned(user_id)
     if banned:
         await message.answer(f"❌ Вы заблокированы.")
-        return
-    
-    limited, wait = is_rate_limited(user_id, "gift")
-    if limited:
-        await message.answer(f"⏰ Слишком часто. Подождите {wait} сек.")
         return
     
     args = message.text.split()
@@ -93,7 +86,7 @@ async def send_gift(message: Message):
         await message.answer("❌ Сумма должна быть больше 0")
         return
     
-    sender_balance = get_balance(user_id, chat_id)
+    sender_balance = get_balance(user_id, message.chat.id)
     if sender_balance < amount:
         await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {sender_balance}")
         return
@@ -111,7 +104,6 @@ async def show_top(message: Message):
         await message.answer(f"❌ Вы заблокированы.")
         return
     
-    # TODO: реальная выгрузка из БД
     await message.answer(
         "🏆 **ТОП ПОЛЬЗОВАТЕЛЕЙ ПО NCoin** 🏆\n\n"
         "1. 👑 — 5000 NCoin\n"
