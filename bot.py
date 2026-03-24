@@ -6,7 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from config import BOT_TOKEN
-from handlers import admin, user, games, economy, balance_handler, report, instructions, callbacks, roles, birthday_handler
+from handlers import admin, user, games, economy, balance_handler, report, instructions, callbacks, roles, birthday_handler, games_interactive
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -35,7 +35,8 @@ init_db()
 # Регистрация роутеров
 dp.include_router(economy.router)
 dp.include_router(games.router)
-dp.include_router(birthday_handler.router)  # ← НОВЫЙ
+dp.include_router(games_interactive.router)  # ← НОВАЯ ИНТЕРАКТИВНАЯ ИГРА
+dp.include_router(birthday_handler.router)
 dp.include_router(user.router)
 dp.include_router(admin.router)
 dp.include_router(report.router)
@@ -43,7 +44,7 @@ dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
 print("✅ Все роутеры зарегистрированы")
-print(f"   - birthday_handler: {birthday_handler.router}")
+print(f"   - games_interactive: {games_interactive.router}")
 
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
