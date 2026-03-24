@@ -1,16 +1,30 @@
-from aiagram import Router
+"""
+Анонимные репорты для NEXUS бота.
+Позволяет участникам анонимно сообщать о нарушениях.
+"""
+
+from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from database.db import get_log_channel, save_report, get_reports_count
-from handlers.admin import get_user_role, can_configure
+from handlers.roles import can_configure
 from utils.logger import log_admin
 
 router = Router()
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    """Установить экземпляр бота"""
+    global bot
+    bot = bot_instance
 
 @router.message(Command("report"))
 async def anonymous_report(message: Message):
-    """Анонимная жалоба на пользователя"""
+    """
+    Анонимная жалоба на пользователя.
+    Формат: /report @username [причина]
+    """
     args = message.text.split()
     
     if len(args) < 2:
@@ -42,7 +56,6 @@ async def anonymous_report(message: Message):
     target_id = None
     target_name = target_username
     try:
-        # Пытаемся найти пользователя в чате
         async for member in message.chat.get_members():
             if member.user.username and member.user.username.lower() == target_username.lower():
                 target_id = member.user.id
@@ -54,16 +67,17 @@ async def anonymous_report(message: Message):
     # Сохраняем жалобу в БД
     save_report(chat_id, reporter_id, target_id or 0, reason)
     
-    # Отправляем анонимное сообщение в лог-канал
-    from bot import bot
+    # Получаем количество жалоб на этого пользователя
+    reports_count = get_reports_count(chat_id, target_id) + 1
     
+    # Отправляем анонимное сообщение в лог-канал
     await bot.send_message(
         log_channel_id,
         f"🛡 **АНОНИМНАЯ ЖАЛОБА**\n\n"
         f"👤 Нарушитель: @{target_username} ({target_name})\n"
         f"📝 Причина: {reason}\n"
         f"💬 Чат: {message.chat.title}\n"
-        f"📊 Всего жалоб на этого пользователя: {get_reports_count(chat_id, target_id) + 1}\n\n"
+        f"📊 Всего жалоб на этого пользователя: {reports_count}\n\n"
         f"⚡ Действия: /ban @{target_username} | /mute @{target_username}"
     )
     
@@ -76,7 +90,9 @@ async def anonymous_report(message: Message):
 
 @router.message(Command("reports_stats"))
 async def reports_stats(message: Message):
-    """Статистика жалоб (только для админов)"""
+    """
+    Статистика жалоб (только для админов)
+    """
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут просматривать статистику жалоб.")
         return
@@ -84,9 +100,59 @@ async def reports_stats(message: Message):
     chat_id = message.chat.id
     pending_count = get_reports_count(chat_id)
     
+    from database.queries import get_reports_stats
+    stats = get_reports_stats(chat_id)
+    
+    if stats["total"] == 0:
+        await message.answer(
+            "📊 **Статистика анонимных жалоб**\n\n"
+            "📋 Жалоб пока нет.\n\n"
+            "Участники могут использовать /report для анонимных сообщений о нарушениях."
+        )
+        return
+    
+    top_targets_text = ""
+    if stats["top_targets"]:
+        top_targets_text = "\n\n🔥 **Чаще всего жалуются:**"
+        for target in stats["top_targets"][:5]:
+            top_targets_text += f"\n• {target['target_id']} — {target['count']} жалоб"
+    
     await message.answer(
         f"📊 **Статистика анонимных жалоб**\n\n"
-        f"📋 Ожидают рассмотрения: {pending_count}\n"
-        f"✅ Рассмотрено: ...\n\n"
-        f"Для просмотра жалоб проверьте ваш лог-канал."
+        f"📋 Ожидают рассмотрения: {stats['pending']}\n"
+        f"✅ Рассмотрено: {stats['resolved']}\n"
+        f"📊 Всего жалоб: {stats['total']}"
+        f"{top_targets_text}\n\n"
+        f"💡 Для просмотра жалоб проверьте ваш лог-канал."
     )
+
+@router.message(Command("resolve_report"))
+async def resolve_report(message: Message):
+    """
+    Отметить жалобу как рассмотренную (админ-команда)
+    """
+    if not await can_configure(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы могут использовать эту команду.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "📝 **Отметить жалобу**\n\n"
+            "Использование: /resolve_report [ID_жалобы]\n"
+            "ID жалобы можно найти в лог-канале."
+        )
+        return
+    
+    try:
+        report_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID жалобы должен быть числом.")
+        return
+    
+    from database.db import resolve_report as resolve_report_db
+    resolve_report_db(report_id)
+    
+    await message.answer(f"✅ Жалоба #{report_id} отмечена как рассмотренная.")
+    
+    log_admin(message.from_user.full_name, "отметил жалобу как рассмотренную", f"#{report_id}")
