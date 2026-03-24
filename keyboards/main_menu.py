@@ -27,6 +27,11 @@ def get_main_menu(user_role: str = "user") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎁 Социальное", callback_data="menu_social")
     ])
     
+    buttons.append([
+        InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="menu_stars"),
+        InlineKeyboardButton(text="💎 Купить NCoin", callback_data="menu_buy")
+    ])
+    
     # Админские кнопки
     if user_role in ['admin', 'creator', 'global_admin']:
         buttons.append([
@@ -58,6 +63,7 @@ def get_profile_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👑 Моя роль", callback_data="profile_role")
         ],
         [
+            InlineKeyboardButton(text="⭐ Пополнить Stars", callback_data="profile_stars"),
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
         ]
     ]
@@ -73,6 +79,31 @@ def get_economy_menu() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🎁 Подарить NCoin", callback_data="eco_gift"),
             InlineKeyboardButton(text="🏆 Топ богачей", callback_data="eco_top")
+        ],
+        [
+            InlineKeyboardButton(text="💎 Купить NCoin", callback_data="eco_buy"),
+            InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="eco_stars")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_buy_ncoin_menu() -> InlineKeyboardMarkup:
+    """Меню покупки NCoin за Stars"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="⭐ 10 Stars → 100 NCoin", callback_data="buy_10"),
+            InlineKeyboardButton(text="⭐ 50 Stars → 500 NCoin", callback_data="buy_50")
+        ],
+        [
+            InlineKeyboardButton(text="⭐ 100 Stars → 1000 NCoin", callback_data="buy_100"),
+            InlineKeyboardButton(text="⭐ 500 Stars → 5000 NCoin", callback_data="buy_500")
+        ],
+        [
+            InlineKeyboardButton(text="⭐ 1000 Stars → 10000 NCoin", callback_data="buy_1000"),
+            InlineKeyboardButton(text="⭐ 5000 Stars → 50000 NCoin", callback_data="buy_5000")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
@@ -155,6 +186,23 @@ def get_social_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def get_stars_menu() -> InlineKeyboardMarkup:
+    """Меню Telegram Stars"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="⭐ Купить Stars", callback_data="stars_buy"),
+            InlineKeyboardButton(text="💰 Баланс Stars", callback_data="stars_balance")
+        ],
+        [
+            InlineKeyboardButton(text="💎 Обменять на NCoin", callback_data="stars_exchange"),
+            InlineKeyboardButton(text="🎁 Подарить Stars", callback_data="stars_gift")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def get_settings_menu() -> InlineKeyboardMarkup:
     """Меню настроек (только для админов)"""
     buttons = [
@@ -201,6 +249,7 @@ def get_help_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🛡 Модерация", callback_data="help_moderation")
         ],
         [
+            InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="help_stars"),
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
         ]
     ]
