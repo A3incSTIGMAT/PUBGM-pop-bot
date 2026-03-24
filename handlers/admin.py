@@ -4,6 +4,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions
 from aiogram.exceptions import TelegramAPIError
 
+from config import ADMIN_IDS
 from database.db import (
     get_welcome_message, set_chat_welcome,
     get_log_channel, set_log_channel,
@@ -49,7 +50,7 @@ async def tag_all(message: Message):
         await message.answer(text)
         if len(members) > 50:
             await message.answer("\n".join(members[50:100]))
-        await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата")
+        await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех")
     else:
         await message.answer("❌ Не удалось получить список участников.")
 
@@ -103,15 +104,15 @@ async def mute_user(message: Message):
         permissions = ChatPermissions(can_send_messages=False)
         until_date = asyncio.get_event_loop().time() + duration * 60
         await message.chat.restrict(user_id, permissions, until_date=until_date)
-        await message.answer(f"🔇 Пользователь {user_name} заглушен на {duration} минут.")
-        await log_action(message.chat.id, f"🔇 {admin_name} заглушил {user_name} на {duration} минут")
+        await message.answer(f"🔇 {user_name} заглушен на {duration} минут.")
+        await log_action(message.chat.id, f"🔇 {admin_name} заглушил {user_name}")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 @router.message(Command("setwelcome"))
 async def set_welcome_message(message: Message):
     if not await can_configure(message.chat.id, message.from_user.id):
-        await message.answer("❌ Только администраторы чата могут настраивать приветствие.")
+        await message.answer("❌ Только администраторы могут настраивать приветствие.")
         return
     
     args = message.text.split(maxsplit=1)
@@ -121,33 +122,28 @@ async def set_welcome_message(message: Message):
         await message.answer(
             f"📝 **Настройка приветствия**\n\n"
             f"Использование: /setwelcome [текст]\n\n"
-            f"Переменные:\n"
-            f"• `{{user}}` — имя нового участника\n"
-            f"• `{{chat}}` — название чата\n\n"
-            f"Пример: /setwelcome Добро пожаловать, {{user}}! Рады видеть в {{chat}}!\n\n"
-            f"Текущее приветствие: {current or 'не установлено'}"
+            f"Переменные: {{user}} — имя, {{chat}} — название чата\n\n"
+            f"Текущее: {current or 'не установлено'}"
         )
         return
     
     welcome_text = args[1]
     set_chat_welcome(message.chat.id, welcome_text)
-    await message.answer(f"✅ Приветственное сообщение установлено:\n\n{welcome_text}")
-    await log_action(message.chat.id, f"✏️ {message.from_user.full_name} изменил приветствие чата")
+    await message.answer(f"✅ Приветствие установлено:\n\n{welcome_text}")
+    await log_action(message.chat.id, f"✏️ {message.from_user.full_name} изменил приветствие")
 
 @router.message(Command("setlogchannel"))
 async def set_log_channel_command(message: Message):
     if not await can_configure(message.chat.id, message.from_user.id):
-        await message.answer("❌ Только администраторы чата могут настраивать лог-канал.")
+        await message.answer("❌ Только администраторы могут настраивать лог-канал.")
         return
     
     args = message.text.split()
-    
     if len(args) < 2:
         await message.answer(
             "📝 **Настройка лог-канала**\n\n"
             "Использование: /setlogchannel @channel\n"
             "Пример: /setlogchannel @mychannel_logs\n\n"
-            "Все действия бота будут отправляться в этот канал.\n"
             "Бот должен быть администратором канала!"
         )
         return
@@ -157,9 +153,9 @@ async def set_log_channel_command(message: Message):
         chat = await bot.get_chat(f"@{channel_username}")
         set_log_channel(message.chat.id, chat.id)
         await message.answer(f"✅ Лог-канал установлен: @{channel_username}")
-        await log_action(message.chat.id, f"📋 {message.from_user.full_name} установил лог-канал @{channel_username}")
+        await log_action(message.chat.id, f"📋 {message.from_user.full_name} установил лог-канал")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}\n\nУбедитесь, что бот добавлен в канал как администратор.")
+        await message.answer(f"❌ Ошибка: {e}")
 
 @router.message(Command("setup"))
 async def setup_bot(message: Message):
@@ -190,20 +186,9 @@ async def add_moderator(message: Message):
         return
     
     target_user = message.reply_to_message.from_user
-    target_id = target_user.id
-    
-    try:
-        chat = await bot.get_chat(message.chat.id)
-        member = await chat.get_member(target_id)
-        if member.status in ['creator', 'administrator']:
-            await message.answer(f"❌ {target_user.full_name} уже является администратором Telegram.")
-            return
-    except:
-        pass
-    
-    add_chat_moderator(message.chat.id, target_id, message.from_user.id)
-    await message.answer(f"✅ {target_user.full_name} назначен модератором бота.")
-    await log_action(message.chat.id, f"👮 {message.from_user.full_name} назначил модератором {target_user.full_name}")
+    add_chat_moderator(message.chat.id, target_user.id, message.from_user.id)
+    await message.answer(f"✅ {target_user.full_name} назначен модератором.")
+    await log_action(message.chat.id, f"👮 {message.from_user.full_name} назначил модератора {target_user.full_name}")
 
 @router.message(Command("removemod"))
 async def remove_moderator(message: Message):
@@ -212,13 +197,11 @@ async def remove_moderator(message: Message):
         return
     
     if not message.reply_to_message:
-        await message.answer("❌ Ответьте на сообщение пользователя, которого хотите лишить прав модератора.")
+        await message.answer("❌ Ответьте на сообщение пользователя, которого хотите лишить прав.")
         return
     
     target_user = message.reply_to_message.from_user
-    target_id = target_user.id
-    
-    remove_chat_moderator(message.chat.id, target_id)
+    remove_chat_moderator(message.chat.id, target_user.id)
     await message.answer(f"✅ {target_user.full_name} лишен прав модератора.")
     await log_action(message.chat.id, f"👮 {message.from_user.full_name} лишил прав модератора {target_user.full_name}")
 
@@ -239,4 +222,4 @@ async def list_moderators(message: Message):
         username = mod['username'] or f"user_{mod['user_id']}"
         mod_list.append(f"• {username} (назначен {mod['assigned_at'][:10]})")
     
-    await message.answer(f"👮 **Модераторы бота в этом чате:**\n\n" + "\n".join(mod_list))
+    await message.answer(f"👮 **Модераторы:**\n\n" + "\n".join(mod_list))
