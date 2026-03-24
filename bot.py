@@ -11,18 +11,15 @@ from handlers import admin, user, games, economy, report, instructions, callback
 from database.db import init_db
 from utils.logger import log_info, log_attack
 from utils.antispam import cleanup_old_data
-from utils.lock import acquire_lock, kill_other_processes
+# Импортируем lock напрямую, а не через utils
+from utils.lock import acquire_lock
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
 # ========== ЗАЩИТА ОТ ДУБЛИРУЮЩИХСЯ ПРОЦЕССОВ ==========
 
-# Принудительно убиваем старые процессы (опционально)
-# Раскомментируй, если нужно гарантированно очистить
-# kill_other_processes()
-
-# Пытаемся захватить блокировку
+# Проверяем, не запущен ли уже бот
 if not acquire_lock():
     print("❌ Бот уже запущен! Завершаем этот процесс.")
     sys.exit(0)
@@ -73,9 +70,10 @@ async def monitor_resources():
             if ADMIN_IDS:
                 await bot.send_message(
                     ADMIN_IDS[0],
-                    f"⚠️ **ВНИМАНИЕ! Высокая нагрузка!**\n\n"
+                    f"⚠️ **ВНИМАНИЕ! Высокая нагрузка на сервер!**\n\n"
                     f"📊 CPU: {cpu_percent}%\n"
-                    f"💾 RAM: {mem_percent}% ({mem_used:.0f}MB)"
+                    f"💾 RAM: {mem_percent}% ({mem_used:.0f}MB)\n\n"
+                    f"Возможна DDoS-атака или перегрузка бота."
                 )
         elif cpu_percent > 50 or mem_percent > 50:
             log_info(f"📊 Нагрузка: CPU={cpu_percent}%, RAM={mem_percent}% ({mem_used:.0f}MB)")
@@ -98,5 +96,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("👋 Бот остановлен вручную")
     finally:
-        # Блокировка автоматически освободится через atexit
-        print("🔓 Блокировка освобождена")
+        print("🔓 Бот завершен")
