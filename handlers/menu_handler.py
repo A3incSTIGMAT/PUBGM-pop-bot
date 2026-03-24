@@ -4,7 +4,7 @@
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -449,7 +449,7 @@ async def stats_top_messages(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ========== ПОКУПКА NCOIN ЗА STARS ==========
+# ========== ПОКУПКА NCOIN ЗА STARS (ИСПРАВЛЕННЫЙ) ==========
 
 @router.callback_query(lambda c: c.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
@@ -476,10 +476,12 @@ async def pre_checkout_query(pre_checkout_q: PreCheckoutQuery):
     """Подтверждение платежа"""
     await pre_checkout_q.answer(ok=True)
 
-@router.message(SuccessfulPayment())
+@router.message(F.successful_payment)
 async def successful_payment(message: Message):
     """Обработка успешного платежа"""
     payment = message.successful_payment
+    
+    # Извлекаем данные из payload
     payload = payment.invoice_payload
     parts = payload.split("_")
     
@@ -490,10 +492,15 @@ async def successful_payment(message: Message):
         stars = payment.total_amount
         ncoin = stars * STARS_TO_NCOIN
     
-    update_balance(message.from_user.id, message.chat.id, ncoin)
+    # Начисляем NCoin
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    update_balance(user_id, chat_id, ncoin)
+    
+    new_balance = get_balance(user_id, chat_id)
     
     await message.answer(
         f"✅ **Пополнение успешно!**\n\n"
         f"⭐ {stars} Stars → 💎 {ncoin} NCoin\n\n"
-        f"💰 Ваш баланс: {get_balance(message.from_user.id, message.chat.id)} NCoin"
+        f"💰 Ваш баланс: {new_balance} NCoin"
     )
