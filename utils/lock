@@ -5,7 +5,6 @@
 """
 
 import os
-import sys
 import fcntl
 import atexit
 import time
@@ -93,8 +92,7 @@ def kill_other_processes():
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
         
-    except (FileNotFoundError, ValueError, OSError) as e:
-        # Файла блокировки нет или ошибка — ничего не делаем
+    except (FileNotFoundError, ValueError, OSError):
         pass
     except Exception as e:
         print(f"⚠️ Ошибка при очистке старых процессов: {e}")
