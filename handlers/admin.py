@@ -15,8 +15,6 @@ from keyboards.setup_menu import get_setup_menu
 from utils.logger import log_admin
 
 router = Router()
-
-# Бот будет установлен из bot.py
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
@@ -32,7 +30,7 @@ async def log_action(chat_id: int, action_text: str):
         except:
             pass
 
-# ========== КОМАНДЫ ==========
+# ========== АДМИН-КОМАНДЫ ==========
 
 @router.message(Command("all"))
 async def tag_all(message: Message):
@@ -122,14 +120,15 @@ async def set_welcome_message(message: Message):
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
+        current = get_welcome_message(message.chat.id)
         await message.answer(
-            "📝 **Настройка приветствия**\n\n"
-            "Использование: /setwelcome [текст]\n\n"
-            "Переменные:\n"
-            "• `{user}` — имя нового участника\n"
-            "• `{chat}` — название чата\n\n"
-            "Пример: /setwelcome Добро пожаловать, {user}! Рады видеть в {chat}!\n\n"
-            f"Текущее приветствие: {get_welcome_message(message.chat.id) or 'не установлено'}"
+            f"📝 **Настройка приветствия**\n\n"
+            f"Использование: /setwelcome [текст]\n\n"
+            f"Переменные:\n"
+            f"• `{{user}}` — имя нового участника\n"
+            f"• `{{chat}}` — название чата\n\n"
+            f"Пример: /setwelcome Добро пожаловать, {{user}}! Рады видеть в {{chat}}!\n\n"
+            f"Текущее приветствие: {current or 'не установлено'}"
         )
         return
     
@@ -167,14 +166,11 @@ async def set_log_channel_command(message: Message):
 
 @router.message(Command("setup"))
 async def setup_bot(message: Message):
-    """Мастер настройки бота"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать бота.")
         return
     
-    chat_id = message.chat.id
-    
-    log_channel = get_log_channel(chat_id)
+    log_channel = get_log_channel(message.chat.id)
     reports_enabled = log_channel is not None
     
     status_text = (
@@ -188,7 +184,6 @@ async def setup_bot(message: Message):
 
 @router.message(Command("addmod"))
 async def add_moderator(message: Message):
-    """Назначить модератора бота"""
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав назначать модераторов.")
         return
@@ -203,7 +198,6 @@ async def add_moderator(message: Message):
     try:
         chat = await bot.get_chat(message.chat.id)
         member = await chat.get_member(target_id)
-        
         if member.status in ['creator', 'administrator']:
             await message.answer(f"❌ {target_user.full_name} уже является администратором Telegram.")
             return
@@ -216,7 +210,6 @@ async def add_moderator(message: Message):
 
 @router.message(Command("removemod"))
 async def remove_moderator(message: Message):
-    """Удалить модератора бота"""
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав удалять модераторов.")
         return
@@ -234,7 +227,6 @@ async def remove_moderator(message: Message):
 
 @router.message(Command("mods"))
 async def list_moderators(message: Message):
-    """Список модераторов бота"""
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав просматривать список модераторов.")
         return
@@ -250,6 +242,4 @@ async def list_moderators(message: Message):
         username = mod['username'] or f"user_{mod['user_id']}"
         mod_list.append(f"• {username} (назначен {mod['assigned_at'][:10]})")
     
-    await message.answer(
-        f"👮 **Модераторы бота в этом чате:**\n\n" + "\n".join(mod_list)
-    )
+    await message.answer(f"👮 **Модераторы бота в этом чате:**\n\n" + "\n".join(mod_list))
