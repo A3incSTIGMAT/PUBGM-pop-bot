@@ -1,11 +1,16 @@
 from aiogram import Router, Bot
 from aiogram.types import CallbackQuery
 
-from database.db import get_log_channel, set_log_channel
+from database.db import get_log_channel
 from keyboards.setup_menu import get_setup_menu, get_reports_setup_menu, get_safezone_menu
 
 router = Router()
-bot = Bot(current_bot.token)
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    """Установить экземпляр бота"""
+    global bot
+    bot = bot_instance
 
 @router.callback_query(lambda c: c.data == "setup_reports")
 async def setup_reports(callback: CallbackQuery):
@@ -113,35 +118,33 @@ async def setup_close(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "safezone_night")
-async def safezone_night(callback: CallbackQuery):
-    """Ночной режим"""
+@router.callback_query(lambda c: c.data == "setup_safezone")
+async def setup_safezone(callback: CallbackQuery):
+    """Безопасная зона"""
     await callback.message.edit_text(
-        "🌙 **Ночной режим**\n\n"
-        "Временно отключает возможность отправки сообщений\n"
-        "в указанный период (например, 23:00-07:00).\n\n"
-        "⚙️ Настройка будет добавлена в следующем обновлении."
+        "🔐 **Безопасная зона**\n\n"
+        "Функции для защиты чата:\n\n"
+        "• 🌙 **Ночной режим** — ограничение сообщений ночью\n"
+        "• 🚫 **Блокировка ссылок** — автоматическое удаление ссылок\n"
+        "• 📵 **Блокировка медиа** — запрет фото/видео в указанное время\n\n"
+        "Выберите функцию для настройки:",
+        reply_markup=get_safezone_menu()
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "safezone_links")
-async def safezone_links(callback: CallbackQuery):
-    """Блокировка ссылок"""
+@router.callback_query(lambda c: c.data.startswith("safezone_"))
+async def safezone_action(callback: CallbackQuery):
+    """Действия безопасной зоны"""
+    action = callback.data.replace("safezone_", "")
+    
+    messages = {
+        "night": "🌙 **Ночной режим**\n\nВременно отключает возможность отправки сообщений в указанный период (например, 23:00-07:00).\n\n⚙️ Настройка будет добавлена в следующем обновлении.",
+        "links": "🚫 **Блокировка ссылок**\n\nАвтоматически удаляет сообщения со ссылками от пользователей без прав модератора.\n\n⚙️ Настройка будет добавлена в следующем обновлении.",
+        "media": "📵 **Блокировка медиа**\n\nВременно запрещает отправку фото, видео и стикеров в указанный период.\n\n⚙️ Настройка будет добавлена в следующем обновлении."
+    }
+    
     await callback.message.edit_text(
-        "🚫 **Блокировка ссылок**\n\n"
-        "Автоматически удаляет сообщения со ссылками\n"
-        "от пользователей без прав модератора.\n\n"
-        "⚙️ Настройка будет добавлена в следующем обновлении."
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "safezone_media")
-async def safezone_media(callback: CallbackQuery):
-    """Блокировка медиа"""
-    await callback.message.edit_text(
-        "📵 **Блокировка медиа**\n\n"
-        "Временно запрещает отправку фото, видео и стикеров\n"
-        "в указанный период (например, 23:00-07:00).\n\n"
-        "⚙️ Настройка будет добавлена в следующем обновлении."
+        messages.get(action, "🔐 **Безопасная зона**\n\nФункция в разработке."),
+        reply_markup=get_safezone_menu()
     )
     await callback.answer()
