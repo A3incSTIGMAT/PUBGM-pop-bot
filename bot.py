@@ -6,7 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from config import BOT_TOKEN
-from handlers import admin, user, games, economy, report, instructions, callbacks, roles
+from handlers import admin, user, games, economy, balance_handler, report, instructions, callbacks, roles
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -50,19 +50,18 @@ dp.include_router(admin.router)
 dp.include_router(user.router)
 dp.include_router(games.router)
 dp.include_router(economy.router)
+dp.include_router(balance_handler.router)  # ← НОВЫЙ РОУТЕР
 dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
 print("✅ Все роутеры зарегистрированы")
-print(f"   - economy router: {economy.router}")
-print(f"   - games router: {games.router}")
+print(f"   - balance_handler router: {balance_handler.router}")
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
-    print("📋 Доступные команды: /start, /help, /balance, /daily, /rps, /roulette, /stats, /myrole, /gift, /top")
-    print("⏳ Ожидание сообщений...\n")
+    print("📋 Команды: /balance, /daily")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
