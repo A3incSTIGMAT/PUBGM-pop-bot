@@ -5,7 +5,7 @@ from aiogram.types import Message
 
 from database.db import get_balance, update_balance, add_user
 
-# Создаём роутер — ОБЯЗАТЕЛЬНО!
+# Создаём роутер
 router = Router()
 
 # Хранилище для ежедневных бонусов
