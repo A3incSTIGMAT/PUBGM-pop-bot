@@ -32,26 +32,41 @@ async def log_action(chat_id: int, action_text: str):
 
 @router.message(Command("all"))
 async def tag_all(message: Message):
+    """Отметить всех участников чата"""
     if not await can_ban(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут использовать эту команду.")
         return
     
-    await message.answer("🔔 Получаю список участников...")
+    status_msg = await message.answer("🔔 Получаю список участников...")
     
     members = []
-    async for member in message.chat.get_chat_members():
-        if not member.user.is_bot:
-            mention = f"@{member.user.username}" if member.user.username else member.user.full_name
-            members.append(mention)
+    count = 0
     
-    if members:
-        text = "🔔 ВНИМАНИЕ ВСЕМ!\n\n" + "\n".join(members[:50])
-        await message.answer(text)
-        if len(members) > 50:
-            await message.answer("\n".join(members[50:100]))
-        await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех")
-    else:
-        await message.answer("❌ Не удалось получить список участников.")
+    try:
+        async for member in message.chat.get_chat_members():
+            if not member.user.is_bot:
+                mention = f"@{member.user.username}" if member.user.username else member.user.full_name
+                members.append(mention)
+                count += 1
+                
+                if count % 50 == 0:
+                    await status_msg.edit_text(f"🔔 Получаю список участников... ({count} найдено)")
+        
+        await status_msg.delete()
+        
+        if members:
+            total = len(members)
+            await message.answer(f"🔔 ВНИМАНИЕ ВСЕМ! ({total} участников)\n\n" + "\n".join(members[:50]))
+            
+            for i in range(50, total, 50):
+                await message.answer("\n".join(members[i:i+50]))
+            
+            await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата ({total} чел)")
+        else:
+            await message.answer("❌ Не удалось получить список участников. Убедитесь, что бот имеет права администратора.")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при получении участников: {e}\n\nУбедитесь, что бот имеет права администратора.")
 
 @router.message(Command("ban"))
 async def ban_user(message: Message):
