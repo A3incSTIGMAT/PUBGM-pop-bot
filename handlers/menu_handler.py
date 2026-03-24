@@ -2,21 +2,31 @@
 Обработчик меню и callback-запросов
 """
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from handlers.roles import get_user_role
 from keyboards.main_menu import (
     get_main_menu, get_profile_menu, get_economy_menu,
     get_games_menu, get_moderation_menu, get_stats_menu,
     get_social_menu, get_settings_menu, get_management_menu,
-    get_help_menu, get_back_menu
+    get_help_menu, get_back_menu, get_buy_ncoin_menu, get_stars_menu
 )
-from database.db import get_balance, get_user_stats
+from database.db import get_balance, get_user_stats, update_balance
 from utils.helpers import delete_after_response
 
 router = Router()
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    global bot
+    bot = bot_instance
+
+# Курс обмена Stars -> NCoin
+STARS_TO_NCOIN = 10  # 1 Star = 10 NCoin
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -63,7 +73,8 @@ async def menu_economy(callback: CallbackQuery):
     """Меню экономики"""
     await callback.message.edit_text(
         "💰 **Экономика NEXUS**\n\n"
-        "Валюта: NCoin\n\n"
+        "Валюта: NCoin\n"
+        "1 Star = 10 NCoin\n\n"
         "Выберите действие:",
         reply_markup=get_economy_menu()
     )
@@ -114,6 +125,30 @@ async def menu_social(callback: CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(lambda c: c.data == "menu_stars")
+async def menu_stars(callback: CallbackQuery):
+    """Меню Telegram Stars"""
+    await callback.message.edit_text(
+        "⭐ **Telegram Stars**\n\n"
+        "Внутренняя валюта Telegram.\n"
+        "1 Star = 10 NCoin\n\n"
+        "Выберите действие:",
+        reply_markup=get_stars_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "menu_buy")
+async def menu_buy(callback: CallbackQuery):
+    """Меню покупки NCoin"""
+    await callback.message.edit_text(
+        "💎 **Купить NCoin**\n\n"
+        "Выберите сумму для пополнения:\n"
+        "⭐ 1 Star = 10 NCoin\n\n"
+        "Оплата через Telegram Stars",
+        reply_markup=get_buy_ncoin_menu()
+    )
+    await callback.answer()
+
 @router.callback_query(lambda c: c.data == "menu_settings")
 async def menu_settings(callback: CallbackQuery):
     """Меню настроек (админ)"""
@@ -155,12 +190,12 @@ async def menu_about(callback: CallbackQuery):
         "• 💰 Экономика (NCoin)\n"
         "• 🎮 Игры\n"
         "• 📊 Статистика\n"
-        "• 🔐 Защита от спама и ботов\n\n"
+        "• 🔐 Защита от спама и ботов\n"
+        "• ⭐ Telegram Stars интеграция\n\n"
         "🚀 **Скоро:**\n"
         "• Магазин подарков\n"
         "• Кланы\n"
-        "• VIP-статусы\n"
-        "• Реальные покупки\n\n"
+        "• VIP-статусы\n\n"
         "📖 Справка: /help\n"
         "🔧 Настройка: /setup\n\n"
         "Разработчик: @A3incSTIGMAT",
@@ -179,7 +214,8 @@ async def profile_balance(callback: CallbackQuery):
     
     await callback.message.edit_text(
         f"💰 **Ваш баланс:** {balance} NCoin\n\n"
-        f"💡 Получить бонус: /daily",
+        f"💡 Получить бонус: /daily\n"
+        f"⭐ Пополнить: /buy",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -251,7 +287,8 @@ async def eco_balance(callback: CallbackQuery):
     
     await callback.message.edit_text(
         f"💰 **Ваш баланс:** {balance} NCoin\n\n"
-        f"💡 Получить бонус: /daily",
+        f"💡 Получить бонус: /daily\n"
+        f"⭐ Пополнить через Stars: /buy",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -283,6 +320,32 @@ async def eco_top(callback: CallbackQuery):
     await callback.message.edit_text(
         "🏆 **Топ богачей**\n\n"
         "Используйте команду /top для просмотра топа",
+        reply_markup=get_back_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "eco_buy")
+async def eco_buy(callback: CallbackQuery):
+    """Купить NCoin"""
+    await callback.message.edit_text(
+        "💎 **Купить NCoin**\n\n"
+        "Выберите сумму для пополнения:",
+        reply_markup=get_buy_ncoin_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "eco_stars")
+async def eco_stars(callback: CallbackQuery):
+    """Информация о Stars"""
+    await callback.message.edit_text(
+        "⭐ **Telegram Stars**\n\n"
+        "Внутренняя валюта Telegram.\n"
+        "1 Star = 10 NCoin\n\n"
+        "📌 **Как пополнить Stars:**\n"
+        "1. Откройте настройки Telegram\n"
+        "2. Перейдите в Telegram Stars\n"
+        "3. Пополните баланс\n\n"
+        "4. Вернитесь в бота и выберите /buy",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -385,3 +448,52 @@ async def stats_top_messages(callback: CallbackQuery):
         reply_markup=get_back_menu()
     )
     await callback.answer()
+
+# ========== ПОКУПКА NCOIN ЗА STARS ==========
+
+@router.callback_query(lambda c: c.data.startswith("buy_"))
+async def process_buy(callback: CallbackQuery):
+    """Обработка выбора суммы для покупки"""
+    stars = int(callback.data.replace("buy_", ""))
+    ncoin = stars * STARS_TO_NCOIN
+    
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=f"Покупка {ncoin} NCoin",
+        description=f"Пополнение баланса NEXUS: {ncoin} NCoin за {stars} Stars",
+        payload=f"buy_{stars}_{ncoin}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{ncoin} NCoin", amount=stars)],
+        start_parameter="buy_ncoin",
+        reply_markup=get_back_menu()
+    )
+    
+    await callback.answer("💎 Открываю оплату...")
+
+@router.pre_checkout_query(lambda q: True)
+async def pre_checkout_query(pre_checkout_q: PreCheckoutQuery):
+    """Подтверждение платежа"""
+    await pre_checkout_q.answer(ok=True)
+
+@router.message(SuccessfulPayment())
+async def successful_payment(message: Message):
+    """Обработка успешного платежа"""
+    payment = message.successful_payment
+    payload = payment.invoice_payload
+    parts = payload.split("_")
+    
+    if len(parts) >= 3:
+        stars = int(parts[1])
+        ncoin = int(parts[2])
+    else:
+        stars = payment.total_amount
+        ncoin = stars * STARS_TO_NCOIN
+    
+    update_balance(message.from_user.id, message.chat.id, ncoin)
+    
+    await message.answer(
+        f"✅ **Пополнение успешно!**\n\n"
+        f"⭐ {stars} Stars → 💎 {ncoin} NCoin\n\n"
+        f"💰 Ваш баланс: {get_balance(message.from_user.id, message.chat.id)} NCoin"
+    )
