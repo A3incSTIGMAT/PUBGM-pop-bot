@@ -10,64 +10,44 @@ from handlers import admin, user, games, economy, report, instructions, callback
 from database.db import init_db
 from utils.lock import acquire_lock
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# ========== ЗАЩИТА ОТ ДУБЛИРУЮЩИХСЯ ПРОЦЕССОВ ==========
 if not acquire_lock():
-    print("❌ Бот уже запущен! Завершаем этот процесс.")
+    print("❌ Бот уже запущен!")
     sys.exit(0)
 
-print("🔒 Блокировка захвачена. Бот запускается...")
+print("🔒 Бот запускается...")
 
-# ========== СОЗДАНИЕ БОТА ==========
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
-# ========== ПЕРЕДАЧА БОТА ВО ВСЕ МОДУЛИ ==========
 admin.set_bot(bot)
 user.set_bot(bot)
 report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 
-# ========== СОЗДАНИЕ ДИСПЕТЧЕРА ==========
 dp = Dispatcher()
-
-# ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 init_db()
 
-# ========== РЕГИСТРАЦИЯ ВСЕХ РОУТЕРОВ ==========
+# РЕГИСТРАЦИЯ ВСЕХ РОУТЕРОВ
 dp.include_router(admin.router)
 dp.include_router(user.router)
 dp.include_router(games.router)
-dp.include_router(economy.router)
+dp.include_router(economy.router)   # ← ЭТОТ ДОЛЖЕН БЫТЬ
 dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
-# ========== ПРОВЕРКА РЕГИСТРАЦИИ (ЛОГИ) ==========
-print("✅ Зарегистрированы роутеры:")
-print(f"   - admin: {admin.router}")
-print(f"   - user: {user.router}")
-print(f"   - games: {games.router}")
+print("✅ Роутеры зарегистрированы:")
 print(f"   - economy: {economy.router}")
-print(f"   - report: {report.router}")
-print(f"   - instructions: {instructions.router}")
-print(f"   - callbacks: {callbacks.router}")
 
-# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
     print("🤖 NEXUS-bot запущен!")
-    print("📋 Доступные команды: /start, /help, /balance, /daily, /rps, /roulette, /stats, /myrole, /gift, /top")
+    print("📋 Команды: /balance, /daily, /rps, /roulette")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("👋 Бот остановлен вручную")
-    finally:
-        print("🔓 Бот завершен")
+    asyncio.run(main())
