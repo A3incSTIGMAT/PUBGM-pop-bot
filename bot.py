@@ -50,7 +50,7 @@ dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
-# ========== ПРОВЕРКА РЕГИСТРАЦИИ ==========
+# ========== ПРОВЕРКА РЕГИСТРАЦИИ (ЛОГИ) ==========
 print("✅ Зарегистрированы роутеры:")
 print(f"   - admin: {admin.router}")
 print(f"   - user: {user.router}")
@@ -62,6 +62,7 @@ print(f"   - callbacks: {callbacks.router}")
 
 # ========== МОНИТОРИНГ РЕСУРСОВ ==========
 async def monitor_resources():
+    """Фоновый мониторинг нагрузки на сервер"""
     while True:
         await asyncio.sleep(60)
         cpu_percent = psutil.cpu_percent(interval=1)
@@ -73,8 +74,12 @@ async def monitor_resources():
             if ADMIN_IDS:
                 await bot.send_message(
                     ADMIN_IDS[0],
-                    f"⚠️ Высокая нагрузка!\nCPU: {cpu_percent}%\nRAM: {mem_percent}%"
+                    f"⚠️ **Высокая нагрузка!**\n"
+                    f"📊 CPU: {cpu_percent}%\n"
+                    f"💾 RAM: {mem_percent}% ({mem_used:.0f}MB)"
                 )
+        elif cpu_percent > 50 or mem_percent > 50:
+            log_info(f"📊 Нагрузка: CPU={cpu_percent}%, RAM={mem_percent}% ({mem_used:.0f}MB)")
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 async def main():
@@ -83,13 +88,17 @@ async def main():
     log_info("🔒 Защита от дублирующихся процессов: активна")
     log_info("📋 Доступные команды: /start, /help, /balance, /daily, /rps, /roulette, /stats, /myrole, /gift, /top")
     
+    # Запускаем фоновые задачи
     asyncio.create_task(monitor_resources())
     asyncio.create_task(cleanup_old_data())
     
+    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("👋 Бот остановлен")
+        print("👋 Бот остановлен вручную")
+    finally:
+        print("🔓 Бот завершен")
