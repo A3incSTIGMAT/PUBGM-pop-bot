@@ -37,36 +37,68 @@ async def tag_all(message: Message):
         await message.answer("❌ Только администраторы могут использовать эту команду.")
         return
     
-    status_msg = await message.answer("🔔 Получаю список участников...")
+    # Проверяем тип чата
+    chat_type = message.chat.type
     
-    members = []
-    count = 0
+    # Для обычных групп
+    if chat_type == "group":
+        await message.answer(
+            "⚠️ **Внимание!**\n\n"
+            "Это обычная группа. Для работы команды /all необходимо:\n\n"
+            "1️⃣ Преобразовать группу в **супергруппу**\n"
+            "   (нажмите на название группы → Информация → Преобразовать)\n\n"
+            "2️⃣ Дать боту права **администратора**\n\n"
+            "После этого команда заработает."
+        )
+        return
     
+    # Для супергрупп и каналов
     try:
+        # Проверяем права бота
+        bot_member = await message.chat.get_member(bot.id)
+        if bot_member.status not in ['administrator', 'creator']:
+            await message.answer(
+                "❌ **Бот не является администратором!**\n\n"
+                "Для работы /all необходимо:\n"
+                "1. Назначить бота администратором чата\n"
+                "2. Включить права: `can_restrict_members` и `can_manage_chat`"
+            )
+            return
+        
+        status_msg = await message.answer("🔄 Получаю список участников...")
+        
+        members = []
         async for member in message.chat.get_chat_members():
             if not member.user.is_bot:
                 mention = f"@{member.user.username}" if member.user.username else member.user.full_name
                 members.append(mention)
-                count += 1
-                
-                if count % 50 == 0:
-                    await status_msg.edit_text(f"🔔 Получаю список участников... ({count} найдено)")
         
         await status_msg.delete()
         
         if members:
             total = len(members)
-            await message.answer(f"🔔 ВНИМАНИЕ ВСЕМ! ({total} участников)\n\n" + "\n".join(members[:50]))
+            await message.answer(f"👥 **{total} участников** в чате. Отправляю список...")
             
-            for i in range(50, total, 50):
-                await message.answer("\n".join(members[i:i+50]))
+            # Отправляем всех участников (разбиваем на части по 50)
+            text = "🔔 **ВНИМАНИЕ ВСЕМ!**\n\n" + "\n".join(members[:50])
+            await message.answer(text)
+            
+            if total > 50:
+                for i in range(50, total, 50):
+                    await message.answer("\n".join(members[i:i+50]))
             
             await log_action(message.chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата ({total} чел)")
         else:
-            await message.answer("❌ Не удалось получить список участников. Убедитесь, что бот имеет права администратора.")
+            await message.answer("❌ Не удалось получить список участников.")
             
     except Exception as e:
-        await message.answer(f"❌ Ошибка при получении участников: {e}\n\nУбедитесь, что бот имеет права администратора.")
+        error_msg = str(e)
+        if "Chat not found" in error_msg:
+            await message.answer("❌ Ошибка: чат не найден или бот не имеет доступа.")
+        elif "Forbidden" in error_msg:
+            await message.answer("❌ Ошибка: недостаточно прав. Убедитесь, что бот является администратором.")
+        else:
+            await message.answer(f"❌ Ошибка: {error_msg[:200]}")
 
 @router.message(Command("ban"))
 async def ban_user(message: Message):
