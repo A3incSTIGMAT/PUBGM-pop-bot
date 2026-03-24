@@ -3,11 +3,9 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from database.db import get_balance, update_balance, add_user, init_db
-from utils.logger import log_economy
+from database.db import get_balance, update_balance, add_user
 
 router = Router()
-init_db()
 
 last_daily = {}
 
@@ -40,7 +38,6 @@ async def daily_bonus(message: Message):
         f"+50 NCoin\n"
         f"💰 Баланс: {get_balance(user_id, chat_id)} NCoin"
     )
-    log_economy(message.from_user.full_name, "daily", 50)
 
 @router.message(Command("gift"))
 async def send_gift(message: Message):
@@ -76,7 +73,6 @@ async def send_gift(message: Message):
         f"🎁 Вы подарили {amount} NCoin пользователю @{target_username}\n\n"
         f"✨ Функция автоматического перевода скоро будет доступна!"
     )
-    log_economy(message.from_user.full_name, "gift", amount, target_username)
 
 @router.message(Command("top"))
 async def show_top(message: Message):
