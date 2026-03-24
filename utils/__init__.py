@@ -1,4 +1,5 @@
 from . import antispam
 from . import filters
 from . import logger
-from . import lock
+# lock НЕ импортируем здесь, чтобы избежать циклических импортов
+# lock будет импортироваться напрямую в bot.py
