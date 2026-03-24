@@ -14,19 +14,21 @@ from utils.antispam import cleanup_old_data
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Создаем бота и диспетчер
+# Создаем бота
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-dp = Dispatcher()
 
-# Передаем бота в модули
-admin.bot = bot
-user.bot = bot
-report.bot = bot
-callbacks.bot = bot
-roles.set_bot(bot)  # Устанавливаем бота для модуля ролей
+# Передаем бота во все модули
+admin.set_bot(bot)
+user.set_bot(bot)
+report.set_bot(bot)
+callbacks.set_bot(bot)
+roles.set_bot(bot)
+
+# Создаем диспетчер
+dp = Dispatcher()
 
 # Инициализируем базу данных
 init_db()
