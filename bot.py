@@ -11,7 +11,7 @@ from handlers import admin, user, games, economy, report, instructions, callback
 from database.db import init_db
 from utils.logger import log_info, log_attack
 from utils.antispam import cleanup_old_data
-# Импортируем lock напрямую, а не через utils
+# Импортируем lock напрямую
 from utils.lock import acquire_lock
 
 # Настройка логирования
@@ -19,7 +19,6 @@ logging.basicConfig(level=logging.INFO)
 
 # ========== ЗАЩИТА ОТ ДУБЛИРУЮЩИХСЯ ПРОЦЕССОВ ==========
 
-# Проверяем, не запущен ли уже бот
 if not acquire_lock():
     print("❌ Бот уже запущен! Завершаем этот процесс.")
     sys.exit(0)
@@ -28,26 +27,20 @@ print("🔒 Блокировка захвачена. Бот запускаетс
 
 # ========== ОСНОВНОЙ КОД ==========
 
-# Создаем бота
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
-# Передаем бота во все модули
 admin.set_bot(bot)
 user.set_bot(bot)
 report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 
-# Создаем диспетчер
 dp = Dispatcher()
-
-# Инициализируем базу данных
 init_db()
 
-# Регистрируем обработчики
 dp.include_router(admin.router)
 dp.include_router(user.router)
 dp.include_router(games.router)
@@ -57,32 +50,23 @@ dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 
 async def monitor_resources():
-    """Фоновый мониторинг ресурсов"""
     while True:
         await asyncio.sleep(60)
-        
         cpu_percent = psutil.cpu_percent(interval=1)
         mem_percent = psutil.virtual_memory().percent
         mem_used = psutil.virtual_memory().used / (1024 * 1024)
         
         if cpu_percent > 80 or mem_percent > 80:
-            log_attack(f"⚠️ ВЫСОКАЯ НАГРУЗКА! CPU={cpu_percent}%, RAM={mem_percent}% ({mem_used:.0f}MB)")
+            log_attack(f"⚠️ ВЫСОКАЯ НАГРУЗКА! CPU={cpu_percent}%, RAM={mem_percent}%")
             if ADMIN_IDS:
                 await bot.send_message(
                     ADMIN_IDS[0],
-                    f"⚠️ **ВНИМАНИЕ! Высокая нагрузка на сервер!**\n\n"
-                    f"📊 CPU: {cpu_percent}%\n"
-                    f"💾 RAM: {mem_percent}% ({mem_used:.0f}MB)\n\n"
-                    f"Возможна DDoS-атака или перегрузка бота."
+                    f"⚠️ Высокая нагрузка!\nCPU: {cpu_percent}%\nRAM: {mem_percent}%"
                 )
-        elif cpu_percent > 50 or mem_percent > 50:
-            log_info(f"📊 Нагрузка: CPU={cpu_percent}%, RAM={mem_percent}% ({mem_used:.0f}MB)")
 
 async def main():
     log_info("🤖 NEXUS-bot запущен!")
-    log_info("🛡 Режим защиты активен: Rate limiting, Anti-spam, Temp bans")
-    log_info("🛡 Анонимные репорты: включены")
-    log_info("👮 Система ролей: глобальный админ, владелец чата, админ, модератор")
+    log_info("🛡 Защита активна: Rate limiting, Anti-spam")
     log_info("🔒 Защита от дублирующихся процессов: активна")
     
     asyncio.create_task(monitor_resources())
@@ -94,6 +78,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("👋 Бот остановлен вручную")
-    finally:
-        print("🔓 Бот завершен")
+        print("👋 Бот остановлен")
