@@ -1,22 +1,17 @@
-"""
-Руководство для администраторов NEXUS бота.
-"""
-
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from handlers.roles import get_user_role, can_configure
+from handlers.roles import get_user_role
 
 router = Router()
 
 @router.message(Command("admin_guide"))
 async def admin_guide(message: Message):
-    """Руководство для администраторов"""
     role = await get_user_role(message.chat.id, message.from_user.id)
     
     if role not in ['global_admin', 'creator', 'admin']:
-        await message.answer("❌ Это руководство предназначено для администраторов чата.")
+        await message.answer("❌ Это руководство для администраторов чата.")
         return
     
     guide = (
@@ -28,11 +23,10 @@ async def admin_guide(message: Message):
         "🛡 **Анонимные репорты:**\n"
         "• Участники пишут /report @username [причина]\n"
         "• Жалобы приходят в лог-канал\n"
-        "• Вы не видите, кто пожаловался\n"
-        "• Идеально для крупных чатов\n\n"
+        "• Вы не видите, кто пожаловался\n\n"
         "👮 **Управление модераторами:**\n"
-        "/addmod — назначить модератора (ответом)\n"
-        "/removemod — удалить модератора (ответом)\n"
+        "/addmod — назначить модератора\n"
+        "/removemod — удалить модератора\n"
         "/mods — список модераторов\n\n"
         "📋 **Команды админа:**\n"
         "/setup — мастер настройки\n"
@@ -41,15 +35,6 @@ async def admin_guide(message: Message):
         "/all — отметить всех\n"
         "/ban — забанить (ответом)\n"
         "/mute — заглушить (ответом)\n\n"
-        "📊 **Статистика:**\n"
-        "/stats — моя статистика\n"
-        "/top — топ участников\n"
-        "/reports_stats — статистика жалоб\n\n"
-        "💡 **Советы:**\n"
-        "• Лог-канал сделайте приватным\n"
-        "• Проверяйте жалобы регулярно\n"
-        "• Используйте /report для теста\n\n"
-        "🚀 Готово! Ваш чат под надежной защитой!"
+        "🚀 Готово!"
     )
-    
     await message.answer(guide)
