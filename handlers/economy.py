@@ -4,7 +4,6 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from database.db import get_balance, update_balance, add_user, init_db
-from utils.antispam import is_temp_banned, is_rate_limited
 from utils.logger import log_economy
 
 router = Router()
@@ -15,7 +14,8 @@ last_daily = {}
 @router.message(Command("balance"))
 async def show_balance(message: Message):
     user_id = message.from_user.id
-    balance = get_balance(user_id, message.chat.id)
+    chat_id = message.chat.id
+    balance = get_balance(user_id, chat_id)
     await message.answer(f"💰 Ваш баланс: {balance} NCoin")
 
 @router.message(Command("daily"))
@@ -64,14 +64,17 @@ async def send_gift(message: Message):
         await message.answer("❌ Сумма должна быть больше 0")
         return
     
-    sender_balance = get_balance(message.from_user.id, message.chat.id)
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    sender_balance = get_balance(user_id, chat_id)
+    
     if sender_balance < amount:
         await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {sender_balance}")
         return
     
     await message.answer(
         f"🎁 Вы подарили {amount} NCoin пользователю @{target_username}\n\n"
-        f"✨ Функция в разработке!"
+        f"✨ Функция автоматического перевода скоро будет доступна!"
     )
     log_economy(message.from_user.full_name, "gift", amount, target_username)
 
@@ -82,5 +85,5 @@ async def show_top(message: Message):
         "1. 👑 — 5000 NCoin\n"
         "2. ⭐ — 3200 NCoin\n"
         "3. 🔥 — 2100 NCoin\n\n"
-        "📊 Скоро будет полноценная таблица!"
+        "📊 Скоро будет полноценная таблица с реальными данными!"
     )
