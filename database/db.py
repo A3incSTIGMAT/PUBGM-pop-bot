@@ -84,6 +84,19 @@ def init_db():
             )
         """)
         
+        # ========== НОВАЯ ТАБЛИЦА ДЛЯ АНОНИМНЫХ ЖАЛОБ ==========
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                reporter_id INTEGER,
+                target_id INTEGER,
+                reason TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         print("✅ База данных инициализирована")
 
 # ========== ПОЛЬЗОВАТЕЛИ ==========
@@ -249,6 +262,68 @@ def is_chat_moderator(chat_id: int, user_id: int) -> bool:
             (chat_id, user_id)
         ).fetchone()
         return result is not None
+
+# ========== АНОНИМНЫЕ ЖАЛОБЫ ==========
+
+def save_report(chat_id: int, reporter_id: int, target_id: int, reason: str):
+    """Сохранить анонимную жалобу"""
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO reports (chat_id, reporter_id, target_id, reason, status)
+            VALUES (?, ?, ?, ?, 'pending')
+        """, (chat_id, reporter_id, target_id, reason))
+
+def get_reports_count(chat_id: int, target_id: int = None) -> int:
+    """Получить количество жалоб"""
+    with get_db() as conn:
+        if target_id:
+            result = conn.execute(
+                "SELECT COUNT(*) as count FROM reports WHERE chat_id = ? AND target_id = ? AND status = 'pending'",
+                (chat_id, target_id)
+            ).fetchone()
+        else:
+            result = conn.execute(
+                "SELECT COUNT(*) as count FROM reports WHERE chat_id = ? AND status = 'pending'",
+                (chat_id,)
+            ).fetchone()
+        return result["count"] if result else 0
+
+def resolve_report(report_id: int):
+    """Отметить жалобу как рассмотренную"""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE reports SET status = 'resolved' WHERE id = ?",
+            (report_id,)
+        )
+
+def get_reports_stats(chat_id: int):
+    """Получить статистику жалоб для чата"""
+    with get_db() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) as count FROM reports WHERE chat_id = ? AND status = 'pending'",
+            (chat_id,)
+        ).fetchone()["count"] or 0
+        
+        resolved = conn.execute(
+            "SELECT COUNT(*) as count FROM reports WHERE chat_id = ? AND status = 'resolved'",
+            (chat_id,)
+        ).fetchone()["count"] or 0
+        
+        top_targets = conn.execute("""
+            SELECT target_id, COUNT(*) as count 
+            FROM reports 
+            WHERE chat_id = ? 
+            GROUP BY target_id 
+            ORDER BY count DESC 
+            LIMIT 5
+        """, (chat_id,)).fetchall()
+        
+        return {
+            "pending": pending,
+            "resolved": resolved,
+            "total": pending + resolved,
+            "top_targets": [dict(row) for row in top_targets]
+        }
 
 # ========== КАПЧА ==========
 
