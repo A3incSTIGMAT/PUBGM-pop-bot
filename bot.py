@@ -38,13 +38,6 @@ ai_agent.set_bot(bot)
 dp = Dispatcher()
 init_db()
 
-# Инициализация AI-агента
-async def init_ai():
-    await ai_agent.ai_agent.initialize()
-
-# Запускаем инициализацию AI
-asyncio.create_task(init_ai())
-
 # Регистрация роутеров
 dp.include_router(economy.router)
 dp.include_router(games_interactive.router)
