@@ -1,10 +1,9 @@
 """
 AI-агент для NEXUS через DeepSeek API
-Полностью интегрирован в бота, переменные читаются из config
+Прямая интеграция без дополнительных библиотек
 """
 
 import aiohttp
-import json
 from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -55,8 +54,7 @@ async def cmd_ask(message: Message):
     if not DEEPSEEK_API_KEY:
         await message.answer(
             "⚠️ **AI-ассистент временно недоступен**\n\n"
-            "API ключ не настроен. Пожалуйста, сообщите администратору.\n\n"
-            "Твой вопрос: " + args[1][:100]
+            "API ключ не настроен. Пожалуйста, сообщите администратору."
         )
         return
     
@@ -79,7 +77,8 @@ async def cmd_ask(message: Message):
                     ],
                     "temperature": 0.7,
                     "max_tokens": 1000
-                }
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 data = await resp.json()
                 
@@ -96,7 +95,6 @@ async def cmd_ask(message: Message):
     
     await status.delete()
     
-    # Обрезаем слишком длинные ответы
     if len(answer) > 4000:
         answer = answer[:4000] + "\n\n... (ответ обрезан)"
     
@@ -138,7 +136,6 @@ async def process_ai_dialog(message: Message, state: FSMContext):
     
     question = message.text
     
-    # Отправляем статус "печатает"
     await message.bot.send_chat_action(message.chat.id, "typing")
     
     try:
@@ -157,7 +154,8 @@ async def process_ai_dialog(message: Message, state: FSMContext):
                     ],
                     "temperature": 0.7,
                     "max_tokens": 1000
-                }
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 data = await resp.json()
                 
@@ -172,7 +170,6 @@ async def process_ai_dialog(message: Message, state: FSMContext):
     except Exception as e:
         answer = f"❌ Неожиданная ошибка: {e}"
     
-    # Обрезаем слишком длинные ответы
     if len(answer) > 4000:
         answer = answer[:4000] + "\n\n... (ответ обрезан)"
     
