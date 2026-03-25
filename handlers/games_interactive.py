@@ -1,7 +1,3 @@
-"""
-Интерактивные игры с кнопками
-"""
-
 import random
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -9,7 +5,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_balance, update_balance, add_user
+from database.db import get_balance, update_balance, add_user, spend_balance
 from utils.logger import log_game
 from utils.helpers import delete_after_response
 
@@ -21,8 +17,7 @@ class GameStates(StatesGroup):
     roulette_color = State()
     rps_choice = State()
 
-# ========== КАМЕНЬ-НОЖНИЦЫ-БУМАГА ==========
-
+# Камень-ножницы-бумага
 @router.message(Command("rps"))
 async def cmd_rps_start(message: Message, state: FSMContext):
     """Начинаем игру в камень-ножницы-бумага"""
@@ -57,7 +52,6 @@ async def process_rps(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Сопоставление выбора
     choices = {
         "rock": {"name": "Камень", "emoji": "🪨"},
         "scissors": {"name": "Ножницы", "emoji": "✂️"},
@@ -67,12 +61,10 @@ async def process_rps(callback: CallbackQuery, state: FSMContext):
     user_choice_name = choices[choice]["name"]
     user_emoji = choices[choice]["emoji"]
     
-    # Бот выбирает случайно
     bot_choice_key = random.choice(list(choices.keys()))
     bot_choice_name = choices[bot_choice_key]["name"]
     bot_emoji = choices[bot_choice_key]["emoji"]
     
-    # Определяем победителя
     if choice == bot_choice_key:
         result = "🤝 Ничья!"
     elif (choice == "rock" and bot_choice_key == "scissors") or \
@@ -91,8 +83,7 @@ async def process_rps(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     log_game(callback.from_user.full_name, "rps", result)
 
-# ========== РУЛЕТКА ==========
-
+# Рулетка
 @router.message(Command("roulette"))
 async def cmd_roulette_start(message: Message, state: FSMContext):
     """Начинаем игру в рулетку"""
@@ -150,7 +141,6 @@ async def process_roulette_bet(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Сохраняем ставку в состояние
     await state.update_data(bet=bet)
     await state.set_state(GameStates.roulette_color)
     
@@ -183,7 +173,6 @@ async def process_roulette_color(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Получаем ставку из состояния
     data = await state.get_data()
     bet = data.get("bet", 0)
     
@@ -196,7 +185,6 @@ async def process_roulette_color(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
-    # Проверяем баланс ещё раз
     balance = get_balance(user_id, chat_id)
     if balance < bet:
         await callback.message.edit_text(
@@ -207,7 +195,6 @@ async def process_roulette_color(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Результат игры
     result_color = random.choice(["red", "black"])
     win = (color == result_color)
     
@@ -222,7 +209,7 @@ async def process_roulette_color(callback: CallbackQuery, state: FSMContext):
         )
         log_game(callback.from_user.full_name, "roulette", "win", win_amount)
     else:
-        update_balance(user_id, chat_id, -bet)
+        spend_balance(user_id, chat_id, bet)
         new_balance = get_balance(user_id, chat_id)
         result_text = (
             f"🎲 Колесо остановилось на **{result_color.upper()}**!\n\n"
