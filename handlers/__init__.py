@@ -9,4 +9,3 @@ from . import roles
 from . import birthday_calendar
 from . import games_interactive
 from . import menu_handler
-# rp_commands, vip, ai_agent, shop НЕ импортируем здесь!
