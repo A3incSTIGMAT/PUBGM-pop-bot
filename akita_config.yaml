@@ -1,0 +1,23 @@
+# akita_config.yaml
+llm:
+  provider: deepseek  # или qwen, gemini, claude
+  model: deepseek-chat  # бесплатный
+  temperature: 0.7
+  max_tokens: 2000
+
+memory:
+  type: redis  # или sqlite для простоты
+  path: /data/akita_memory.db
+
+tools:
+  - web_search
+  - file_reader
+  - calculator
+  - datetime
+  - telegram  # интеграция с Telegram
+
+telegram:
+  bot_token: ${BOT_TOKEN}  # используем токен NEXUS
+  allowed_chats: []  # пусто = все чаты
+
+language: ru
