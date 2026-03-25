@@ -33,7 +33,6 @@ async def log_action(chat_id: int, action_text: str):
 @router.message(Command("all"))
 async def tag_all(message: Message):
     """Отметить всех участников чата"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /all работает только в чатах.")
         return
@@ -45,7 +44,6 @@ async def tag_all(message: Message):
     chat = message.chat
     chat_type = chat.type
     
-    # ========== ПРОВЕРКА ТИПА ЧАТА ==========
     if chat_type == "group":
         await message.answer(
             "⚠️ **Это обычная группа.**\n\n"
@@ -58,7 +56,6 @@ async def tag_all(message: Message):
         )
         return
     
-    # ========== ПРОВЕРКА ПРАВ БОТА ==========
     try:
         bot_member = await chat.get_member(bot.id)
         if bot_member.status not in ['administrator', 'creator']:
@@ -73,7 +70,6 @@ async def tag_all(message: Message):
             )
             return
         
-        # Проверяем наличие прав
         if bot_member.status == 'administrator':
             if not bot_member.can_restrict_members or not bot_member.can_manage_chat:
                 await message.answer(
@@ -89,7 +85,6 @@ async def tag_all(message: Message):
         await message.answer(f"❌ Ошибка при проверке прав: {e}")
         return
     
-    # ========== ПОЛУЧЕНИЕ УЧАСТНИКОВ ==========
     status_msg = await message.answer("🔄 Получаю список участников...")
     
     members = []
@@ -98,10 +93,7 @@ async def tag_all(message: Message):
     try:
         async for member in chat.get_chat_members():
             if not member.user.is_bot:
-                if member.user.username:
-                    mention = f"@{member.user.username}"
-                else:
-                    mention = member.user.full_name
+                mention = f"@{member.user.username}" if member.user.username else member.user.full_name
                 members.append(mention)
                 count += 1
                 
@@ -126,7 +118,6 @@ async def tag_all(message: Message):
         total = len(members)
         await message.answer(f"👥 **Найдено {total} участников.** Отправляю список...")
         
-        # Отправляем всех участников (разбиваем на части по 50)
         for i in range(0, total, 50):
             chunk = members[i:i+50]
             text = f"🔔 **УЧАСТНИКИ** ({i+1}-{min(i+50, total)} из {total}):\n\n" + "\n".join(chunk)
@@ -135,19 +126,10 @@ async def tag_all(message: Message):
         await log_action(chat.id, f"📢 {message.from_user.full_name} вызвал всех участников чата ({total} чел)")
         
     except Exception as e:
-        error_msg = str(e)
-        await message.answer(
-            f"❌ **Ошибка:** {error_msg[:200]}\n\n"
-            f"Попробуйте:\n"
-            f"• Убедиться, что бот администратор\n"
-            f"• Преобразовать группу в супергруппу\n"
-            f"• Проверить права бота в настройках группы"
-        )
+        await message.answer(f"❌ **Ошибка:** {str(e)[:200]}\n\nПопробуйте:\n• Убедиться, что бот администратор\n• Преобразовать группу в супергруппу")
 
 @router.message(Command("ban"))
 async def ban_user(message: Message):
-    """Забанить пользователя"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /ban работает только в чатах.")
         return
@@ -161,21 +143,17 @@ async def ban_user(message: Message):
         return
     
     user = message.reply_to_message.from_user
-    user_id = user.id
     user_name = user.full_name
-    admin_name = message.from_user.full_name
     
     try:
-        await message.chat.ban(user_id)
+        await message.chat.ban(user.id)
         await message.answer(f"✅ Пользователь {user_name} забанен.")
-        await log_action(message.chat.id, f"🔨 {admin_name} забанил {user_name}")
+        await log_action(message.chat.id, f"🔨 {message.from_user.full_name} забанил {user_name}")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 @router.message(Command("mute"))
 async def mute_user(message: Message):
-    """Заглушить пользователя на время"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /mute работает только в чатах.")
         return
@@ -198,23 +176,19 @@ async def mute_user(message: Message):
             pass
     
     user = message.reply_to_message.from_user
-    user_id = user.id
     user_name = user.full_name
-    admin_name = message.from_user.full_name
     
     try:
         permissions = ChatPermissions(can_send_messages=False)
         until_date = asyncio.get_event_loop().time() + duration * 60
-        await message.chat.restrict(user_id, permissions, until_date=until_date)
+        await message.chat.restrict(user.id, permissions, until_date=until_date)
         await message.answer(f"🔇 {user_name} заглушен на {duration} минут.")
-        await log_action(message.chat.id, f"🔇 {admin_name} заглушил {user_name}")
+        await log_action(message.chat.id, f"🔇 {message.from_user.full_name} заглушил {user_name}")
     except TelegramAPIError as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 @router.message(Command("setwelcome"))
 async def set_welcome_message(message: Message):
-    """Настроить приветственное сообщение для новых участников"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /setwelcome работает только в чатах.")
         return
@@ -243,8 +217,6 @@ async def set_welcome_message(message: Message):
 
 @router.message(Command("setlogchannel"))
 async def set_log_channel_command(message: Message):
-    """Установить канал для логов и жалоб"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /setlogchannel работает только в чатах.")
         return
@@ -271,12 +243,10 @@ async def set_log_channel_command(message: Message):
         await message.answer(f"✅ Лог-канал установлен: @{channel_username}")
         await log_action(message.chat.id, f"📋 {message.from_user.full_name} установил лог-канал")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}\n\nУбедитесь, что бот добавлен в канал как администратор.")
+        await message.answer(f"❌ Ошибка: {e}")
 
 @router.message(Command("setup"))
 async def setup_bot(message: Message):
-    """Мастер настройки бота"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /setup работает только в чатах.")
         return
@@ -299,8 +269,6 @@ async def setup_bot(message: Message):
 
 @router.message(Command("addmod"))
 async def add_moderator(message: Message):
-    """Назначить модератора бота"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /addmod работает только в чатах.")
         return
@@ -314,26 +282,13 @@ async def add_moderator(message: Message):
         return
     
     target_user = message.reply_to_message.from_user
-    target_id = target_user.id
     
-    # Проверяем, не является ли пользователь уже админом
-    try:
-        chat = await bot.get_chat(message.chat.id)
-        member = await chat.get_member(target_id)
-        if member.status in ['creator', 'administrator']:
-            await message.answer(f"❌ {target_user.full_name} уже является администратором Telegram.")
-            return
-    except:
-        pass
-    
-    add_chat_moderator(message.chat.id, target_id, message.from_user.id)
+    add_chat_moderator(message.chat.id, target_user.id, message.from_user.id)
     await message.answer(f"✅ {target_user.full_name} назначен модератором бота.")
     await log_action(message.chat.id, f"👮 {message.from_user.full_name} назначил модератора {target_user.full_name}")
 
 @router.message(Command("removemod"))
 async def remove_moderator(message: Message):
-    """Удалить модератора бота"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /removemod работает только в чатах.")
         return
@@ -347,16 +302,13 @@ async def remove_moderator(message: Message):
         return
     
     target_user = message.reply_to_message.from_user
-    target_id = target_user.id
     
-    remove_chat_moderator(message.chat.id, target_id)
+    remove_chat_moderator(message.chat.id, target_user.id)
     await message.answer(f"✅ {target_user.full_name} лишен прав модератора.")
     await log_action(message.chat.id, f"👮 {message.from_user.full_name} лишил прав модератора {target_user.full_name}")
 
 @router.message(Command("mods"))
 async def list_moderators(message: Message):
-    """Список модераторов бота"""
-    # Проверяем, что команда отправлена из чата, а не из лички
     if message.chat.type == "private":
         await message.answer("❌ Команда /mods работает только в чатах.")
         return
