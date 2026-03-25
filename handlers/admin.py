@@ -33,6 +33,11 @@ async def log_action(chat_id: int, action_text: str):
 @router.message(Command("all"))
 async def tag_all(message: Message):
     """Отметить всех участников чата"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /all работает только в чатах.")
+        return
+    
     if not await can_ban(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут использовать эту команду.")
         return
@@ -142,6 +147,11 @@ async def tag_all(message: Message):
 @router.message(Command("ban"))
 async def ban_user(message: Message):
     """Забанить пользователя"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /ban работает только в чатах.")
+        return
+    
     if not await can_ban(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав банить пользователей.")
         return
@@ -165,6 +175,11 @@ async def ban_user(message: Message):
 @router.message(Command("mute"))
 async def mute_user(message: Message):
     """Заглушить пользователя на время"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /mute работает только в чатах.")
+        return
+    
     if not await can_mute(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав мутить пользователей.")
         return
@@ -199,6 +214,11 @@ async def mute_user(message: Message):
 @router.message(Command("setwelcome"))
 async def set_welcome_message(message: Message):
     """Настроить приветственное сообщение для новых участников"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /setwelcome работает только в чатах.")
+        return
+    
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать приветствие.")
         return
@@ -224,6 +244,11 @@ async def set_welcome_message(message: Message):
 @router.message(Command("setlogchannel"))
 async def set_log_channel_command(message: Message):
     """Установить канал для логов и жалоб"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /setlogchannel работает только в чатах.")
+        return
+    
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать лог-канал.")
         return
@@ -251,6 +276,11 @@ async def set_log_channel_command(message: Message):
 @router.message(Command("setup"))
 async def setup_bot(message: Message):
     """Мастер настройки бота"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /setup работает только в чатах.")
+        return
+    
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ Только администраторы могут настраивать бота.")
         return
@@ -270,6 +300,11 @@ async def setup_bot(message: Message):
 @router.message(Command("addmod"))
 async def add_moderator(message: Message):
     """Назначить модератора бота"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /addmod работает только в чатах.")
+        return
+    
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав назначать модераторов.")
         return
@@ -298,6 +333,11 @@ async def add_moderator(message: Message):
 @router.message(Command("removemod"))
 async def remove_moderator(message: Message):
     """Удалить модератора бота"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /removemod работает только в чатах.")
+        return
+    
     if not await can_assign_moderator(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав удалять модераторов.")
         return
@@ -316,6 +356,11 @@ async def remove_moderator(message: Message):
 @router.message(Command("mods"))
 async def list_moderators(message: Message):
     """Список модераторов бота"""
+    # Проверяем, что команда отправлена из чата, а не из лички
+    if message.chat.type == "private":
+        await message.answer("❌ Команда /mods работает только в чатах.")
+        return
+    
     if not await can_configure(message.chat.id, message.from_user.id):
         await message.answer("❌ У вас нет прав просматривать список модераторов.")
         return
