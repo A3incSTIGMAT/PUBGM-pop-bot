@@ -8,9 +8,9 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN
 from handlers import (
     admin, user, economy, balance_handler, report,
-    instructions, callbacks, roles, birthday_calendar, games_interactive
+    instructions, callbacks, roles, birthday_calendar, games_interactive,
+    menu_handler, shop, rp_commands, vip
 )
-from handlers.menu_handler import router as menu_router
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -32,6 +32,7 @@ user.set_bot(bot)
 report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
+menu_handler.set_bot(bot)
 
 dp = Dispatcher()
 init_db()
@@ -45,22 +46,30 @@ dp.include_router(admin.router)
 dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
-dp.include_router(menu_router)
+dp.include_router(menu_handler.router)
+dp.include_router(shop.router)
+dp.include_router(rp_commands.router)
+dp.include_router(vip.router)
 
 print("✅ Все роутеры зарегистрированы")
-print(f"   - games_interactive: {games_interactive.router}")
-print(f"   - birthday_calendar: {birthday_calendar.router}")
-print(f"   - menu_handler: {menu_router}")
+print(f"   - menu_handler: {menu_handler.router}")
+print(f"   - shop: {shop.router}")
+print(f"   - rp_commands: {rp_commands.router}")
+print(f"   - vip: {vip.router}")
 
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
     print("📋 Команды:")
-    print("   • /menu — открыть главное меню")
-    print("   • /rps — камень-ножницы-бумага (интерактивно)")
-    print("   • /roulette — рулетка (интерактивно)")
-    print("   • /setbirthday — календарь дня рождения")
-    print("   • /balance, /daily, /gift, /top — экономика")
-    print("   • /all, /ban, /mute — модерация")
+    print("   • /menu — главное меню")
+    print("   • /balance — баланс")
+    print("   • /daily — бонус (00:00 UTC)")
+    print("   • /shop — магазин подарков")
+    print("   • /hug, /kiss, /slap — РП-команды")
+    print("   • /vip — VIP-статус")
+    print("   • /rps, /roulette — игры")
+    print("   • /setbirthday — календарь")
+    print("   • /all — отметить всех (админ)")
+    print("   • /ban, /mute — модерация")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
