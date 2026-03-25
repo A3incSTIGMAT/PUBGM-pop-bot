@@ -37,7 +37,7 @@ report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 menu_handler.set_bot(bot)
-set_ai_bot(bot)  # ← исправлено: set_ai_bot, а не ai_agent.set_bot
+set_ai_bot(bot)
 
 dp = Dispatcher()
 init_db()
