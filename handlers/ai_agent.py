@@ -1,215 +1,182 @@
 """
-AI-агент для NEXUS на базе OpenAkita
-Полностью интегрирован в бота, пользователь не видит разницы
+AI-агент для NEXUS через DeepSeek API
+Полностью интегрирован в бота, переменные читаются из config
 """
 
-import os
-import asyncio
-from aiogram import Router, F
+import aiohttp
+import json
+from aiogram import Router, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from openakita import AkitaAgent
-from openakita.memory import SQLiteMemory
-from openakita.tools import load_tools
+from config import DEEPSEEK_API_KEY, AI_MODEL
 
 router = Router()
+bot: Bot = None
 
-# Состояния для диалога с AI
+def set_bot(bot_instance: Bot):
+    global bot
+    bot = bot_instance
+
+# Состояние для диалога
 class AIState(StatesGroup):
     chatting = State()
 
-# Инициализация агента
-class NexusAIAgent:
-    def __init__(self):
-        self.agent = None
-        self.memory = None
-        self.is_ready = False
+# Системный промпт
+SYSTEM_PROMPT = """Ты — AI-ассистент чата NEXUS. Ты встроен в чат-менеджер и помогаешь участникам.
+Отвечай кратко, дружелюбно и полезно.
+Если не знаешь ответа — скажи об этом честно.
+Говори на русском языке.
+
+О функциях NEXUS:
+• NCoin — внутренняя валюта, можно получить через /daily (50 NCoin раз в сутки)
+• VIP-статус даёт +25% к бонусу, эксклюзивные подарки, цветное имя. Цена 500 NCoin
+• Игры: /rps (камень-ножницы-бумага), /roulette (рулетка)
+• Подарки: /shop
+• Модерация: /ban, /mute, /all
+• Дни рождения: /setbirthday
+• AI-ассистент: /ask, /ai"""
+
+@router.message(Command("ask"))
+async def cmd_ask(message: Message):
+    """Быстрый вопрос AI"""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "🤖 **Быстрый вопрос AI**\n\n"
+            "Использование: /ask [вопрос]\n"
+            "Пример: /ask как получить VIP?\n\n"
+            "Для диалога используйте /ai"
+        )
+        return
     
-    async def initialize(self):
-        """Инициализация AI-агента"""
-        try:
-            # Настройка памяти (SQLite для постоянного хранения)
-            self.memory = SQLiteMemory(db_path="/data/akita_memory.db")
-            
-            # Загрузка инструментов
-            tools = load_tools([
-                "web_search",
-                "calculator", 
-                "datetime",
-                "text_generation"
-            ])
-            
-            # Создание агента
-            self.agent = AkitaAgent(
-                model="deepseek-chat",  # бесплатная модель
-                memory=self.memory,
-                tools=tools,
-                system_prompt=(
-                    "Ты — AI-ассистент чата NEXUS. "
-                    "Ты встроен в чат-менеджер и помогаешь участникам. "
-                    "Отвечай кратко, дружелюбно и полезно. "
-                    "Если не знаешь ответа — скажи об этом честно. "
-                    "Говори на русском языке."
-                )
-            )
-            
-            self.is_ready = True
-            print("✅ AI-агент OpenAkita инициализирован")
-            
-        except Exception as e:
-            print(f"❌ Ошибка инициализации AI-агента: {e}")
-            self.is_ready = False
+    if not DEEPSEEK_API_KEY:
+        await message.answer(
+            "⚠️ **AI-ассистент временно недоступен**\n\n"
+            "API ключ не настроен. Пожалуйста, сообщите администратору.\n\n"
+            "Твой вопрос: " + args[1][:100]
+        )
+        return
     
-    async def ask(self, question: str, user_id: int, chat_id: int, username: str) -> str:
-        """Задать вопрос AI-агенту"""
-        if not self.is_ready:
-            return "🤖 AI-ассистент временно недоступен. Попробуйте позже."
-        
-        try:
-            # Добавляем контекст пользователя
-            context = f"Пользователь: {username}\nВопрос: {question}"
-            
-            # Получаем ответ от агента
-            response = await self.agent.chat(
-                message=context,
-                user_id=str(user_id),
-                session_id=str(chat_id)
-            )
-            
-            return response
-        
-        except Exception as e:
-            return f"❌ Ошибка: {e}"
-
-# Глобальный экземпляр агента
-ai_agent = NexusAIAgent()
-
-# Клавиатура для AI-помощника
-def get_ai_keyboard() -> InlineKeyboardMarkup:
-    buttons = [
-        [
-            InlineKeyboardButton(text="🤖 Задать вопрос", callback_data="ai_ask"),
-            InlineKeyboardButton(text="🗑️ Очистить память", callback_data="ai_clear")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Статистика AI", callback_data="ai_stats"),
-            InlineKeyboardButton(text="❌ Закрыть", callback_data="ai_close")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# ========== КОМАНДЫ AI ==========
+    question = args[1]
+    status = await message.answer("🤔 Думаю...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": AI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": question}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1000
+                }
+            ) as resp:
+                data = await resp.json()
+                
+                if "choices" in data and len(data["choices"]) > 0:
+                    answer = data["choices"][0]["message"]["content"]
+                else:
+                    error_msg = data.get("error", {}).get("message", "Неизвестная ошибка")
+                    answer = f"❌ Ошибка API: {error_msg}"
+    
+    except aiohttp.ClientError as e:
+        answer = f"❌ Ошибка соединения: {e}"
+    except Exception as e:
+        answer = f"❌ Неожиданная ошибка: {e}"
+    
+    await status.delete()
+    
+    # Обрезаем слишком длинные ответы
+    if len(answer) > 4000:
+        answer = answer[:4000] + "\n\n... (ответ обрезан)"
+    
+    await message.answer(f"🤖 **AI-ассистент:**\n\n{answer}")
 
 @router.message(Command("ai"))
 async def cmd_ai(message: Message, state: FSMContext):
-    """Команда /ai — открыть AI-ассистента"""
-    if not ai_agent.is_ready:
+    """Начать диалог с AI"""
+    if not DEEPSEEK_API_KEY:
         await message.answer(
-            "🤖 **AI-ассистент NEXUS**\n\n"
-            "В настоящее время инициализация агента...\n"
-            "Попробуйте через несколько секунд."
+            "⚠️ **AI-ассистент временно недоступен**\n\n"
+            "API ключ не настроен. Пожалуйста, сообщите администратору."
         )
         return
     
     await state.set_state(AIState.chatting)
     await message.answer(
         "🤖 **AI-ассистент NEXUS**\n\n"
-        "Я встроенный AI-помощник. Можешь задать любой вопрос!\n\n"
+        "Я здесь, чтобы помочь! Можете задавать любые вопросы.\n\n"
         "📌 **Что я умею:**\n"
-        "• Отвечать на вопросы\n"
+        "• Отвечать на вопросы о NEXUS\n"
         "• Помогать с настройкой бота\n"
-        "• Рассказывать о функциях NEXUS\n"
         "• Давать советы\n\n"
-        "💬 Просто напиши свой вопрос, и я отвечу.\n"
-        "❌ Для выхода напишите /cancel",
-        reply_markup=get_ai_keyboard()
+        "💬 Просто напишите свой вопрос.\n"
+        "❌ Для выхода напишите /cancel"
     )
 
 @router.message(Command("cancel"), AIState.chatting)
 async def cancel_ai(message: Message, state: FSMContext):
-    """Выход из режима AI"""
+    """Выход из диалога"""
     await state.clear()
     await message.answer("✅ Выход из режима AI-ассистента. Для возврата используйте /ai")
 
 @router.message(AIState.chatting)
-async def process_ai_question(message: Message, state: FSMContext):
-    """Обработка вопроса к AI"""
+async def process_ai_dialog(message: Message, state: FSMContext):
+    """Обработка сообщений в диалоге"""
     if not message.text:
         return
     
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    username = message.from_user.full_name
+    question = message.text
     
     # Отправляем статус "печатает"
-    await message.bot.send_chat_action(chat_id, "typing")
+    await message.bot.send_chat_action(message.chat.id, "typing")
     
-    # Получаем ответ от AI
-    response = await ai_agent.ask(message.text, user_id, chat_id, username)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": AI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": question}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1000
+                }
+            ) as resp:
+                data = await resp.json()
+                
+                if "choices" in data and len(data["choices"]) > 0:
+                    answer = data["choices"][0]["message"]["content"]
+                else:
+                    error_msg = data.get("error", {}).get("message", "Неизвестная ошибка")
+                    answer = f"❌ Ошибка API: {error_msg}"
     
-    # Отправляем ответ (с кнопкой продолжения)
+    except aiohttp.ClientError as e:
+        answer = f"❌ Ошибка соединения: {e}"
+    except Exception as e:
+        answer = f"❌ Неожиданная ошибка: {e}"
+    
+    # Обрезаем слишком длинные ответы
+    if len(answer) > 4000:
+        answer = answer[:4000] + "\n\n... (ответ обрезан)"
+    
     await message.answer(
-        f"🤖 **AI-ассистент:**\n\n{response}\n\n"
-        f"💬 Задайте следующий вопрос или напишите /cancel для выхода",
-        reply_markup=get_ai_keyboard()
+        f"🤖 **AI-ассистент:**\n\n{answer}\n\n"
+        f"💬 Задайте следующий вопрос или напишите /cancel для выхода"
     )
-
-# ========== ОБРАБОТЧИКИ КНОПОК ==========
-
-@router.callback_query(lambda c: c.data == "ai_ask")
-async def ai_ask_callback(callback: CallbackQuery, state: FSMContext):
-    """Кнопка задать вопрос"""
-    await state.set_state(AIState.chatting)
-    await callback.message.edit_text(
-        "🤖 **AI-ассистент**\n\n"
-        "Напишите свой вопрос, и я отвечу.\n"
-        "❌ Для выхода напишите /cancel",
-        reply_markup=get_ai_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "ai_clear")
-async def ai_clear_callback(callback: CallbackQuery):
-    """Очистить память AI"""
-    if ai_agent.memory:
-        await ai_agent.memory.clear_user_session(callback.from_user.id)
-        await callback.message.edit_text(
-            "✅ **Память AI-ассистента очищена!**\n\n"
-            "Теперь я не помню предыдущие вопросы.",
-            reply_markup=get_ai_keyboard()
-        )
-    else:
-        await callback.message.edit_text(
-            "❌ Память недоступна.",
-            reply_markup=get_ai_keyboard()
-        )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "ai_stats")
-async def ai_stats_callback(callback: CallbackQuery):
-    """Статистика AI"""
-    if ai_agent.memory:
-        stats = await ai_agent.memory.get_stats()
-        await callback.message.edit_text(
-            f"📊 **Статистика AI-ассистента**\n\n"
-            f"• Активных сессий: {stats.get('sessions', 0)}\n"
-            f"• Всего сообщений: {stats.get('messages', 0)}\n"
-            f"• Статус: {'✅ Работает' if ai_agent.is_ready else '❌ Ошибка'}",
-            reply_markup=get_ai_keyboard()
-        )
-    else:
-        await callback.message.edit_text(
-            "📊 Статистика временно недоступна.",
-            reply_markup=get_ai_keyboard()
-        )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "ai_close")
-async def ai_close_callback(callback: CallbackQuery, state: FSMContext):
-    """Закрыть AI-ассистента"""
-    await state.clear()
-    await callback.message.delete()
-    await callback.answer()
