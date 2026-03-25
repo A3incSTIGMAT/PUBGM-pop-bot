@@ -11,9 +11,9 @@ from handlers.shop import router as shop_router
 from handlers.rp_commands import router as rp_router
 from handlers.vip import router as vip_router
 from handlers.ai_agent import router as ai_router, set_bot as set_ai_bot
-from handlers.report import router as report_router
+from handlers.report import router as report_router, set_bot as set_report_bot
 from handlers.instructions import router as instructions_router
-from handlers.callbacks import router as callbacks_router
+from handlers.callbacks import router as callbacks_router, set_bot as set_callbacks_bot
 from handlers.balance_handler import router as balance_router
 from handlers.roles import set_bot as set_roles_bot
 from database.db import init_db
@@ -34,8 +34,8 @@ bot = Bot(
 
 admin.set_bot(bot)
 user.set_bot(bot)
-report.set_bot(bot)
-callbacks.set_bot(bot)
+set_report_bot(bot)
+set_callbacks_bot(bot)
 set_roles_bot(bot)
 menu_handler.set_bot(bot)
 set_ai_bot(bot)
