@@ -15,6 +15,7 @@ router = Router()
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
+    """Установить экземпляр бота для модуля"""
     global bot
     bot = bot_instance
 
@@ -53,7 +54,8 @@ async def cmd_ask(message: Message):
     if not DEEPSEEK_API_KEY:
         await message.answer(
             "⚠️ **AI-ассистент временно недоступен**\n\n"
-            "API ключ не настроен. Пожалуйста, сообщите администратору."
+            "API ключ не настроен. Пожалуйста, сообщите администратору.\n\n"
+            "💡 Получить API ключ: https://platform.deepseek.com/"
         )
         return
     
@@ -105,7 +107,8 @@ async def cmd_ai(message: Message, state: FSMContext):
     if not DEEPSEEK_API_KEY:
         await message.answer(
             "⚠️ **AI-ассистент временно недоступен**\n\n"
-            "API ключ не настроен. Пожалуйста, сообщите администратору."
+            "API ключ не настроен. Пожалуйста, сообщите администратору.\n\n"
+            "💡 Получить API ключ: https://platform.deepseek.com/"
         )
         return
     
