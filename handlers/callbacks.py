@@ -1,8 +1,6 @@
 from aiogram import Router, Bot
 from aiogram.types import CallbackQuery
 
-from keyboards.main_menu import get_back_menu
-
 router = Router()
 bot: Bot = None
 
