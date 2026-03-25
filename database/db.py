@@ -29,22 +29,35 @@ def init_db():
                 user_id INTEGER,
                 chat_id INTEGER,
                 username TEXT,
-                balance INTEGER DEFAULT 0,
+                free_balance INTEGER DEFAULT 0,
+                paid_balance INTEGER DEFAULT 0,
                 total_messages INTEGER DEFAULT 0,
                 is_vip INTEGER DEFAULT 0,
                 vip_until INTEGER DEFAULT 0,
                 birthday TEXT,
                 reputation INTEGER DEFAULT 0,
+                last_bonus TEXT,
                 PRIMARY KEY (user_id, chat_id)
             )
         """)
         
-        # Добавляем колонку last_bonus, если её нет
+        # Добавляем колонки, если их нет (миграция)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN free_balance INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка free_balance")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN paid_balance INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка paid_balance")
+        except sqlite3.OperationalError:
+            pass
+        
         try:
             conn.execute("ALTER TABLE users ADD COLUMN last_bonus TEXT")
             print("✅ Добавлена колонка last_bonus")
         except sqlite3.OperationalError:
-            # Колонка уже существует
             pass
         
         # Таблица чатов
@@ -123,16 +136,36 @@ def init_db():
 # ========== ПОЛЬЗОВАТЕЛИ ==========
 
 def get_balance(user_id: int, chat_id: int) -> int:
-    """Получить баланс пользователя"""
+    """Получить общий баланс пользователя (free + paid)"""
     with get_db() as conn:
         result = conn.execute(
-            "SELECT balance FROM users WHERE user_id = ? AND chat_id = ?",
+            "SELECT free_balance, paid_balance FROM users WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id)
         ).fetchone()
-        return result["balance"] if result else 0
+        if result:
+            return result["free_balance"] + result["paid_balance"]
+        return 0
 
-def update_balance(user_id: int, chat_id: int, delta: int):
-    """Изменить баланс пользователя"""
+def get_free_balance(user_id: int, chat_id: int) -> int:
+    """Получить бесплатный баланс"""
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT free_balance FROM users WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        ).fetchone()
+        return result["free_balance"] if result else 0
+
+def get_paid_balance(user_id: int, chat_id: int) -> int:
+    """Получить платный баланс (купленный за Stars)"""
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT paid_balance FROM users WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        ).fetchone()
+        return result["paid_balance"] if result else 0
+
+def add_free_balance(user_id: int, chat_id: int, amount: int):
+    """Добавить бесплатные NCoin"""
     with get_db() as conn:
         exists = conn.execute(
             "SELECT 1 FROM users WHERE user_id = ? AND chat_id = ?",
@@ -141,14 +174,76 @@ def update_balance(user_id: int, chat_id: int, delta: int):
         
         if exists:
             conn.execute(
-                "UPDATE users SET balance = balance + ? WHERE user_id = ? AND chat_id = ?",
-                (delta, user_id, chat_id)
+                "UPDATE users SET free_balance = free_balance + ? WHERE user_id = ? AND chat_id = ?",
+                (amount, user_id, chat_id)
             )
         else:
             conn.execute(
-                "INSERT INTO users (user_id, chat_id, balance) VALUES (?, ?, ?)",
-                (user_id, chat_id, max(0, delta))
+                "INSERT INTO users (user_id, chat_id, free_balance) VALUES (?, ?, ?)",
+                (user_id, chat_id, amount)
             )
+
+def add_paid_balance(user_id: int, chat_id: int, amount: int):
+    """Добавить платные NCoin (купленные за Stars)"""
+    with get_db() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        ).fetchone()
+        
+        if exists:
+            conn.execute(
+                "UPDATE users SET paid_balance = paid_balance + ? WHERE user_id = ? AND chat_id = ?",
+                (amount, user_id, chat_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO users (user_id, chat_id, paid_balance) VALUES (?, ?, ?)",
+                (user_id, chat_id, amount)
+            )
+
+def spend_balance(user_id: int, chat_id: int, amount: int) -> bool:
+    """
+    Списать NCoin (сначала бесплатные, потом платные)
+    Возвращает True если списание успешно, False если недостаточно средств
+    """
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT free_balance, paid_balance FROM users WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        ).fetchone()
+        
+        if not result:
+            return False
+        
+        free = result["free_balance"]
+        paid = result["paid_balance"]
+        
+        if free + paid < amount:
+            return False
+        
+        # Списываем сначала бесплатные
+        if free >= amount:
+            conn.execute(
+                "UPDATE users SET free_balance = free_balance - ? WHERE user_id = ? AND chat_id = ?",
+                (amount, user_id, chat_id)
+            )
+        else:
+            # Списываем все бесплатные и часть платных
+            remaining = amount - free
+            conn.execute(
+                "UPDATE users SET free_balance = 0, paid_balance = paid_balance - ? WHERE user_id = ? AND chat_id = ?",
+                (remaining, user_id, chat_id)
+            )
+        
+        return True
+
+def update_balance(user_id: int, chat_id: int, delta: int):
+    """Изменить баланс (добавляет в free_balance)"""
+    if delta > 0:
+        add_free_balance(user_id, chat_id, delta)
+    elif delta < 0:
+        spend_balance(user_id, chat_id, -delta)
 
 def add_user(user_id: int, chat_id: int, username: str = None):
     """Добавить нового пользователя с бонусом 100 NCoin"""
@@ -160,7 +255,7 @@ def add_user(user_id: int, chat_id: int, username: str = None):
         
         if not exists:
             conn.execute(
-                "INSERT INTO users (user_id, chat_id, username, balance) VALUES (?, ?, ?, ?)",
+                "INSERT INTO users (user_id, chat_id, username, free_balance) VALUES (?, ?, ?, ?)",
                 (user_id, chat_id, username, 100)
             )
             print(f"✅ Новый пользователь {username} добавлен в чат {chat_id}, бонус 100 NCoin")
