@@ -28,21 +28,14 @@ def get_main_menu(user_role: str = "user") -> InlineKeyboardMarkup:
     ])
     
     buttons.append([
+        InlineKeyboardButton(text="👑 VIP Статус", callback_data="menu_vip"),
+        InlineKeyboardButton(text="🤖 AI Помощник", callback_data="menu_ai")
+    ])
+    
+    buttons.append([
         InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="menu_stars"),
         InlineKeyboardButton(text="💎 Купить NCoin", callback_data="menu_buy")
     ])
-    
-    # Админские кнопки
-    if user_role in ['admin', 'creator', 'global_admin']:
-        buttons.append([
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings"),
-            InlineKeyboardButton(text="👥 Управление", callback_data="menu_management")
-        ])
-    elif user_role == 'moderator':
-        buttons.append([
-            InlineKeyboardButton(text="🔨 Модерация", callback_data="menu_mod_actions"),
-            InlineKeyboardButton(text="📋 Логи", callback_data="menu_logs")
-        ])
     
     buttons.append([
         InlineKeyboardButton(text="❓ Помощь", callback_data="menu_help"),
@@ -250,6 +243,9 @@ def get_help_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="help_stars"),
+            InlineKeyboardButton(text="🤖 AI Помощник", callback_data="help_ai")
+        ],
+        [
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
         ]
     ]
