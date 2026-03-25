@@ -12,3 +12,4 @@ from . import menu_handler
 from . import shop
 from . import rp_commands
 from . import vip
+from . import ai_agent
