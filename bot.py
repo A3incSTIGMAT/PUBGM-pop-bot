@@ -9,7 +9,7 @@ from config import BOT_TOKEN
 from handlers import (
     admin, user, economy, balance_handler, report,
     instructions, callbacks, roles, birthday_calendar, games_interactive,
-    menu_handler, shop, rp_commands, vip
+    menu_handler, shop, rp_commands, vip, ai_agent
 )
 from database.db import init_db
 from utils.lock import acquire_lock
@@ -33,9 +33,17 @@ report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 menu_handler.set_bot(bot)
+ai_agent.set_bot(bot)
 
 dp = Dispatcher()
 init_db()
+
+# Инициализация AI-агента
+async def init_ai():
+    await ai_agent.ai_agent.initialize()
+
+# Запускаем инициализацию AI
+asyncio.create_task(init_ai())
 
 # Регистрация роутеров
 dp.include_router(economy.router)
@@ -50,17 +58,21 @@ dp.include_router(menu_handler.router)
 dp.include_router(shop.router)
 dp.include_router(rp_commands.router)
 dp.include_router(vip.router)
+dp.include_router(ai_agent.router)
 
 print("✅ Все роутеры зарегистрированы")
 print(f"   - menu_handler: {menu_handler.router}")
 print(f"   - shop: {shop.router}")
 print(f"   - rp_commands: {rp_commands.router}")
 print(f"   - vip: {vip.router}")
+print(f"   - ai_agent: {ai_agent.router}")
 
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
     print("📋 Команды:")
     print("   • /menu — главное меню")
+    print("   • /ai — AI-ассистент (диалог)")
+    print("   • /ask [вопрос] — быстрый вопрос AI")
     print("   • /balance — баланс")
     print("   • /daily — бонус (00:00 UTC)")
     print("   • /shop — магазин подарков")
