@@ -1,7 +1,3 @@
-"""
-Модуль для работы с ролями пользователей.
-"""
-
 from aiogram import Bot
 from config import ADMIN_IDS
 from database.db import is_chat_moderator
@@ -9,11 +5,11 @@ from database.db import is_chat_moderator
 bot: Bot = None
 
 def set_bot(bot_instance: Bot):
-    """Установить экземпляр бота"""
     global bot
     bot = bot_instance
 
 async def get_user_role(chat_id: int, user_id: int) -> str:
+    """Определяет роль пользователя в чате"""
     if user_id in ADMIN_IDS:
         return 'global_admin'
     
