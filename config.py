@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-# Пытаемся загрузить .env только локально (на сервере он не нужен)
+# Пытаемся загрузить .env только локально
 try:
     load_dotenv()
 except:
