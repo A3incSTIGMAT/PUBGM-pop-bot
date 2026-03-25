@@ -170,14 +170,13 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
     chat = event.chat
     chat_id = chat.id
     
-    # Проверяем права бота
     try:
         bot_member = await chat.get_member(bot.id)
-        is_admin = bot_member.status in ['administrator', 'creator']
+        has_admin_rights = bot_member.status == "administrator"
     except:
-        is_admin = False
+        has_admin_rights = False
     
-    if is_admin:
+    if has_admin_rights:
         welcome_text = (
             f"🤖 **NEXUS** — развивающаяся экосистема для вашего чата\n\n"
             f"✅ **Бот имеет права администратора — доступен полный функционал:**\n\n"
@@ -276,8 +275,11 @@ async def kick_if_not_verified(user_id: int, chat_id: int):
         except:
             pass
 
+# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+
 @router.message()
 async def check_captcha_and_spam(message: Message):
+    """Обработка капчи и антиспам"""
     if not message.text:
         return
     
