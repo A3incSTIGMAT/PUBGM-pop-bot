@@ -9,9 +9,12 @@ from config import BOT_TOKEN
 from handlers import (
     admin, user, economy, balance_handler, report,
     instructions, callbacks, roles, birthday_calendar, games_interactive,
-    menu_handler, rp_commands, vip, ai_agent
+    menu_handler
 )
-from handlers.shop import router as shop_router  # ← импорт напрямую
+from handlers.shop import router as shop_router
+from handlers.rp_commands import router as rp_router
+from handlers.vip import router as vip_router
+from handlers.ai_agent import router as ai_router
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -49,17 +52,17 @@ dp.include_router(report.router)
 dp.include_router(instructions.router)
 dp.include_router(callbacks.router)
 dp.include_router(menu_handler.router)
-dp.include_router(shop_router)  # ← shop
-dp.include_router(rp_commands.router)
-dp.include_router(vip.router)
-dp.include_router(ai_agent.router)
+dp.include_router(shop_router)
+dp.include_router(rp_router)
+dp.include_router(vip_router)
+dp.include_router(ai_router)
 
 print("✅ Все роутеры зарегистрированы")
 print(f"   - menu_handler: {menu_handler.router}")
 print(f"   - shop: {shop_router}")
-print(f"   - rp_commands: {rp_commands.router}")
-print(f"   - vip: {vip.router}")
-print(f"   - ai_agent: {ai_agent.router}")
+print(f"   - rp: {rp_router}")
+print(f"   - vip: {vip_router}")
+print(f"   - ai: {ai_router}")
 
 async def main():
     print("\n🤖 NEXUS-bot запущен!")
