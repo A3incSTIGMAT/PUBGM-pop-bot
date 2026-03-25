@@ -6,7 +6,7 @@ from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from database.db import get_log_channel, save_report, get_reports_count
+from database.db import get_log_channel, save_report, get_reports_count, get_reports_stats
 from handlers.roles import can_configure
 from utils.logger import log_admin
 
