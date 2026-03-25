@@ -50,7 +50,8 @@ async def cmd_balance(message: Message):
         f"💰 **Ваш баланс:** {balance} NCoin\n\n"
         f"🎁 Бесплатные: {free} NCoin\n"
         f"💎 Платные: {paid} NCoin\n\n"
-        f"💡 Платные NCoin можно получить через /buy"
+        f"💡 Платные NCoin можно получить через /buy\n"
+        f"🤖 Вопросы о NCoin: /ask"
     )
     await delete_after_response(response, message, delay=10)
 
@@ -63,13 +64,13 @@ async def cmd_daily(message: Message):
     last_bonus = get_last_bonus(user_id, chat_id)
     today = datetime.utcnow().strftime("%Y-%m-%d")
     
-    # Проверяем, получал ли пользователь бонус сегодня
     if last_bonus and last_bonus == today:
         hours, minutes = get_time_until_next_bonus()
         response = await message.answer(
             f"⏰ **Вы уже получали ежедневный бонус сегодня!**\n\n"
             f"🎁 Следующий бонус будет доступен в **00:00 UTC**\n"
-            f"⏳ Осталось: {hours}ч {minutes}мин"
+            f"⏳ Осталось: {hours}ч {minutes}мин\n\n"
+            f"🤖 Вопросы о бонусах: /ask"
         )
         await delete_after_response(response, message, delay=10)
         return
@@ -96,7 +97,8 @@ async def cmd_daily(message: Message):
         f"+{bonus} NCoin{vip_text}\n"
         f"💰 Ваш баланс: {new_balance} NCoin\n\n"
         f"⏳ Следующий бонус: **00:00 UTC**\n"
-        f"(через {hours}ч {minutes}мин)"
+        f"(через {hours}ч {minutes}мин)\n\n"
+        f"🤖 Вопросы о VIP: /ask"
     )
     await delete_after_response(response, message, delay=10)
 
@@ -108,7 +110,8 @@ async def cmd_gift(message: Message):
         response = await message.answer(
             "🎁 **Подарок NCoin**\n\n"
             "Использование: /gift @username [сумма]\n"
-            "Пример: /gift @ivan 50"
+            "Пример: /gift @ivan 50\n\n"
+            "🤖 Вопросы о подарках: /ask"
         )
         await delete_after_response(response, message, delay=15)
         return
