@@ -14,7 +14,7 @@ from handlers import (
 from handlers.shop import router as shop_router
 from handlers.rp_commands import router as rp_router
 from handlers.vip import router as vip_router
-from handlers.ai_agent import router as ai_router
+from handlers.ai_agent import router as ai_router, set_bot as set_ai_bot
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -37,7 +37,7 @@ report.set_bot(bot)
 callbacks.set_bot(bot)
 roles.set_bot(bot)
 menu_handler.set_bot(bot)
-ai_agent.set_bot(bot)
+set_ai_bot(bot)  # ← передаём бота в ai_agent
 
 dp = Dispatcher()
 init_db()
