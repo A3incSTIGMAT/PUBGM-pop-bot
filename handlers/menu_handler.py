@@ -4,19 +4,18 @@
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
 from handlers.roles import get_user_role
 from keyboards.main_menu import (
     get_main_menu, get_profile_menu, get_economy_menu,
     get_games_menu, get_moderation_menu, get_stats_menu,
-    get_social_menu, get_stars_menu, get_settings_menu,
-    get_management_menu, get_help_menu, get_back_menu,
-    get_buy_ncoin_menu
+    get_social_menu, get_vip_menu, get_ai_menu, get_help_menu,
+    get_back_menu, get_buy_menu, get_requisites_menu, get_requisites_text
 )
 from database.db import get_balance, get_user_stats
-from utils.helpers import delete_after_response
+from config import OZON_CARD_LAST4, OZON_BANK_NAME, OZON_RECEIVER, OZON_SBP_QR_URL
 
 router = Router()
 bot: Bot = None
@@ -25,6 +24,8 @@ def set_bot(bot_instance: Bot):
     global bot
     bot = bot_instance
 
+# ========== ОСНОВНЫЕ КОМАНДЫ ==========
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     """Открыть главное меню"""
@@ -32,12 +33,11 @@ async def cmd_menu(message: Message):
     chat_id = message.chat.id
     role = await get_user_role(chat_id, user_id)
     
-    response = await message.answer(
+    await message.answer(
         "🏠 **Главное меню NEXUS**\n\n"
         "Выберите категорию:",
         reply_markup=get_main_menu(role)
     )
-    await delete_after_response(response, message, delay=60)
 
 # ========== ОБРАБОТЧИКИ НАВИГАЦИИ ==========
 
@@ -71,7 +71,7 @@ async def menu_economy(callback: CallbackQuery):
     await callback.message.edit_text(
         "💰 **Экономика NEXUS**\n\n"
         "Валюта: NCoin\n"
-        "1 Star = 10 NCoin\n\n"
+        "1 ₽ = 1 NCoin\n\n"
         "Выберите действие:",
         reply_markup=get_economy_menu()
     )
@@ -122,33 +122,9 @@ async def menu_social(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "menu_stars")
-async def menu_stars(callback: CallbackQuery):
-    """Меню Telegram Stars"""
-    await callback.message.edit_text(
-        "⭐ **Telegram Stars**\n\n"
-        "Внутренняя валюта Telegram.\n"
-        "1 Star = 10 NCoin\n\n"
-        "Выберите действие:",
-        reply_markup=get_stars_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "menu_buy")
-async def menu_buy(callback: CallbackQuery):
-    """Меню покупки NCoin"""
-    await callback.message.edit_text(
-        "💎 **Купить NCoin**\n\n"
-        "Выберите сумму для пополнения:\n"
-        "⭐ 1 Star = 10 NCoin\n\n"
-        "Оплата через Telegram Stars",
-        reply_markup=get_buy_ncoin_menu()
-    )
-    await callback.answer()
-
 @router.callback_query(lambda c: c.data == "menu_vip")
 async def menu_vip(callback: CallbackQuery):
-    """Меню VIP"""
+    """Меню VIP-статуса"""
     await callback.message.edit_text(
         "👑 **VIP-статус NEXUS**\n\n"
         "💰 Цена: 500 NCoin\n"
@@ -159,15 +135,15 @@ async def menu_vip(callback: CallbackQuery):
         "• Цветное имя в чате\n"
         "• Доступ к VIP-играм\n\n"
         "➡️ Для покупки используйте /vip",
-        reply_markup=get_back_menu()
+        reply_markup=get_vip_menu()
     )
     await callback.answer()
 
 @router.callback_query(lambda c: c.data == "menu_ai")
 async def menu_ai(callback: CallbackQuery):
-    """Меню AI помощника"""
+    """Меню AI-помощника"""
     await callback.message.edit_text(
-        "🤖 **AI-ассистент NEXUS**\n\n"
+        "🤖 **AI-помощник NEXUS**\n\n"
         "Задайте любой вопрос!\n\n"
         "📌 **Команды:**\n"
         "• /ask [вопрос] — быстрый вопрос\n"
@@ -175,29 +151,30 @@ async def menu_ai(callback: CallbackQuery):
         "💡 **Примеры:**\n"
         "/ask как получить VIP?\n"
         "/ask что такое NCoin?\n"
-        "/ask как играть в рулетку?\n\n"
-        "❓ Для диалога используйте /ai",
-        reply_markup=get_back_menu()
+        "/ask как играть в рулетку?",
+        reply_markup=get_ai_menu()
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "menu_settings")
-async def menu_settings(callback: CallbackQuery):
-    """Меню настроек (админ)"""
+@router.callback_query(lambda c: c.data == "menu_requisites")
+async def menu_requisites(callback: CallbackQuery):
+    """Показать реквизиты"""
+    text = get_requisites_text()
     await callback.message.edit_text(
-        "⚙️ **Настройки чата**\n\n"
-        "Выберите настройку:",
-        reply_markup=get_settings_menu()
+        text,
+        reply_markup=get_requisites_menu()
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "menu_management")
-async def menu_management(callback: CallbackQuery):
-    """Меню управления (админ)"""
+@router.callback_query(lambda c: c.data == "menu_buy")
+async def menu_buy(callback: CallbackQuery):
+    """Меню покупки NCoin"""
     await callback.message.edit_text(
-        "👥 **Управление**\n\n"
-        "Выберите действие:",
-        reply_markup=get_management_menu()
+        "💎 **Купить NCoin**\n\n"
+        "Выберите сумму:\n"
+        "💰 1 ₽ = 1 NCoin\n\n"
+        "💳 После оплаты нажмите 'Я оплатил(а)'",
+        reply_markup=get_buy_menu()
     )
     await callback.answer()
 
@@ -205,7 +182,7 @@ async def menu_management(callback: CallbackQuery):
 async def menu_help(callback: CallbackQuery):
     """Меню помощи"""
     await callback.message.edit_text(
-        "❓ **Помощь**\n\n"
+        "❓ **Помощь NEXUS**\n\n"
         "Выберите раздел:",
         reply_markup=get_help_menu()
     )
@@ -216,22 +193,19 @@ async def menu_about(callback: CallbackQuery):
     """Информация о боте"""
     await callback.message.edit_text(
         "ℹ️ **О NEXUS**\n\n"
-        "🤖 NEXUS — развивающаяся экосистема для вашего чата.\n\n"
+        "🤖 NEXUS — интеллектуальный чат-менеджер для Telegram.\n\n"
         "✅ **Возможности:**\n"
         "• 🛡 Модерация\n"
         "• 💰 Экономика (NCoin)\n"
         "• 🎮 Игры\n"
         "• 📊 Статистика\n"
-        "• 🤖 AI-ассистент\n"
-        "• 🔐 Защита от спама и ботов\n"
-        "• ⭐ Telegram Stars интеграция\n\n"
-        "🚀 **Скоро:**\n"
-        "• Магазин подарков\n"
-        "• Кланы\n"
-        "• VIP-статусы\n\n"
-        "📖 Справка: /help\n"
-        "🔧 Настройка: /setup\n\n"
-        "Разработчик: @A3incSTIGMAT",
+        "• 🤖 AI-помощник\n"
+        "• 🔐 Защита от спама\n\n"
+        "💳 **Реквизиты:**\n"
+        f"🏦 {OZON_BANK_NAME}\n"
+        f"💳 Карта: •••• {OZON_CARD_LAST4}\n"
+        f"👤 {OZON_RECEIVER}\n\n"
+        "🚀 **Разработчик:** @A3incSTIGMAT",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -248,7 +222,7 @@ async def profile_balance(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💰 **Ваш баланс:** {balance} NCoin\n\n"
         f"💡 Получить бонус: /daily\n"
-        f"⭐ Пополнить: /buy",
+        f"💳 Пополнить: /pay",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -321,7 +295,7 @@ async def eco_balance(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💰 **Ваш баланс:** {balance} NCoin\n\n"
         f"💡 Получить бонус: /daily\n"
-        f"⭐ Пополнить через Stars: /buy",
+        f"💳 Пополнить: /pay",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -362,107 +336,78 @@ async def eco_buy(callback: CallbackQuery):
     """Купить NCoin"""
     await callback.message.edit_text(
         "💎 **Купить NCoin**\n\n"
-        "Выберите сумму для пополнения:",
-        reply_markup=get_buy_ncoin_menu()
+        "Выберите сумму:",
+        reply_markup=get_buy_menu()
     )
     await callback.answer()
 
-# ========== ОБРАБОТЧИКИ ИГР ==========
-
-@router.callback_query(lambda c: c.data == "game_rps")
-async def game_rps(callback: CallbackQuery):
-    """Запуск игры камень-ножницы-бумага"""
+@router.callback_query(lambda c: c.data == "eco_requisites")
+async def eco_requisites(callback: CallbackQuery):
+    """Реквизиты"""
+    text = get_requisites_text()
     await callback.message.edit_text(
-        "🎮 **Камень-ножницы-бумага**\n\n"
-        "Используйте команду /rps для начала игры",
-        reply_markup=get_back_menu()
+        text,
+        reply_markup=get_requisites_menu()
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "game_roulette")
-async def game_roulette(callback: CallbackQuery):
-    """Запуск рулетки"""
-    await callback.message.edit_text(
-        "🎲 **Рулетка**\n\n"
-        "Используйте команду /roulette для начала игры",
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
+# ========== ОБРАБОТЧИКИ РЕКВИЗИТОВ ==========
 
-@router.callback_query(lambda c: c.data == "game_duel")
-async def game_duel(callback: CallbackQuery):
-    """Дуэль (в разработке)"""
-    await callback.message.edit_text(
-        "⚔️ **Дуэль**\n\n"
-        "Функция в разработке. Скоро будет доступна!",
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
+@router.callback_query(lambda c: c.data == "copy_requisites")
+async def copy_requisites(callback: CallbackQuery):
+    """Копирование реквизитов"""
+    text = f"Озон Банк, карта •••• {OZON_CARD_LAST4}, {OZON_RECEIVER}"
+    await callback.answer(text, show_alert=True)
 
-@router.callback_query(lambda c: c.data == "game_slot")
-async def game_slot(callback: CallbackQuery):
-    """Слот-машина (в разработке)"""
-    await callback.message.edit_text(
-        "🎰 **Слот-машина**\n\n"
-        "Функция в разработке. Скоро будет доступна!",
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
-
-# ========== ОБРАБОТЧИКИ СТАТИСТИКИ ==========
-
-@router.callback_query(lambda c: c.data == "stats_my")
-async def stats_my(callback: CallbackQuery):
-    """Моя статистика"""
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    stats = get_user_stats(user_id, chat_id)
-    
-    if stats:
-        text = (
-            f"📊 **Ваша статистика**\n\n"
-            f"💰 Баланс: {stats['balance']} NCoin\n"
-            f"💬 Сообщений: {stats['total_messages']}\n"
-            f"👑 VIP: {'Да' if stats['is_vip'] else 'Нет'}\n"
-            f"⭐ Репутация: {stats['reputation']}\n"
-            f"🎂 ДР: {stats['birthday'] or 'не указан'}"
+@router.callback_query(lambda c: c.data == "pay_qr")
+async def pay_qr(callback: CallbackQuery):
+    """Показать QR-код для оплаты"""
+    if OZON_SBP_QR_URL:
+        await callback.message.edit_text(
+            f"📱 **Оплата по QR-коду**\n\n"
+            f"Отсканируйте QR-код в приложении любого банка:\n\n"
+            f"🔗 [Ссылка на QR-код]({OZON_SBP_QR_URL})\n\n"
+            f"💳 После оплаты нажмите 'Я оплатил(а)'",
+            reply_markup=get_requisites_menu(),
+            parse_mode="Markdown"
         )
     else:
-        text = "📊 Статистика пока пуста. Напишите несколько сообщений!"
+        await callback.message.edit_text(
+            "❌ QR-код временно недоступен.\n"
+            "Используйте реквизиты для перевода.",
+            reply_markup=get_requisites_menu()
+        )
+    await callback.answer()
+
+# ========== ОБРАБОТЧИКИ ПОКУПКИ ==========
+
+@router.callback_query(lambda c: c.data.startswith("buy_"))
+async def process_buy(callback: CallbackQuery):
+    """Обработка выбора суммы для покупки"""
+    amount = int(callback.data.replace("buy_", ""))
+    
+    text = (
+        f"💎 **Покупка {amount} NCoin**\n\n"
+        f"💰 Сумма к оплате: {amount} ₽\n\n"
+        f"🏦 **Реквизиты для оплаты:**\n"
+        f"Банк: {OZON_BANK_NAME}\n"
+        f"Карта: •••• {OZON_CARD_LAST4}\n"
+        f"Получатель: {OZON_RECEIVER}\n\n"
+        f"📝 **Назначение платежа:** Пополнение NEXUS\n\n"
+        f"💡 **Инструкция:**\n"
+        f"1. Переведите {amount} ₽ на указанную карту\n"
+        f"2. В назначении платежа укажите: Пополнение NEXUS\n"
+        f"3. Нажмите кнопку 'Я оплатил(а)'\n"
+        f"4. Администратор проверит оплату и начислит NCoin"
+    )
+    
+    if OZON_SBP_QR_URL:
+        text += f"\n\n📱 Или оплатите по QR-коду: [Ссылка]({OZON_SBP_QR_URL})"
     
     await callback.message.edit_text(
         text,
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "stats_chat")
-async def stats_chat(callback: CallbackQuery):
-    """Статистика чата"""
-    await callback.message.edit_text(
-        "📊 **Статистика чата**\n\n"
-        "Функция в разработке. Скоро будет доступна!",
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "stats_top_balance")
-async def stats_top_balance(callback: CallbackQuery):
-    """Топ по балансу"""
-    await callback.message.edit_text(
-        "🏆 **Топ по балансу**\n\n"
-        "Используйте команду /top для просмотра топа",
-        reply_markup=get_back_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(lambda c: c.data == "stats_top_messages")
-async def stats_top_messages(callback: CallbackQuery):
-    """Топ по сообщениям"""
-    await callback.message.edit_text(
-        "💬 **Топ по сообщениям**\n\n"
-        "Функция в разработке. Скоро будет доступна!",
-        reply_markup=get_back_menu()
+        reply_markup=get_back_menu(),
+        parse_mode="Markdown"
     )
     await callback.answer()
 
@@ -527,9 +472,9 @@ async def help_economy(callback: CallbackQuery):
         "/daily — бонус 50 NCoin (раз в 24ч)\n"
         "/gift — подарить NCoin\n"
         "/top — топ богачей\n\n"
-        "⭐ **Telegram Stars:**\n"
-        "1 Star = 10 NCoin\n"
-        "/buy — купить NCoin за Stars",
+        "💳 **Пополнение:**\n"
+        "/pay [сумма] — реквизиты для оплаты\n"
+        "1 ₽ = 1 NCoin",
         reply_markup=get_back_menu()
     )
     await callback.answer()
@@ -554,22 +499,13 @@ async def help_moderation(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "help_stars")
-async def help_stars(callback: CallbackQuery):
-    """Справка по Telegram Stars"""
+@router.callback_query(lambda c: c.data == "help_requisites")
+async def help_requisites(callback: CallbackQuery):
+    """Справка по реквизитам"""
+    text = get_requisites_text()
     await callback.message.edit_text(
-        "⭐ **Telegram Stars**\n\n"
-        "Внутренняя валюта Telegram.\n\n"
-        "📌 **Как пополнить Stars:**\n"
-        "1. Откройте настройки Telegram\n"
-        "2. Перейдите в Telegram Stars\n"
-        "3. Пополните баланс\n\n"
-        "📌 **Как обменять на NCoin:**\n"
-        "1. Нажмите /buy\n"
-        "2. Выберите сумму\n"
-        "3. Подтвердите оплату\n\n"
-        "💎 Курс: 1 Star = 10 NCoin",
-        reply_markup=get_back_menu()
+        text,
+        reply_markup=get_requisites_menu()
     )
     await callback.answer()
 
@@ -577,7 +513,7 @@ async def help_stars(callback: CallbackQuery):
 async def help_ai(callback: CallbackQuery):
     """Справка по AI помощнику"""
     await callback.message.edit_text(
-        "🤖 **AI-ассистент NEXUS**\n\n"
+        "🤖 **AI-помощник NEXUS**\n\n"
         "📌 **Команды:**\n"
         "/ask [вопрос] — быстрый вопрос\n"
         "/ai — диалог с AI\n\n"
