@@ -4,3 +4,10 @@ from . import economy
 from . import games_interactive
 from . import birthday_calendar
 from . import menu_handler
+from . import shop
+from . import rp_commands
+from . import vip
+from . import report
+from . import instructions
+from . import callbacks
+from . import roles
