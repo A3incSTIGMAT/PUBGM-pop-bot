@@ -1,8 +1,9 @@
 """
-Главное меню бота с категориями
+Главное меню NEXUS — полная версия с реквизитами Озон Банка
 """
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from config import OZON_CARD_LAST4, OZON_BANK_NAME
 
 def get_main_menu(user_role: str = "user") -> InlineKeyboardMarkup:
     """
@@ -11,32 +12,37 @@ def get_main_menu(user_role: str = "user") -> InlineKeyboardMarkup:
     """
     buttons = []
     
-    # Ряд 1: Основные категории
+    # Ряд 1: Профиль и Экономика
     buttons.append([
         InlineKeyboardButton(text="👤 Профиль", callback_data="menu_profile"),
         InlineKeyboardButton(text="💰 Экономика", callback_data="menu_economy")
     ])
     
+    # Ряд 2: Игры и Модерация
     buttons.append([
         InlineKeyboardButton(text="🎮 Игры", callback_data="menu_games"),
         InlineKeyboardButton(text="🛡 Модерация", callback_data="menu_moderation")
     ])
     
+    # Ряд 3: Статистика и Социальное
     buttons.append([
         InlineKeyboardButton(text="📊 Статистика", callback_data="menu_stats"),
         InlineKeyboardButton(text="🎁 Социальное", callback_data="menu_social")
     ])
     
+    # Ряд 4: VIP и AI
     buttons.append([
         InlineKeyboardButton(text="👑 VIP Статус", callback_data="menu_vip"),
         InlineKeyboardButton(text="🤖 AI Помощник", callback_data="menu_ai")
     ])
     
+    # Ряд 5: Реквизиты и Покупка
     buttons.append([
-        InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="menu_stars"),
+        InlineKeyboardButton(text="💳 Реквизиты", callback_data="menu_requisites"),
         InlineKeyboardButton(text="💎 Купить NCoin", callback_data="menu_buy")
     ])
     
+    # Ряд 6: Помощь и О боте
     buttons.append([
         InlineKeyboardButton(text="❓ Помощь", callback_data="menu_help"),
         InlineKeyboardButton(text="ℹ️ О боте", callback_data="menu_about")
@@ -44,8 +50,32 @@ def get_main_menu(user_role: str = "user") -> InlineKeyboardMarkup:
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
+def get_requisites_menu() -> InlineKeyboardMarkup:
+    """Меню с реквизитами Озон Банка"""
+    buttons = [
+        [InlineKeyboardButton(text="📋 Скопировать реквизиты", callback_data="copy_requisites")],
+        [InlineKeyboardButton(text="📱 Оплатить по QR", callback_data="pay_qr")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_buy_menu() -> InlineKeyboardMarkup:
+    """Меню покупки NCoin"""
+    buttons = [
+        [InlineKeyboardButton(text="100 NCoin — 100 ₽", callback_data="buy_100")],
+        [InlineKeyboardButton(text="500 NCoin — 500 ₽", callback_data="buy_500")],
+        [InlineKeyboardButton(text="1000 NCoin — 1000 ₽", callback_data="buy_1000")],
+        [InlineKeyboardButton(text="5000 NCoin — 5000 ₽", callback_data="buy_5000")],
+        [InlineKeyboardButton(text="10000 NCoin — 10000 ₽", callback_data="buy_10000")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def get_profile_menu() -> InlineKeyboardMarkup:
-    """Меню профиля пользователя"""
+    """Меню профиля"""
     buttons = [
         [
             InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
@@ -56,11 +86,11 @@ def get_profile_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👑 Моя роль", callback_data="profile_role")
         ],
         [
-            InlineKeyboardButton(text="⭐ Пополнить Stars", callback_data="profile_stars"),
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_economy_menu() -> InlineKeyboardMarkup:
     """Меню экономики"""
@@ -75,7 +105,7 @@ def get_economy_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="💎 Купить NCoin", callback_data="eco_buy"),
-            InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="eco_stars")
+            InlineKeyboardButton(text="💳 Реквизиты", callback_data="eco_requisites")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
@@ -83,26 +113,6 @@ def get_economy_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_buy_ncoin_menu() -> InlineKeyboardMarkup:
-    """Меню покупки NCoin за Stars"""
-    buttons = [
-        [
-            InlineKeyboardButton(text="⭐ 10 Stars → 100 NCoin", callback_data="buy_10"),
-            InlineKeyboardButton(text="⭐ 50 Stars → 500 NCoin", callback_data="buy_50")
-        ],
-        [
-            InlineKeyboardButton(text="⭐ 100 Stars → 1000 NCoin", callback_data="buy_100"),
-            InlineKeyboardButton(text="⭐ 500 Stars → 5000 NCoin", callback_data="buy_500")
-        ],
-        [
-            InlineKeyboardButton(text="⭐ 1000 Stars → 10000 NCoin", callback_data="buy_1000"),
-            InlineKeyboardButton(text="⭐ 5000 Stars → 50000 NCoin", callback_data="buy_5000")
-        ],
-        [
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_games_menu() -> InlineKeyboardMarkup:
     """Меню игр"""
@@ -121,6 +131,7 @@ def get_games_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_moderation_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Меню модерации"""
     buttons = []
@@ -134,6 +145,10 @@ def get_moderation_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📢 Отметить всех", callback_data="mod_all"),
             InlineKeyboardButton(text="📋 Лог-канал", callback_data="mod_logchannel")
         ])
+        buttons.append([
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="mod_settings"),
+            InlineKeyboardButton(text="👥 Модераторы", callback_data="mod_moderators")
+        ])
     else:
         buttons.append([
             InlineKeyboardButton(text="📢 Отметить всех", callback_data="mod_all"),
@@ -144,6 +159,7 @@ def get_moderation_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_stats_menu() -> InlineKeyboardMarkup:
     """Меню статистики"""
@@ -162,6 +178,7 @@ def get_stats_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_social_menu() -> InlineKeyboardMarkup:
     """Меню социальных функций"""
     buttons = [
@@ -179,16 +196,13 @@ def get_social_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_stars_menu() -> InlineKeyboardMarkup:
-    """Меню Telegram Stars"""
+
+def get_vip_menu() -> InlineKeyboardMarkup:
+    """Меню VIP-статуса"""
     buttons = [
         [
-            InlineKeyboardButton(text="⭐ Купить Stars", callback_data="stars_buy"),
-            InlineKeyboardButton(text="💰 Баланс Stars", callback_data="stars_balance")
-        ],
-        [
-            InlineKeyboardButton(text="💎 Обменять на NCoin", callback_data="stars_exchange"),
-            InlineKeyboardButton(text="🎁 Подарить Stars", callback_data="stars_gift")
+            InlineKeyboardButton(text="👑 Купить VIP", callback_data="vip_buy"),
+            InlineKeyboardButton(text="❓ Что даёт VIP?", callback_data="vip_info")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
@@ -196,16 +210,17 @@ def get_stars_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_settings_menu() -> InlineKeyboardMarkup:
-    """Меню настроек (только для админов)"""
+
+def get_ai_menu() -> InlineKeyboardMarkup:
+    """Меню AI-помощника"""
     buttons = [
         [
-            InlineKeyboardButton(text="📝 Приветствие", callback_data="settings_welcome"),
-            InlineKeyboardButton(text="📋 Лог-канал", callback_data="settings_logchannel")
+            InlineKeyboardButton(text="🤖 Задать вопрос", callback_data="ai_ask"),
+            InlineKeyboardButton(text="💬 Начать диалог", callback_data="ai_chat")
         ],
         [
-            InlineKeyboardButton(text="🔞 Фильтр мата", callback_data="settings_profanity"),
-            InlineKeyboardButton(text="🤖 Антиспам", callback_data="settings_antispam")
+            InlineKeyboardButton(text="📊 История", callback_data="ai_history"),
+            InlineKeyboardButton(text="🗑️ Очистить память", callback_data="ai_clear")
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
@@ -213,22 +228,6 @@ def get_settings_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_management_menu() -> InlineKeyboardMarkup:
-    """Меню управления (только для админов)"""
-    buttons = [
-        [
-            InlineKeyboardButton(text="👥 Модераторы", callback_data="manage_mods"),
-            InlineKeyboardButton(text="➕ Назначить модератора", callback_data="manage_addmod")
-        ],
-        [
-            InlineKeyboardButton(text="➖ Удалить модератора", callback_data="manage_removemod"),
-            InlineKeyboardButton(text="📊 Статистика жалоб", callback_data="manage_reports")
-        ],
-        [
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back_main")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_help_menu() -> InlineKeyboardMarkup:
     """Меню помощи"""
@@ -242,7 +241,7 @@ def get_help_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🛡 Модерация", callback_data="help_moderation")
         ],
         [
-            InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="help_stars"),
+            InlineKeyboardButton(text="💳 Реквизиты", callback_data="help_requisites"),
             InlineKeyboardButton(text="🤖 AI Помощник", callback_data="help_ai")
         ],
         [
@@ -250,6 +249,28 @@ def get_help_menu() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_requisites_text() -> str:
+    """Текст с реквизитами Озон Банка"""
+    return f"""
+💳 **РЕКВИЗИТЫ ДЛЯ ОПЛАТЫ**
+
+🏦 **Банк:** {OZON_BANK_NAME}
+💳 **Карта:** •••• {OZON_CARD_LAST4}
+👤 **Получатель:** Александр Б.
+
+📝 **Назначение платежа:** Пополнение NEXUS
+
+💡 **Как оплатить:**
+1. Переведите сумму на указанную карту
+2. В назначении платежа укажите: "Пополнение NEXUS"
+3. Нажмите кнопку "Я оплатил(а)" ниже
+4. Администратор проверит оплату и начислит NCoin
+
+🔗 **СБП:** отсканируйте QR-код в приложении банка
+"""
+
 
 def get_back_menu() -> InlineKeyboardMarkup:
     """Кнопка назад"""
