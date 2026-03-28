@@ -1,5 +1,17 @@
+# Секреты
 .env
+*.key
+*.secret
+0claw.toml
+!0claw.toml.example
+
+# Кэш и временные файлы
 __pycache__/
 *.pyc
-data/
+*.db
+*.log
+/data/
+
+# Системные
 .DS_Store
+Thumbs.db
