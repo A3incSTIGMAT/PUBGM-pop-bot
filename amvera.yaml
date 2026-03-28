@@ -1,10 +1,21 @@
 meta:
   version: 1.0
-  toolchain: python
+  toolchain: rust
 
 build:
-  requirementsPath: requirements.txt
+  command: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    cargo install zero-claw --locked
 
 run:
-  command: python bot.py
+  command: |
+    mkdir -p /data/personas
+    cp /app/personas/nexus.md /data/personas/nexus.md
+    zeroclaw daemon --config /app/0claw.toml
   persistenceMount: /data
+
+env:
+  BOT_TOKEN: "${BOT_TOKEN}"
+  ADMIN_IDS: "${ADMIN_IDS}"
+  OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
