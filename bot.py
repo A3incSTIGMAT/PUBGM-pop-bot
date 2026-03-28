@@ -39,6 +39,7 @@ shop.set_bot(bot)
 dp = Dispatcher()
 init_db()
 
+# Регистрация роутеров
 dp.include_router(economy.router)
 dp.include_router(games_interactive.router)
 dp.include_router(birthday_calendar.router)
@@ -52,9 +53,9 @@ dp.include_router(shop.router)
 dp.include_router(rp_commands.router)
 dp.include_router(vip.router)
 dp.include_router(ozon_router)
-dp.include_router(ai_router)  # ← это из intelligence/assistant.py
+dp.include_router(ai_router)
 
-print("✅ Все системы активированы")
+print("✅ Все роутеры зарегистрированы")
 print("🚀 NEXUS AI готов к работе!")
 
 async def main():
