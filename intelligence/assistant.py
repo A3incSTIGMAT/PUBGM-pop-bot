@@ -1,5 +1,5 @@
 """
-NEXUS AI — Hugging Face (новый API)
+NEXUS AI — Hugging Face Inference API (правильный формат)
 """
 
 import aiohttp
@@ -10,7 +10,6 @@ from config import HUGGINGFACE_TOKEN
 
 router = Router()
 
-# Используем модель Mistral — легкая и стабильная
 MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
 SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
@@ -33,7 +32,7 @@ async def cmd_ask(message: Message):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"https://router.huggingface.co/{MODEL_ID}",  # ← НОВЫЙ URL!
+                f"https://api-inference.huggingface.co/models/{MODEL_ID}",
                 headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
                 json={
                     "inputs": f"<s>[INST] {SYSTEM_PROMPT}\n\nВопрос: {args[1]} [/INST]",
@@ -44,17 +43,23 @@ async def cmd_ask(message: Message):
                     }
                 }
             ) as resp:
-                data = await resp.json()
+                # Получаем текст ответа
+                text = await resp.text()
                 
-                if isinstance(data, list) and len(data) > 0:
-                    answer = data[0].get("generated_text", "")
-                    answer = answer.split("[/INST]")[-1].strip()
-                    if not answer:
-                        answer = "Не могу ответить. Попробуй переформулировать."
-                elif "error" in data:
-                    answer = f"⚠️ Ошибка: {data['error']}"
+                if resp.status == 200:
+                    import json
+                    data = json.loads(text)
+                    if isinstance(data, list) and len(data) > 0:
+                        answer = data[0].get("generated_text", "")
+                        answer = answer.split("[/INST]")[-1].strip()
+                        if not answer:
+                            answer = "Не могу ответить. Попробуй переформулировать."
+                    else:
+                        answer = "⚠️ Неожиданный формат ответа."
+                elif resp.status == 503:
+                    answer = "⚠️ Модель загружается. Попробуй через 10 секунд."
                 else:
-                    answer = "⚠️ Не удалось получить ответ."
+                    answer = f"⚠️ Ошибка {resp.status}: {text[:200]}"
                     
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
