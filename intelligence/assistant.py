@@ -1,5 +1,5 @@
 """
-NEXUS AI — OpenRouter API (простой и надёжный)
+NEXUS AI — OpenRouter API (рабочая модель)
 """
 
 import aiohttp
@@ -36,7 +36,7 @@ async def cmd_ask(message: Message):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "deepseek/deepseek-chat:free",
+                    "model": "mistralai/mistral-7b-instruct:free",
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": args[1]}
@@ -49,7 +49,8 @@ async def cmd_ask(message: Message):
                 if "choices" in data and data["choices"]:
                     answer = data["choices"][0]["message"]["content"]
                 else:
-                    answer = f"⚠️ Ошибка: {data.get('error', {}).get('message', 'Неизвестная ошибка')}"
+                    error = data.get("error", {})
+                    answer = f"⚠️ Ошибка: {error.get('message', 'Неизвестная ошибка')}"
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
     
