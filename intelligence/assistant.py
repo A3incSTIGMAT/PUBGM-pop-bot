@@ -20,7 +20,6 @@ async def cmd_ask(message: Message):
         )
         return
     
-    # Временный ответ
     await message.answer(
         f"🤖 **NEXUS AI:**\n\n"
         f"Ваш вопрос: {args[1]}\n\n"
