@@ -1,12 +1,18 @@
 """
-NEXUS AI — Временная версия (без API)
+NEXUS AI — OpenRouter API (простой и надёжный)
 """
 
+import aiohttp
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from config import OPENROUTER_API_KEY
 
 router = Router()
+
+SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
+Отвечай кратко, полезно и на русском языке.
+Помогай пользователям с вопросами о боте, давай советы."""
 
 @router.message(Command("ask"))
 async def cmd_ask(message: Message):
@@ -15,35 +21,37 @@ async def cmd_ask(message: Message):
         await message.answer(
             "🤖 **NEXUS AI**\n\n"
             "Использование: /ask [вопрос]\n"
-            "Пример: /ask как получить VIP?\n\n"
-            "💡 AI-ассистент настраивается. Скоро будет доступен!"
+            "Пример: /ask как получить VIP?"
         )
         return
     
-    await message.answer(
-        f"🤖 **NEXUS AI:**\n\n"
-        f"Ваш вопрос: {args[1]}\n\n"
-        f"⚙️ AI-ассистент в разработке. В ближайшее время он научится отвечать на любые вопросы!\n\n"
-        f"А пока вы можете:\n"
-        f"• /balance — проверить баланс\n"
-        f"• /daily — получить бонус\n"
-        f"• /menu — открыть меню\n"
-        f"• /shop — магазин подарков"
-    )
-
-@router.message(Command("ai"))
-async def cmd_ai(message: Message):
-    await message.answer(
-        "🤖 **NEXUS AI — Интеллектуальный ассистент**\n\n"
-        "📌 **Статус:** В разработке\n\n"
-        "✨ В ближайшее время AI научится:\n"
-        "• Отвечать на любые вопросы\n"
-        "• Помогать с настройкой бота\n"
-        "• Рассказывать о функциях NEXUS\n"
-        "• Давать советы и идеи\n\n"
-        "⚡ Пока доступны:\n"
-        "• /balance — баланс NCoin\n"
-        "• /daily — ежедневный бонус\n"
-        "• /menu — главное меню\n"
-        "• /shop — магазин подарков"
-    )
+    status = await message.answer("🤔 Думаю...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek/deepseek-chat:free",
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": args[1]}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 500
+                }
+            ) as resp:
+                data = await resp.json()
+                if "choices" in data and data["choices"]:
+                    answer = data["choices"][0]["message"]["content"]
+                else:
+                    answer = f"⚠️ Ошибка: {data.get('error', {}).get('message', 'Неизвестная ошибка')}"
+    except Exception as e:
+        answer = f"❌ Ошибка: {e}"
+    
+    await status.delete()
+    await message.answer(f"🤖 **NEXUS AI:**\n\n{answer}")
