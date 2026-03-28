@@ -1,29 +1,11 @@
 meta:
   version: 1.0
-  toolchain: rust
+  toolchain: python
 
 build:
-  command: |
-    # Устанавливаем Rust
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-    
-    # Проверяем установку
-    rustc --version
-    cargo --version
-    
-    # Устанавливаем ZeroClaw
-    cargo install zero-claw --locked
-    
-    # Проверяем, что установилось
-    ls -la /root/.cargo/bin/
-    echo "PATH=$PATH" >> ~/.bashrc
+  requirementsPath: requirements.txt
+  useCache: false
 
 run:
-  command: /root/.cargo/bin/zeroclaw daemon --config /app/0claw.toml
+  command: python bot.py
   persistenceMount: /data
-
-env:
-  BOT_TOKEN: "${BOT_TOKEN}"
-  ADMIN_IDS: "${ADMIN_IDS}"
-  OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
