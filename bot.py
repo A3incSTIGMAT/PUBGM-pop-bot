@@ -8,10 +8,10 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN
 from handlers import (
     admin, user, economy, games_interactive, birthday_calendar,
-    menu_handler, shop, rp_commands, vip, report, instructions, callbacks, roles
+    menu_handler, shop, rp_commands, vip, report, instructions, callbacks, roles,
+    smart_parser
 )
 from payments.ozon import router as ozon_router
-from intelligence.assistant import router as ai_router
 from database.db import init_db
 from utils.lock import acquire_lock
 
@@ -28,6 +28,7 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
+# Передаём бота во все модули
 admin.set_bot(bot)
 user.set_bot(bot)
 report.set_bot(bot)
@@ -35,6 +36,7 @@ callbacks.set_bot(bot)
 roles.set_bot(bot)
 menu_handler.set_bot(bot)
 shop.set_bot(bot)
+smart_parser.set_bot(bot)
 
 dp = Dispatcher()
 init_db()
@@ -53,9 +55,10 @@ dp.include_router(shop.router)
 dp.include_router(rp_commands.router)
 dp.include_router(vip.router)
 dp.include_router(ozon_router)
-dp.include_router(ai_router)
+dp.include_router(smart_parser.router)
 
 print("✅ Все роутеры зарегистрированы")
+print("🧠 Умный парсер активирован")
 print("🚀 NEXUS AI готов к работе!")
 
 async def main():
