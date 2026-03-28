@@ -9,8 +9,3 @@ build:
 run:
   command: python bot.py
   persistenceMount: /data
-
-services:
-  ollama:
-    image: ollama/ollama:latest
-    command: serve
