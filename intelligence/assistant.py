@@ -1,14 +1,16 @@
 """
-NEXUS AI — OpenRouter API (рабочая модель)
+NEXUS AI — Hugging Face Inference API
 """
 
 import aiohttp
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from config import OPENROUTER_API_KEY
+from config import HUGGINGFACE_TOKEN
 
 router = Router()
+
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
 SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
 Отвечай кратко, полезно и на русском языке.
@@ -25,32 +27,37 @@ async def cmd_ask(message: Message):
         )
         return
     
+    if not HUGGINGFACE_TOKEN:
+        await message.answer("⚠️ AI временно недоступен. API ключ не настроен.")
+        return
+    
     status = await message.answer("🤔 Думаю...")
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json"
-                },
+                f"https://router.huggingface.co/{MODEL_ID}",
+                headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
                 json={
-                    "model": "mistralai/mistral-7b-instruct:free",
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": args[1]}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 500
+                    "inputs": f"<s>[INST] {SYSTEM_PROMPT}\n\nВопрос: {args[1]} [/INST]",
+                    "parameters": {
+                        "max_new_tokens": 500,
+                        "temperature": 0.7,
+                        "do_sample": True
+                    }
                 }
             ) as resp:
                 data = await resp.json()
-                if "choices" in data and data["choices"]:
-                    answer = data["choices"][0]["message"]["content"]
+                
+                if isinstance(data, list) and len(data) > 0:
+                    answer = data[0].get("generated_text", "")
+                    answer = answer.split("[/INST]")[-1].strip()
+                    if not answer:
+                        answer = "Не могу ответить. Попробуй переформулировать."
+                elif "error" in data:
+                    answer = f"⚠️ Ошибка: {data['error']}"
                 else:
-                    error = data.get("error", {})
-                    answer = f"⚠️ Ошибка: {error.get('message', 'Неизвестная ошибка')}"
+                    answer = "⚠️ Не удалось получить ответ."
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
     
