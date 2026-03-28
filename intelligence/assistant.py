@@ -1,5 +1,5 @@
 """
-NEXUS AI — Meta-Llama-3.1-8B-Instruct через Hugging Face
+NEXUS AI — Mistral-7B-Instruct (работает стабильно)
 """
 
 import aiohttp
@@ -10,7 +10,8 @@ from config import HUGGINGFACE_TOKEN
 
 router = Router()
 
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+# Используем модель Mistral — она легче и стабильнее
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
 SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
 Отвечай кратко, полезно и на русском языке.
@@ -35,7 +36,7 @@ async def cmd_ask(message: Message):
                 f"https://api-inference.huggingface.co/models/{MODEL_ID}",
                 headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
                 json={
-                    "inputs": f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_PROMPT}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{args[1]}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                    "inputs": f"<s>[INST] {SYSTEM_PROMPT}\n\nВопрос: {args[1]} [/INST]",
                     "parameters": {
                         "max_new_tokens": 500,
                         "temperature": 0.7,
@@ -48,13 +49,16 @@ async def cmd_ask(message: Message):
                 if isinstance(data, list) and len(data) > 0:
                     answer = data[0].get("generated_text", "")
                     # Очищаем ответ
-                    answer = answer.split("assistant<|end_header_id|>")[-1].strip()
-                    answer = answer.split("<|eot_id|>")[0].strip()
+                    answer = answer.split("[/INST]")[-1].strip()
                     if not answer:
                         answer = "Не могу ответить. Попробуй переформулировать."
+                elif "error" in data:
+                    answer = f"⚠️ Ошибка модели: {data['error']}"
                 else:
                     answer = "⚠️ Не удалось получить ответ."
                     
+    except aiohttp.ClientError as e:
+        answer = f"❌ Ошибка соединения: {e}"
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
     
