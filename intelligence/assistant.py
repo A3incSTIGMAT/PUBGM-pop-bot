@@ -1,16 +1,14 @@
 """
-NEXUS AI — Hugging Face Inference API (правильный формат)
+NEXUS AI — Ollama (локальная модель на Amvera)
 """
 
 import aiohttp
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from config import HUGGINGFACE_TOKEN
+from config import OLLAMA_URL
 
 router = Router()
-
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
 SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
 Отвечай кратко, полезно и на русском языке.
@@ -23,7 +21,8 @@ async def cmd_ask(message: Message):
         await message.answer(
             "🤖 **NEXUS AI**\n\n"
             "Использование: /ask [вопрос]\n"
-            "Пример: /ask как получить VIP?"
+            "Пример: /ask как получить VIP?\n\n"
+            "💡 Задай любой вопрос!"
         )
         return
     
@@ -32,37 +31,48 @@ async def cmd_ask(message: Message):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"https://api-inference.huggingface.co/models/{MODEL_ID}",
-                headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
+                f"{OLLAMA_URL}/api/generate",
                 json={
-                    "inputs": f"<s>[INST] {SYSTEM_PROMPT}\n\nВопрос: {args[1]} [/INST]",
-                    "parameters": {
-                        "max_new_tokens": 500,
+                    "model": "tinyllama",
+                    "prompt": f"{SYSTEM_PROMPT}\n\nВопрос: {args[1]}\nОтвет:",
+                    "stream": False,
+                    "options": {
                         "temperature": 0.7,
-                        "do_sample": True
+                        "num_predict": 500
                     }
-                }
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
             ) as resp:
-                # Получаем текст ответа
-                text = await resp.text()
-                
                 if resp.status == 200:
-                    import json
-                    data = json.loads(text)
-                    if isinstance(data, list) and len(data) > 0:
-                        answer = data[0].get("generated_text", "")
-                        answer = answer.split("[/INST]")[-1].strip()
-                        if not answer:
-                            answer = "Не могу ответить. Попробуй переформулировать."
-                    else:
-                        answer = "⚠️ Неожиданный формат ответа."
-                elif resp.status == 503:
-                    answer = "⚠️ Модель загружается. Попробуй через 10 секунд."
+                    data = await resp.json()
+                    answer = data.get("response", "Не удалось получить ответ")
                 else:
-                    answer = f"⚠️ Ошибка {resp.status}: {text[:200]}"
-                    
+                    answer = f"⚠️ Ошибка {resp.status}: модель загружается. Попробуй через минуту."
+    except aiohttp.ClientError as e:
+        answer = f"❌ Ошибка соединения: {e}"
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
     
     await status.delete()
+    
+    if len(answer) > 4000:
+        answer = answer[:4000] + "\n\n... (ответ обрезан)"
+    
     await message.answer(f"🤖 **NEXUS AI:**\n\n{answer}")
+
+@router.message(Command("ai"))
+async def cmd_ai(message: Message):
+    """Справка по AI-ассистенту"""
+    await message.answer(
+        "🤖 **NEXUS AI — Интеллектуальный ассистент**\n\n"
+        "📌 **Команды:**\n"
+        "/ask [вопрос] — быстрый ответ\n"
+        "/ai — эта справка\n\n"
+        "💡 **Что умеет:**\n"
+        "• Отвечать на любые вопросы\n"
+        "• Помогать с настройкой бота\n"
+        "• Рассказывать о функциях NEXUS\n"
+        "• Давать советы и идеи\n\n"
+        "⚡ **Технологии:** локальная модель tinyllama (Ollama)\n"
+        "🎁 **Бесплатно, без ограничений**"
+    )
