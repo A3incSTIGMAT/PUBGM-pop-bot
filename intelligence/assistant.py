@@ -1,5 +1,5 @@
 """
-NEXUS AI — Mistral-7B-Instruct (работает стабильно)
+NEXUS AI — Hugging Face (новый API)
 """
 
 import aiohttp
@@ -10,7 +10,7 @@ from config import HUGGINGFACE_TOKEN
 
 router = Router()
 
-# Используем модель Mistral — она легче и стабильнее
+# Используем модель Mistral — легкая и стабильная
 MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
 SYSTEM_PROMPT = """Ты — NEXUS AI, дружелюбный помощник для Telegram.
@@ -33,7 +33,7 @@ async def cmd_ask(message: Message):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"https://api-inference.huggingface.co/models/{MODEL_ID}",
+                f"https://router.huggingface.co/{MODEL_ID}",  # ← НОВЫЙ URL!
                 headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
                 json={
                     "inputs": f"<s>[INST] {SYSTEM_PROMPT}\n\nВопрос: {args[1]} [/INST]",
@@ -48,17 +48,14 @@ async def cmd_ask(message: Message):
                 
                 if isinstance(data, list) and len(data) > 0:
                     answer = data[0].get("generated_text", "")
-                    # Очищаем ответ
                     answer = answer.split("[/INST]")[-1].strip()
                     if not answer:
                         answer = "Не могу ответить. Попробуй переформулировать."
                 elif "error" in data:
-                    answer = f"⚠️ Ошибка модели: {data['error']}"
+                    answer = f"⚠️ Ошибка: {data['error']}"
                 else:
                     answer = "⚠️ Не удалось получить ответ."
                     
-    except aiohttp.ClientError as e:
-        answer = f"❌ Ошибка соединения: {e}"
     except Exception as e:
         answer = f"❌ Ошибка: {e}"
     
