@@ -10,8 +10,8 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан!")
 
-# ========== AI (Ollama) ==========
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+# ========== AI (OpenRouter) ==========
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # ========== ОЗОН БАНК (платежи) ==========
 OZON_CARD_LAST4 = os.getenv("OZON_CARD_LAST4", "4436")
@@ -32,5 +32,8 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 AI_MODEL = os.getenv("AI_MODEL", "deepseek-chat")
 AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.8"))
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "2000"))
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 
 print("✅ Конфигурация загружена")
+print(f"🤖 AI: OpenRouter")
+print(f"💳 Платежи: Озон Банк (карта •••• {OZON_CARD_LAST4})")
