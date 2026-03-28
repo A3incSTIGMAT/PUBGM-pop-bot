@@ -4,15 +4,23 @@ meta:
 
 build:
   command: |
+    # Устанавливаем Rust
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
+    
+    # Проверяем установку
+    rustc --version
+    cargo --version
+    
+    # Устанавливаем ZeroClaw
     cargo install zero-claw --locked
+    
+    # Проверяем, что установилось
+    ls -la /root/.cargo/bin/
+    echo "PATH=$PATH" >> ~/.bashrc
 
 run:
-  command: |
-    mkdir -p /data/personas
-    cp /app/personas/nexus.md /data/personas/nexus.md
-    zeroclaw daemon --config /app/0claw.toml
+  command: /root/.cargo/bin/zeroclaw daemon --config /app/0claw.toml
   persistenceMount: /data
 
 env:
