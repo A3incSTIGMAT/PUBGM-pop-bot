@@ -1,17 +1,43 @@
-# Секреты
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets
 .env
 *.key
 *.secret
 0claw.toml
 !0claw.toml.example
 
-# Кэш и временные файлы
-__pycache__/
-*.pyc
+# Database
 *.db
-*.log
+*.sqlite
+*.sqlite3
 /data/
 
-# Системные
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Rust
+target/
+Cargo.lock
