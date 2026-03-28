@@ -10,8 +10,8 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан!")
 
-# ========== AI (Hugging Face) ==========
-HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+# ========== AI (Ollama) ==========
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
 # ========== ОЗОН БАНК (платежи) ==========
 OZON_CARD_LAST4 = os.getenv("OZON_CARD_LAST4", "4436")
