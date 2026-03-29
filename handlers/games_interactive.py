@@ -64,10 +64,8 @@ logger = logging.getLogger("nexus.games")
 # 📊 PROMETHEUS METRICS (✅ ИСПРАВЛЕНО: объявлены метрики)
 # ============================================================================
 API_ERRORS = Counter(
-    'api_errors_total', 
-    'Total API errors by endpoint and type',
-    ['endpoint', 'error_type'],
-    documentation='Counts errors in API endpoints'
+    'api_errors_total',
+    'Total API errors'
 )
 GAMES_STARTED = Counter(
     'games_started_total',
