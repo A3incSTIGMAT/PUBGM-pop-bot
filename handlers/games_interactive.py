@@ -1,1604 +1,1339 @@
 """
-NEXUS Interactive Games Module — Industrial Edition (FIXED v2.0)
-✅ Полная изоляция данных между чатами
-✅ Безопасная HMAC подпись с timestamp и replay-защитой
-✅ Rate limiting для всех эндпоинтов
-✅ Полная валидация всех входных данных
-✅ Graceful shutdown с завершением активных игр
-✅ Health checks для всех зависимостей
-✅ Исправлены все критические баги (см. changelog ниже)
+Интерактивные игры с кнопками
+Слот-машина, дуэли, рулетка, камень-ножницы-бумага
+С интеграцией AI (OpenRouter) и полной статистикой
 """
 
 import asyncio
-import hashlib
-import hmac
-import json
-import logging
 import random
-import signal
-import sys
-import time
 import uuid
-from collections import OrderedDict
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any, List, Set, Literal
-from functools import wraps
+from typing import Dict, Optional, Tuple, List
+import json
 
-import aiosqlite
-import redis.asyncio as redis
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
-from aiogram.filters.callback_data import CallbackData
+from aiogram import F, Router, Bot
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    BotCommand, BotCommandScopeDefault
+    CallbackQuery, Message, InlineKeyboardMarkup, 
+    InlineKeyboardButton, Chat, User
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 from config import (
-    DATABASE_PATH, REDIS_URL, SECRET_KEY, BOT_TOKEN,
-    MIN_BET, MAX_BET, DUEL_TIMEOUT, RATE_LIMIT_GAMES,
-    PROMETHEUS_PORT, DB_POOL_SIZE, MAX_BET_CONFIRMATION,
-    ADMIN_IDS  # ✅ Добавлено: список админов
+    BOT_TOKEN, MIN_BET, MAX_BET, DUEL_TIMEOUT, 
+    RATE_LIMIT_GAMES, MAX_BET_CONFIRMATION, ADMIN_IDS,
+    DATABASE_PATH, SECRET_KEY, LOG_LEVEL, LOG_FILE
 )
+from database import db
+from utils.rate_limiter import rate_limit
+from utils.security import verify_signature, generate_signature
+from utils.logger import logger
 
-# ============================================================================
-# 📋 LOGGING SETUP
-# ============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('nexus_games.log', encoding='utf-8', mode='a')
-    ]
-)
-logger = logging.getLogger("nexus.games")
+# Prometheus metrics - ИСПРАВЛЕННАЯ ВЕРСИЯ
+try:
+    from prometheus_client import Counter, Histogram, Gauge
+    
+    # Game metrics
+    GAMES_PLAYED = Counter(
+        'nexus_games_played_total',
+        'Total games played',
+        ['game_type']
+    )
+    
+    GAMES_WON = Counter(
+        'nexus_games_won_total',
+        'Total games won',
+        ['game_type']
+    )
+    
+    BETS_PLACED = Counter(
+        'nexus_bets_placed_total',
+        'Total bets placed',
+        ['game_type']
+    )
+    
+    BETS_WON = Counter(
+        'nexus_bets_won_total',
+        'Total bets won',
+        ['game_type']
+    )
+    
+    # API metrics
+    API_REQUESTS = Counter(
+        'nexus_api_requests_total',
+        'Total API requests',
+        ['endpoint', 'status']
+    )
+    
+    API_ERRORS = Counter(
+        'nexus_api_errors_total',
+        'Total API errors',
+        ['error_type']
+    )
+    
+    # User metrics
+    ACTIVE_USERS = Gauge(
+        'nexus_active_users',
+        'Currently active users'
+    )
+    
+    TOTAL_USERS = Gauge(
+        'nexus_total_users',
+        'Total registered users'
+    )
+    
+    # Performance metrics
+    GAME_DURATION = Histogram(
+        'nexus_game_duration_seconds',
+        'Game duration in seconds',
+        ['game_type']
+    )
+    
+    # AI metrics
+    AI_REQUESTS = Counter(
+        'nexus_ai_requests_total',
+        'Total AI requests',
+        ['model', 'status']
+    )
+    
+    AI_TOKENS = Counter(
+        'nexus_ai_tokens_total',
+        'Total AI tokens used',
+        ['type']
+    )
+    
+except ImportError:
+    # Fallback if prometheus_client not installed
+    class DummyMetric:
+        def labels(self, *args, **kwargs):
+            return self
+        def inc(self, *args, **kwargs):
+            pass
+        def observe(self, *args, **kwargs):
+            pass
+        def set(self, *args, **kwargs):
+            pass
+    
+    GAMES_PLAYED = DummyMetric()
+    GAMES_WON = DummyMetric()
+    BETS_PLACED = DummyMetric()
+    BETS_WON = DummyMetric()
+    API_REQUESTS = DummyMetric()
+    API_ERRORS = DummyMetric()
+    ACTIVE_USERS = DummyMetric()
+    TOTAL_USERS = DummyMetric()
+    GAME_DURATION = DummyMetric()
+    AI_REQUESTS = DummyMetric()
+    AI_TOKENS = DummyMetric()
+    
+    logger.warning("prometheus_client not installed, metrics disabled")
 
-# ============================================================================
-# 📊 PROMETHEUS METRICS (✅ ИСПРАВЛЕНО: объявлены метрики)
-# ============================================================================
-API_ERRORS = Counter(
-    'api_errors_total',
-    'Total API errors'
-)
-GAMES_STARTED = Counter(
-    'games_started_total',
-    'Total games started by type and role',
-    ['game', 'user_role'],
-    documentation='Counts game sessions started'
-)
-GAMES_RESULT = Counter(
-    'games_result_total',
-    'Game outcomes by type and result',
-    ['game', 'result'],
-    documentation='Counts game results (win/loss/draw)'
-)
-REDIS_CONNECTED = Gauge(
-    'redis_connected',
-    'Redis connection status (1=connected, 0=disconnected)',
-    documentation='Indicates if Redis is available'
-)
-DB_POOL_ACTIVE = Gauge(
-    'db_pool_active_connections',
-    'Number of active database connections',
-    documentation='Tracks active DB connections in pool'
-)
-ACTIVE_DUELS = Gauge(
-    'active_duels_count',
-    'Number of currently active duels',
-    documentation='Tracks pending/active duels'
-)
+# AI Integration
+try:
+    import aiohttp
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    AI_ENABLED = bool(OPENROUTER_API_KEY)
+except ImportError:
+    AI_ENABLED = False
+    logger.warning("aiohttp not installed, AI features disabled")
 
-# ============================================================================
-# 🎯 КОНСТАНТЫ
-# ============================================================================
-SLOT_SYMBOLS = ["🍒", "🍋", "🍊", "🍉", "🔔", "💎", "7️⃣"]
-SLOT_PAYOUTS = {
-    ("7️⃣", "7️⃣", "7️⃣"): 10,
-    ("💎", "💎", "💎"): 7,
-    ("🔔", "🔔", "🔔"): 5,
-    ("🍒", "🍒", "🍒"): 3,
-    ("🍋", "🍋", "🍋"): 3,
-    ("🍊", "🍊", "🍊"): 3,
-    ("🍉", "🍉", "🍉"): 3
-}
-RPS_CHOICES = {"камень": "🪨", "ножницы": "✂️", "бумага": "📄"}
-
-# ============================================================================
-# 🗄️ ASYNC DATABASE POOL (✅ ИСПРАВЛЕНО: корректное закрытие)
-# ============================================================================
-class AsyncDBPool:
-    """Connection pool для aiosqlite с поддержкой таймаутов и повторных попыток"""
-    
-    def __init__(self, db_path: str, pool_size: int = DB_POOL_SIZE):
-        self.db_path = db_path
-        self.pool_size = pool_size
-        self._pool: Optional[asyncio.Queue] = None
-        self._initialized = False
-        self._lock = asyncio.Lock()
-        self._active_connections: Set[int] = set()
-        self._cleanup_task: Optional[asyncio.Task] = None
-    
-    async def initialize(self):
-        """Инициализация пула соединений"""
-        async with self._lock:
-            if self._initialized:
-                return
-            
-            self._pool = asyncio.Queue(maxsize=self.pool_size)
-            
-            for i in range(self.pool_size):
-                conn = await self._create_connection()
-                await self._pool.put(conn)
-            
-            await self._ensure_schema()
-            self._initialized = True
-            logger.info(f"DB pool initialized: {self.pool_size} connections")
-            
-            # ✅ Запускаем фоновую задачу очистки idempotency_keys
-            self._cleanup_task = asyncio.create_task(self._idempotency_cleaner())
-    
-    async def _idempotency_cleaner(self, interval: int = 300):
-        """Фоновая задача для очистки просроченных ключей идемпотентности"""
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                async with self.acquire() as conn:
-                    result = await conn.execute(
-                        "DELETE FROM idempotency_keys WHERE expires_at < CURRENT_TIMESTAMP"
-                    )
-                    deleted = result.rowcount
-                    await conn.commit()
-                    if deleted > 0:
-                        logger.debug(f"Cleaned {deleted} expired idempotency keys")
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Idempotency cleaner error: {e}", exc_info=True)
-    
-    async def _create_connection(self) -> aiosqlite.Connection:
-        """Создание нового соединения с таймаутом"""
-        conn = await aiosqlite.connect(self.db_path, timeout=10.0)
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA synchronous=NORMAL")
-        await conn.execute("PRAGMA busy_timeout=5000")
-        await conn.execute("PRAGMA foreign_keys=ON")
-        await conn.execute("PRAGMA cache_size=-64000")
-        await conn.commit()
-        return conn
-    
-    async def _ensure_schema(self):
-        """Создание/обновление схемы БД с изоляцией по chat_id"""
-        async with self.acquire() as conn:
-            # Таблица пользователей с версионированием
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    username TEXT,
-                    free_balance INTEGER DEFAULT 0 NOT NULL,
-                    paid_balance INTEGER DEFAULT 0 NOT NULL,
-                    version INTEGER DEFAULT 0 NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, chat_id),
-                    CHECK (free_balance >= 0),
-                    CHECK (paid_balance >= 0)
-                )
-            """)
-            
-            # Аудит-лог (с chat_id для изоляции)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    action TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    balance_before INTEGER NOT NULL,
-                    balance_after INTEGER NOT NULL,
-                    metadata TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, chat_id)")
-            
-            # Кэш участников чата
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_members (
-                    chat_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    username TEXT,
-                    full_name TEXT,
-                    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (chat_id, user_id)
-                )
-            """)
-            
-            # Идемпотентность-ключи с TTL
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS idempotency_keys (
-                    key TEXT PRIMARY KEY,
-                    result TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expires_at TIMESTAMP NOT NULL
-                )
-            """)
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_idem_expires ON idempotency_keys(expires_at)")
-            
-            # Таблица для replay-защиты (подписи с timestamp)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS signature_log (
-                    signature TEXT PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_sig_user ON signature_log(user_id, chat_id)")
-            
-            await conn.commit()
-            logger.info("Database schema ensured")
-    
-    @asynccontextmanager
-    async def acquire(self):
-        """Получение соединения из пула с таймаутом"""
-        if not self._initialized:
-            await self.initialize()
-        
-        try:
-            conn = await asyncio.wait_for(self._pool.get(), timeout=5.0)
-            self._active_connections.add(id(conn))
-            DB_POOL_ACTIVE.set(len(self._active_connections))
-            yield conn
-        except asyncio.TimeoutError:
-            logger.error("Database connection timeout")
-            raise RuntimeError("No available database connections")
-        finally:
-            self._active_connections.discard(id(conn))
-            DB_POOL_ACTIVE.set(len(self._active_connections))
-            await self._pool.put(conn)
-    
-    async def health_check(self) -> bool:
-        """Проверка доступности БД"""
-        try:
-            async with self.acquire() as conn:
-                await conn.execute("SELECT 1")
-                return True
-        except Exception as e:
-            logger.error(f"DB health check failed: {e}", exc_info=True)
-            return False
-    
-    async def close(self):
-        """✅ ИСПРАВЛЕНО: Корректное закрытие всех соединений"""
-        if not self._pool:
-            return
-        
-        # Останавливаем фоновые задачи
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Собираем все соединения
-        connections = []
-        while not self._pool.empty():
-            try:
-                conn = self._pool.get_nowait()
-                connections.append(conn)
-            except asyncio.QueueEmpty:
-                break
-        
-        # Закрываем все соединения параллельно с обработкой ошибок
-        if connections:
-            await asyncio.gather(*[conn.close() for conn in connections], return_exceptions=True)
-        
-        self._initialized = False
-        self._active_connections.clear()
-        DB_POOL_ACTIVE.set(0)
-        logger.info("DB pool closed")
-
-
-# ============================================================================
-# 💰 BALANCE MANAGER (✅ ИСПРАВЛЕНО: безопасный CAS с rollback)
-# ============================================================================
-@dataclass
-class BalanceVersion:
-    """Версионированный баланс для CAS-операций"""
-    user_id: int
-    chat_id: int
-    free_balance: int
-    paid_balance: int
-    version: int
-    
-    @property
-    def total(self) -> int:
-        return self.free_balance + self.paid_balance
-    
-    def can_spend(self, amount: int) -> bool:
-        return self.total >= amount and amount > 0
-
-
-class BalanceManager:
-    """Менеджер баланса с CAS-паттерном и изоляцией по chat_id"""
-    
-    def __init__(self, db_pool: AsyncDBPool):
-        self.db_pool = db_pool
-    
-    async def get_with_version(self, user_id: int, chat_id: int) -> Optional[BalanceVersion]:
-        """Получение баланса с версией (изоляция по chat_id)"""
-        async with self.db_pool.acquire() as conn:
-            async with conn.execute("""
-                SELECT free_balance, paid_balance, version 
-                FROM users 
-                WHERE user_id=? AND chat_id=?
-            """, (user_id, chat_id)) as cursor:
-                row = await cursor.fetchone()
-                if not row:
-                    return None
-                return BalanceVersion(
-                    user_id=user_id, chat_id=chat_id,
-                    free_balance=row[0], paid_balance=row[1], version=row[2]
-                )
-    
-    async def create_user(self, user_id: int, chat_id: int, username: str = None):
-        """Создание пользователя с бонусом"""
-        async with self.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT OR IGNORE INTO users (user_id, chat_id, username, free_balance, version)
-                VALUES (?, ?, ?, 100, 1)
-            """, (user_id, chat_id, username))
-            await conn.commit()
-    
-    async def update_cas(self, balance: BalanceVersion, delta_free: int = 0, delta_paid: int = 0) -> bool:
-        """CAS-обновление с проверкой версии и chat_id"""
-        new_free = balance.free_balance + delta_free
-        new_paid = balance.paid_balance + delta_paid
-        
-        if new_free < 0 or new_paid < 0:
-            logger.warning(f"Negative balance attempt: free={new_free}, paid={new_paid}")
-            return False
-        
-        async with self.db_pool.acquire() as conn:
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-                
-                # Проверяем текущую версию и chat_id
-                async with conn.execute("""
-                    SELECT version FROM users 
-                    WHERE user_id=? AND chat_id=?
-                """, (balance.user_id, balance.chat_id)) as cursor:
-                    current = await cursor.fetchone()
-                
-                if not current or current[0] != balance.version:
-                    await conn.rollback()
-                    logger.debug(f"CAS conflict: expected v{balance.version}, got v{current[0] if current else 'None'}")
-                    return False
-                
-                # Обновляем с инкрементом версии
-                await conn.execute("""
-                    UPDATE users 
-                    SET free_balance = ?, paid_balance = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id=? AND chat_id=? AND version=?
-                """, (new_free, new_paid, balance.user_id, balance.chat_id, balance.version))
-                
-                await conn.commit()
-                return True
-                
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"CAS update failed: {e}", exc_info=True)
-                return False
-    
-    async def atomic_transfer(
-        self, from_user: int, to_user: int, chat_id: int, amount: int,
-        max_retries: int = 3
-    ) -> Tuple[bool, str]:
-        """✅ ИСПРАВЛЕНО: Атомарный перевод с безопасным rollback"""
-        if amount <= 0:
-            return False, "Сумма должна быть положительной"
-        
-        if amount > MAX_BET:
-            return False, f"Максимальная сумма перевода: {MAX_BET} NCoin"
-        
-        for attempt in range(max_retries):
-            from_bal = await self.get_with_version(from_user, chat_id)
-            to_bal = await self.get_with_version(to_user, chat_id)
-            
-            if not from_bal or not from_bal.can_spend(amount):
-                return False, "Недостаточно средств"
-            
-            # CAS для отправителя
-            if not await self.update_cas(from_bal, delta_free=-amount):
-                await asyncio.sleep(0.05 * (attempt + 1))
-                continue
-            
-            # CAS для получателя
-            if to_bal:
-                if not await self.update_cas(to_bal, delta_free=amount):
-                    # ✅ ИСПРАВЛЕНО: Получаем свежую версию для отката
-                    from_bal_rollback = await self.get_with_version(from_user, chat_id)
-                    if from_bal_rollback:
-                        await self.update_cas(from_bal_rollback, delta_free=amount)
-                    await asyncio.sleep(0.05 * (attempt + 1))
-                    continue
-            else:
-                # Создаём нового пользователя
-                async with self.db_pool.acquire() as conn:
-                    await conn.execute("""
-                        INSERT INTO users (user_id, chat_id, free_balance, version)
-                        VALUES (?, ?, ?, 1)
-                    """, (to_user, chat_id, amount))
-                    await conn.commit()
-            
-            # Аудит
-            await self._log_transfer(from_user, to_user, chat_id, amount)
-            return True, "Успешно"
-        
-        return False, "Превышено количество попыток"
-    
-    async def _log_transfer(self, from_user: int, to_user: int, chat_id: int, amount: int):
-        """Логирование перевода в аудит"""
-        async with self.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO audit_log (user_id, chat_id, action, amount, balance_before, balance_after, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                from_user, chat_id, "transfer_out", -amount, 0, 0,
-                json.dumps({"to_user": to_user, "amount": amount})
-            ))
-            await conn.execute("""
-                INSERT INTO audit_log (user_id, chat_id, action, amount, balance_before, balance_after, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                to_user, chat_id, "transfer_in", amount, 0, 0,
-                json.dumps({"from_user": from_user, "amount": amount})
-            ))
-            await conn.commit()
-
-
-# ============================================================================
-# 🔐 SECURE CALLBACK DATA (✅ ИСПРАВЛЕНО: добавлен game_type для маршрутизации)
-# ============================================================================
-class SecureCallbackData(CallbackData, prefix="secure"):
-    action: str
-    game_type: Literal["slot", "duel", "roulette", "rps", "common"]  # ✅ Явный тип игры
-    amount: Optional[int] = None
-    chat_id: int
-    timestamp: int
-    signature: str = ""
-    
-    @classmethod
-    def create(cls, action: str, game_type: str, chat_id: int, amount: int = None) -> 'SecureCallbackData':
-        timestamp = int(time.time())
-        data = f"{action}:{game_type}:{chat_id}:{timestamp}:{amount or ''}"
-        signature = hmac.new(
-            SECRET_KEY.encode(),
-            data.encode(),
-            hashlib.sha256
-        ).hexdigest()[:32]
-        return cls(
-            action=action,
-            game_type=game_type,
-            amount=amount,
-            chat_id=chat_id,
-            timestamp=timestamp,
-            signature=signature
-        )
-    
-    def verify(self, seen_signatures: Set[str] = None) -> Tuple[bool, str]:
-        """✅ ИСПРАВЛЕНО: Проверка подписи + replay-защита"""
-        # 1. Проверка срока действия (5 минут)
-        if abs(time.time() - self.timestamp) > 300:
-            return False, "Срок действия запроса истёк"
-        
-        # 2. Проверка подписи
-        data = f"{self.action}:{self.game_type}:{self.chat_id}:{self.timestamp}:{self.amount or ''}"
-        expected = hmac.new(
-            SECRET_KEY.encode(),
-            data.encode(),
-            hashlib.sha256
-        ).hexdigest()[:32]
-        
-        if not hmac.compare_digest(self.signature, expected):
-            return False, "Неверная подпись запроса"
-        
-        # 3. ✅ Replay-защита: проверяем, не использовалась ли эта подпись
-        if seen_signatures and self.signature in seen_signatures:
-            return False, "Запрос уже был обработан"
-        
-        return True, ""
-
-
-# ============================================================================
-# 🚦 RATE LIMITER (✅ ИСПРАВЛЕНО: очистка memory leak)
-# ============================================================================
-class RateLimiter:
-    """Rate limiter с Redis и in-memory fallback"""
-    
-    def __init__(self, redis_client: Optional[redis.Redis] = None, cleanup_interval: int = 300):
-        self.redis = redis_client
-        self._memory: Dict[str, List[float]] = {}
-        self._cleanup_interval = cleanup_interval
-        self._cleanup_task: Optional[asyncio.Task] = None
-        
-        if not redis_client:
-            # Запускаем фоновую очистку для in-memory режима
-            self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
-    
-    async def _memory_cleanup_loop(self):
-        """Периодическая очистка устаревших записей в памяти"""
-        while True:
-            try:
-                await asyncio.sleep(self._cleanup_interval)
-                now = time.time()
-                # Удаляем записи старше 10 минут
-                for key in list(self._memory.keys()):
-                    self._memory[key] = [t for t in self._memory[key] if now - t < 600]
-                    if not self._memory[key]:
-                        del self._memory[key]
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"RateLimiter cleanup error: {e}", exc_info=True)
-    
-    async def check(self, user_id: int, action: str, limit: int, window: int) -> Tuple[bool, int]:
-        """Проверка лимита: (разрешено, секунд_ожидания)"""
-        key = f"rate:{user_id}:{action}"
-        
-        if self.redis:
-            now = int(time.time())
-            window_start = now - window
-            
-            await self.redis.zremrangebyscore(key, 0, window_start)
-            count = await self.redis.zcard(key)
-            
-            if count >= limit:
-                oldest = await self.redis.zrange(key, 0, 0, withscores=True)
-                wait = int(oldest[0][1] + window - now) if oldest else 1
-                return False, max(1, wait)
-            
-            await self.redis.zadd(key, {str(now): now})
-            await self.redis.expire(key, window + 10)
-            return True, 0
-        else:
-            now = time.time()
-            records = self._memory.get(key, [])
-            records = [t for t in records if now - t < window]
-            
-            if len(records) >= limit:
-                wait = int(window - (now - records[0])) if records else 1
-                return False, max(1, wait)
-            
-            records.append(now)
-            self._memory[key] = records
-            return True, 0
-    
-    async def close(self):
-        """Остановка фоновых задач"""
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-
-# ============================================================================
-# 🔍 USER LOOKUP С ЛИМИТАМИ И КЭШИРОВАНИЕМ (✅ ИСПРАВЛЕНО: инъекция bot)
-# ============================================================================
-class UserCache:
-    """Кэш участников чата с защитой от DoS"""
-    
-    def __init__(self, db_pool: AsyncDBPool, rate_limiter: RateLimiter, bot: Bot):
-        self.db_pool = db_pool
-        self.rate_limiter = rate_limiter
-        self.bot = bot  # ✅ Явная зависимость вместо глобального ctx
-        self._lookup_count: Dict[int, int] = {}
-    
-    async def find_user(self, chat_id: int, username: str, requester_id: int) -> Optional[int]:
-        """Поиск пользователя с кэшированием и лимитами"""
-        # Rate limit на поиск (10 поисков в минуту)
-        ok, wait = await self.rate_limiter.check(requester_id, "user_lookup", 10, 60)
-        if not ok:
-            logger.warning(f"User lookup rate limit exceeded: user={requester_id}")
-            return None
-        
-        username = username.lower().replace("@", "")
-        
-        # 1. Проверяем кэш в БД
-        async with self.db_pool.acquire() as conn:
-            async with conn.execute("""
-                SELECT user_id FROM chat_members 
-                WHERE chat_id=? AND username=? AND cached_at > datetime('now', '-1 hour')
-            """, (chat_id, username)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    return row[0]
-        
-        # 2. Ищем в Telegram с лимитом
-        try:
-            chat = await self.bot.get_chat(chat_id)  # ✅ Используем self.bot
-            count = 0
-            async for member in chat.get_members():
-                count += 1
-                if count > 500:  # Лимит на перебор
-                    logger.warning(f"User lookup limit exceeded in chat {chat_id}")
-                    break
-                
-                if member.user.username and member.user.username.lower() == username:
-                    user_id = member.user.id
-                    # Кэшируем в БД
-                    async with self.db_pool.acquire() as conn:
-                        await conn.execute("""
-                            INSERT INTO chat_members (chat_id, user_id, username, full_name)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(chat_id, user_id) DO UPDATE 
-                            SET username=?, full_name=?, cached_at=CURRENT_TIMESTAMP
-                        """, (
-                            chat_id, user_id, username, member.user.full_name,
-                            username, member.user.full_name
-                        ))
-                        await conn.commit()
-                    return user_id
-        except TelegramForbiddenError:
-            logger.warning(f"Bot has no access to chat {chat_id}")
-            return None
-        except Exception as e:
-            logger.warning(f"User lookup failed for @{username}: {e}", exc_info=True)
-        
-        return None
-
-
-# ============================================================================
-# 🎮 GAME CONTEXT (FIXED)
-# ============================================================================
-@dataclass
-class GameContext:
-    """Контекст приложения с зависимостями"""
-    bot: Optional[Bot] = None
-    db_pool: Optional[AsyncDBPool] = None
-    redis: Optional[redis.Redis] = None
-    balance_mgr: Optional[BalanceManager] = None
-    rate_limiter: Optional[RateLimiter] = None
-    user_cache: Optional[UserCache] = None
-    _initialized: bool = False
-    _shutdown_tasks: List[asyncio.Task] = field(default_factory=list)
-    _seen_signatures: Dict[str, Set[str]] = field(default_factory=dict)  # ✅ Для replay-защиты
-    
-    def initialize(self, bot: Bot, db_pool: AsyncDBPool, redis_client: Optional[redis.Redis] = None):
-        self.bot = bot
-        self.db_pool = db_pool
-        self.redis = redis_client
-        self.balance_mgr = BalanceManager(db_pool)
-        self.rate_limiter = RateLimiter(redis_client)
-        # ✅ Передаём bot в UserCache
-        self.user_cache = UserCache(db_pool, self.rate_limiter, bot)
-        self._initialized = True
-        logger.info("GameContext initialized")
-    
-    def require(self):
-        if not self._initialized:
-            raise RuntimeError("GameContext not initialized")
-    
-    def add_shutdown_task(self, coro):
-        """Добавление задачи для graceful shutdown"""
-        task = asyncio.create_task(coro)
-        self._shutdown_tasks.append(task)
-        return task
-    
-    def is_signature_seen(self, chat_id: int, signature: str) -> bool:
-        """Проверка, использовалась ли уже эта подпись (replay-защита)"""
-        if chat_id not in self._seen_signatures:
-            self._seen_signatures[chat_id] = set()
-        if signature in self._seen_signatures[chat_id]:
-            return True
-        self._seen_signatures[chat_id].add(signature)
-        # Очищаем старые подписи каждые 10 минут (упрощённо)
-        if len(self._seen_signatures[chat_id]) > 10000:
-            # Удаляем половину (простая стратегия)
-            items = list(self._seen_signatures[chat_id])
-            self._seen_signatures[chat_id] = set(items[5000:])
-        return False
-    
-    async def shutdown(self):
-        """Ожидание завершения всех задач"""
-        for task in self._shutdown_tasks:
-            if not task.done():
-                task.cancel()
-        if self._shutdown_tasks:
-            await asyncio.gather(*self._shutdown_tasks, return_exceptions=True)
-        
-        # Закрываем rate limiter
-        if self.rate_limiter:
-            await self.rate_limiter.close()
-
-
-ctx = GameContext()
-
-
-# ============================================================================
-# 🎰 SLOT MACHINE LOGIC
-# ============================================================================
-class SlotMachine:
-    @staticmethod
-    def spin(bet: int) -> Tuple[List[str], int, str]:
-        """Вращение слотов с расчётом выигрыша"""
-        result = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
-        win_amount = 0
-        win_type = "loss"
-        
-        key = tuple(result)
-        if key in SLOT_PAYOUTS:
-            win_amount = bet * SLOT_PAYOUTS[key]
-            win_type = "jackpot" if SLOT_PAYOUTS[key] >= 5 else "win"
-        elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
-            win_amount = bet * 2
-            win_type = "win"
-        
-        return result, win_amount, win_type
-
-
-# ============================================================================
-# ⚔️ DUEL MANAGER (FIXED)
-# ============================================================================
-@dataclass
-class Duel:
-    duel_id: str
-    challenger_id: int
-    target_id: int
-    amount: int
-    chat_id: int
-    message_id: int
-    created_at: float
-    status: str = "pending"
-    
-    def is_expired(self) -> bool:
-        return time.time() - self.created_at > DUEL_TIMEOUT
-
-
-class DuelManager:
-    """Менеджер дуэлей с полной изоляцией по чатам"""
-    
-    _duels: Dict[str, Duel] = {}
-    _duel_locks: Dict[str, asyncio.Lock] = {}
-    
-    @classmethod
-    async def create(cls, challenger_id: int, target_id: int, amount: int,
-                     chat_id: int, message_id: int) -> Duel:
-        """Создание дуэли"""
-        duel_id = f"{chat_id}:{challenger_id}:{target_id}:{int(time.time())}:{random.randint(1000, 9999)}"
-        
-        duel = Duel(
-            duel_id=duel_id,
-            challenger_id=challenger_id,
-            target_id=target_id,
-            amount=amount,
-            chat_id=chat_id,
-            message_id=message_id,
-            created_at=time.time()
-        )
-        
-        cls._duels[duel_id] = duel
-        cls._duel_locks[duel_id] = asyncio.Lock()
-        
-        # Запускаем таймаут
-        ctx.add_shutdown_task(cls._timeout_task(duel_id))
-        ACTIVE_DUELS.set(len(cls._duels))
-        
-        return duel
-    
-    @classmethod
-    async def _timeout_task(cls, duel_id: str):
-        """Фоновая задача таймаута дуэли"""
-        await asyncio.sleep(DUEL_TIMEOUT)
-        
-        lock = cls._duel_locks.get(duel_id)
-        if not lock:
-            return
-        
-        async with lock:
-            duel = cls._duels.get(duel_id)
-            if not duel or duel.status != "pending":
-                return
-            
-            duel.status = "expired"
-            
-            # Возвращаем ставку
-            balance = await ctx.balance_mgr.get_with_version(duel.challenger_id, duel.chat_id)
-            if balance:
-                await ctx.balance_mgr.update_cas(balance, delta_free=duel.amount)
-            
-            # Уведомление
-            try:
-                await ctx.bot.edit_message_text(
-                    f"⏰ **Дуэль отменена!**\n\n"
-                    f"Время истекло. Ставка {duel.amount} NCoin возвращена.",
-                    chat_id=duel.chat_id,
-                    message_id=duel.message_id
-                )
-            except Exception as e:
-                logger.warning(f"Failed to edit duel timeout message: {e}", exc_info=True)
-            
-            await cls._cleanup(duel_id)
-    
-    @classmethod
-    async def accept(cls, duel_id: str, target_id: int) -> Tuple[bool, str, Optional[Duel]]:
-        """Принятие дуэли"""
-        lock = cls._duel_locks.get(duel_id)
-        if not lock:
-            return False, "Дуэль не найдена", None
-        
-        async with lock:
-            duel = cls._duels.get(duel_id)
-            if not duel:
-                return False, "Дуэль не найдена", None
-            
-            if duel.status != "pending":
-                return False, "Дуэль уже завершена", None
-            
-            if duel.target_id != target_id:
-                return False, "Это не ваш вызов", None
-            
-            duel.status = "accepted"
-            return True, "", duel
-    
-    @classmethod
-    async def resolve(cls, duel_id: str) -> Optional[Tuple[int, int]]:
-        """Определение победителя и начисление"""
-        lock = cls._duel_locks.get(duel_id)
-        if not lock:
-            return None
-        
-        async with lock:
-            duel = cls._duels.get(duel_id)
-            if not duel or duel.status != "accepted":
-                return None
-            
-            winner_id = random.choice([duel.challenger_id, duel.target_id])
-            win_amount = duel.amount * 2
-            
-            # Начисление победителю
-            winner_balance = await ctx.balance_mgr.get_with_version(winner_id, duel.chat_id)
-            if winner_balance:
-                await ctx.balance_mgr.update_cas(winner_balance, delta_free=win_amount)
-            
-            await cls._cleanup(duel_id)
-            return winner_id, win_amount
-    
-    @classmethod
-    async def decline(cls, duel_id: str, target_id: int) -> bool:
-        """Отклонение дуэли"""
-        lock = cls._duel_locks.get(duel_id)
-        if not lock:
-            return False
-        
-        async with lock:
-            duel = cls._duels.get(duel_id)
-            if not duel or duel.status != "pending":
-                return False
-            
-            if duel.target_id != target_id:
-                return False
-            
-            duel.status = "declined"
-            await cls._cleanup(duel_id)
-            return True
-    
-    @classmethod
-    async def _cleanup(cls, duel_id: str):
-        """Очистка данных дуэли"""
-        cls._duels.pop(duel_id, None)
-        cls._duel_locks.pop(duel_id, None)
-        ACTIVE_DUELS.set(len(cls._duels))
-
-
-# ============================================================================
-# 📝 AUDIT LOGGING
-# ============================================================================
-async def log_financial_action(
-    user_id: int, chat_id: int, action: str, amount: int,
-    balance_before: int, balance_after: int, metadata: Dict = None
-):
-    """Запись в аудит-лог с изоляцией по chat_id"""
-    try:
-        async with ctx.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO audit_log 
-                (user_id, chat_id, action, amount, balance_before, balance_after, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user_id, chat_id, action, amount,
-                balance_before, balance_after,
-                json.dumps(metadata or {}, default=str)
-            ))
-            await conn.commit()
-        
-        logger.info(
-            f"[AUDIT] user={user_id} chat={chat_id} action={action} "
-            f"amount={amount} before={balance_before} after={balance_after}"
-        )
-    except Exception as e:
-        logger.error(f"Audit log failed: {e}", exc_info=True)
-
-
-# ============================================================================
-# 🎮 GAME HANDLERS
-# ============================================================================
 router = Router()
 
 
-# ---------- SLOT: Command ----------
+# ========== FSM States ==========
+
+class DuelState(StatesGroup):
+    waiting_confirmation = State()
+    waiting_bet = State()
+
+
+class RouletteState(StatesGroup):
+    waiting_bet = State()
+    waiting_color = State()
+
+
+class SlotState(StatesGroup):
+    waiting_bet = State()
+    spinning = State()
+
+
+class RPSState(StatesGroup):
+    waiting_choice = State()
+    waiting_bet = State()
+
+
+# ========== Helper Functions ==========
+
+async def update_user_balance(user_id: int, amount: int, operation: str, description: str = "") -> bool:
+    """Update user balance and log transaction"""
+    try:
+        if operation == "add":
+            await db.add_balance(user_id, amount, description)
+        elif operation == "subtract":
+            if not await db.subtract_balance(user_id, amount, description):
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"Balance update error for user {user_id}: {e}")
+        API_ERRORS.labels(error_type="balance_update").inc()
+        return False
+
+
+async def get_user_balance(user_id: int) -> int:
+    """Get user balance"""
+    try:
+        return await db.get_balance(user_id)
+    except Exception as e:
+        logger.error(f"Get balance error for user {user_id}: {e}")
+        API_ERRORS.labels(error_type="balance_get").inc()
+        return 0
+
+
+async def log_game_history(user_id: int, game_type: str, bet: int, result: str, win_amount: int = 0, details: dict = None):
+    """Log game history to database"""
+    try:
+        await db.add_game_history(user_id, game_type, bet, result, win_amount, details)
+    except Exception as e:
+        logger.error(f"Game history error for user {user_id}: {e}")
+        API_ERRORS.labels(error_type="history_log").inc()
+
+
+async def get_user_stats(user_id: int) -> dict:
+    """Get user statistics"""
+    try:
+        return await db.get_user_stats(user_id)
+    except Exception as e:
+        logger.error(f"Get stats error for user {user_id}: {e}")
+        return {"total_games": 0, "total_wins": 0, "total_bets": 0, "total_won": 0}
+
+
+async def get_active_games_count() -> int:
+    """Get count of active games"""
+    try:
+        return await db.get_active_games_count()
+    except Exception as e:
+        return 0
+
+
+# ========== AI Integration ==========
+
+async def ai_generate_response(prompt: str, context: str = "") -> Optional[str]:
+    """Generate AI response using OpenRouter API"""
+    if not AI_ENABLED:
+        return None
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": f"Ты игровой ассистент в Telegram боте. {context}"},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 150,
+                "temperature": 0.7
+            }
+            
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    AI_REQUESTS.labels(model="gpt-3.5-turbo", status="success").inc()
+                    if "usage" in result:
+                        AI_TOKENS.labels(type="prompt").inc(result["usage"].get("prompt_tokens", 0))
+                        AI_TOKENS.labels(type="completion").inc(result["usage"].get("completion_tokens", 0))
+                    return result["choices"][0]["message"]["content"]
+                else:
+                    AI_REQUESTS.labels(model="gpt-3.5-turbo", status="error").inc()
+                    API_ERRORS.labels(error_type="ai_api").inc()
+                    logger.error(f"AI API error: {response.status}")
+                    return None
+                    
+    except Exception as e:
+        logger.error(f"AI generation error: {e}")
+        API_ERRORS.labels(error_type="ai_exception").inc()
+        return None
+
+
+async def get_ai_game_comment(game_type: str, result: str, amount: int) -> Optional[str]:
+    """Get AI comment for game result"""
+    if not AI_ENABLED:
+        return None
+    
+    prompts = {
+        "slot": f"Игрок сыграл в слот-машину и {result} {amount} рублей. Напиши короткое эмоциональное сообщение (1-2 предложения)",
+        "duel": f"Игрок участвовал в дуэли и {result} {amount} рублей. Напиши короткое эпичное сообщение о дуэли",
+        "roulette": f"Игрок играл в рулетку и {result} {amount} рублей. Напиши короткое сообщение о рулетке",
+        "rps": f"Игрок играл в камень-ножницы-бумага и {result} {amount} рублей. Напиши короткое забавное сообщение"
+    }
+    
+    return await ai_generate_response(prompts.get(game_type, ""), "Будь эмоциональным и поддерживающим")
+
+
+# ========== Slot Machine ==========
+
 @router.message(Command("slot"))
+@rate_limit(limit=RATE_LIMIT_GAMES, key="slot")
 async def cmd_slot(message: Message, state: FSMContext):
-    ctx.require()
+    """Slot machine game"""
     user_id = message.from_user.id
-    chat_id = message.chat.id
+    balance = await get_user_balance(user_id)
+    stats = await get_user_stats(user_id)
     
-    # Rate limit
-    ok, wait = await ctx.rate_limiter.check(user_id, "slot_start", 10, 60)
-    if not ok:
-        await message.answer(f"⏰ Подождите {wait} сек.")
+    # Update active users metric
+    ACTIVE_USERS.inc()
+    
+    # Available bet options
+    bet_options = [MIN_BET, MIN_BET * 5, MIN_BET * 10, MIN_BET * 25, MIN_BET * 50]
+    bet_options = [b for b in bet_options if b <= min(MAX_BET, balance) and b >= MIN_BET]
+    
+    if not bet_options:
+        await message.answer(
+            f"🎰 *Слот-машина*\n\n"
+            f"❌ Недостаточно средств для минимальной ставки!\n"
+            f"💰 Ваш баланс: {balance} ₽\n"
+            f"🎲 Минимальная ставка: {MIN_BET} ₽",
+            parse_mode="Markdown"
+        )
         return
     
-    # Проверка/создание пользователя
-    balance = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-    if not balance:
-        await ctx.balance_mgr.create_user(user_id, chat_id, message.from_user.username)
-        balance = await ctx.balance_mgr.get_with_version(user_id, chat_id)
+    builder = InlineKeyboardBuilder()
     
-    total = balance.total if balance else 100
+    for bet in bet_options:
+        builder.add(InlineKeyboardButton(
+            text=f"🎲 {bet} ₽",
+            callback_data=f"slot_bet_{bet}"
+        ))
     
-    # Клавиатура с подписанными данными
-    buttons = []
-    for bet in [10, 50, 100, 500, 1000, 5000]:
-        cb = SecureCallbackData.create(action="slot_bet", game_type="slot", chat_id=chat_id, amount=bet)
-        buttons.append([InlineKeyboardButton(text=f"{bet} NCoin", callback_data=cb.pack())])
+    builder.add(InlineKeyboardButton(
+        text="🎲 Случайная ставка",
+        callback_data="slot_random"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📊 Статистика",
+        callback_data="slot_stats"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data="slot_cancel"
+    ))
+    builder.adjust(2)
     
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data=SecureCallbackData.create(action="slot_cancel", game_type="slot", chat_id=chat_id).pack())])
-    
-    await state.set_state("waiting_slot_bet")
     await message.answer(
-        f"🎰 **Слот-машина NEXUS**\n\n"
-        f"💰 Баланс: {total} NCoin\n"
-        f"🎲 Ставка: {MIN_BET}-{MAX_BET} NCoin\n"
-        f"🏆 Макс. выигрыш: x10\n\n"
-        f"Выберите ставку:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        f"🎰 *Слот-машина*\n\n"
+        f"💰 Ваш баланс: {balance} ₽\n"
+        f"📊 Игр сыграно: {stats.get('total_games', 0)}\n"
+        f"🏆 Побед: {stats.get('total_wins', 0)}\n\n"
+        f"Выберите размер ставки:",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
     )
-    
-    GAMES_STARTED.labels(game="slot", user_role="player").inc()
+    await state.set_state(SlotState.waiting_bet)
 
 
-# ---------- SLOT: Callback Handler (✅ ИСПРАВЛЕНО: фильтр по game_type)
-@router.callback_query(SecureCallbackData.filter(F.game_type == "slot"))
-async def slot_callback(callback: CallbackQuery, c: SecureCallbackData, state: FSMContext):
-    ctx.require()
-    
-    # ✅ Replay-защита
-    if ctx.is_signature_seen(c.chat_id, c.signature):
-        await callback.answer("⚠️ Этот запрос уже обработан", show_alert=True)
-        API_ERRORS.labels(endpoint="slot", error_type="replay_attempt").inc()
-        return
-    
-    # Проверка подписи и срока действия
-    valid, error_msg = c.verify()
-    if not valid:
-        await callback.answer(f"❌ {error_msg}", show_alert=True)
-        API_ERRORS.labels(endpoint="slot", error_type="invalid_signature").inc()
-        return
-    
-    # Проверка chat_id (изоляция)
-    if c.chat_id != callback.message.chat.id:
-        await callback.answer("❌ Неверный чат", show_alert=True)
-        API_ERRORS.labels(endpoint="slot", error_type="chat_mismatch").inc()
-        return
-    
-    # Rate limit
-    ok, wait = await ctx.rate_limiter.check(callback.from_user.id, "slot", RATE_LIMIT_GAMES, 60)
-    if not ok:
-        await callback.answer(f"⏰ Подождите {wait} сек.", show_alert=True)
-        return
-    
+@router.callback_query(SlotState.waiting_bet, F.data.startswith("slot_bet_"))
+async def slot_play(callback: CallbackQuery, state: FSMContext):
+    """Play slot machine"""
+    start_time = datetime.now()
+    bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
     
-    if c.action == "slot_cancel":
+    if bet > MAX_BET:
+        await callback.answer(f"❌ Максимальная ставка: {MAX_BET} ₽", show_alert=True)
+        return
+    
+    balance = await get_user_balance(user_id)
+    
+    if balance < bet:
+        await callback.answer("❌ Недостаточно средств!", show_alert=True)
         await state.clear()
-        await callback.message.edit_text("❌ Игра отменена.")
-        await callback.answer()
         return
     
-    if c.action == "slot_bet":
-        bet = c.amount
-        if not (MIN_BET <= bet <= MAX_BET):
-            await callback.answer(f"❌ Ставка должна быть от {MIN_BET} до {MAX_BET}", show_alert=True)
-            return
-        
-        # Подтверждение для крупных ставок
-        if bet > MAX_BET_CONFIRMATION:
-            confirm_cb = SecureCallbackData.create(action="slot_confirm", game_type="slot", chat_id=chat_id, amount=bet)
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да, подтверждаю", callback_data=confirm_cb.pack())],
-                [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=SecureCallbackData.create(action="slot_cancel", game_type="slot", chat_id=chat_id).pack())]
-            ])
-            await callback.message.edit_text(
-                f"⚠️ **Подтверждение ставки**\n\n"
-                f"Вы уверены, что хотите поставить **{bet} NCoin**?\n"
-                f"Это крупная сумма. Подтвердите действие.",
-                reply_markup=keyboard
-            )
-            await callback.answer()
-            return
-        
-        await _process_slot(callback, state, bet, chat_id, user_id)
-    
-    elif c.action == "slot_confirm":
-        bet = c.amount
-        await _process_slot(callback, state, bet, chat_id, user_id)
-
-
-async def _process_slot(callback: CallbackQuery, state: FSMContext, bet: int, chat_id: int, user_id: int):
-    """Основная логика слота"""
-    # Идемпотентность
-    idem_key = f"slot:{user_id}:{chat_id}:{callback.message.message_id}:{bet}"
-    try:
-        async with ctx.db_pool.acquire() as conn:
-            row = await conn.execute("SELECT result FROM idempotency_keys WHERE key=?", (idem_key,)).fetchone()
-            if row:
-                await callback.message.edit_text(json.loads(row[0])["text"])
-                await callback.answer()
-                return
-    except Exception as e:
-        logger.error(f"Idempotency check failed: {e}", exc_info=True)
-    
-    # Проверка баланса
-    balance = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-    if not balance or not balance.can_spend(bet):
-        await callback.answer(f"❌ Недостаточно средств. Баланс: {balance.total if balance else 0}", show_alert=True)
+    # Deduct bet
+    if not await update_user_balance(user_id, bet, "subtract", f"Ставка в слотах: {bet} ₽"):
+        await callback.answer("❌ Ошибка списания средств", show_alert=True)
+        await state.clear()
         return
     
-    # Атомарное списание
-    balance_before = balance.total
-    if not await ctx.balance_mgr.update_cas(balance, delta_free=-bet):
-        await callback.answer("❌ Ошибка списания", show_alert=True)
-        API_ERRORS.labels(endpoint="slot", error_type="cas_failed").inc()
-        return
+    # Slot machine logic with weighted probabilities
+    symbols = ["🍒", "🍋", "🍊", "🍉", "🔔", "💎", "7️⃣", "🎰", "⭐", "💎"]
+    weights = [0.2, 0.2, 0.15, 0.1, 0.1, 0.08, 0.05, 0.05, 0.04, 0.03]
     
-    # Результат
-    result, win_amount, win_type = SlotMachine.spin(bet)
+    reels = [random.choices(symbols, weights=weights)[0] for _ in range(3)]
     
-    # Начисление выигрыша
+    # Win combinations with multipliers
+    win_multiplier = 0
+    special_message = ""
+    
+    if reels[0] == reels[1] == reels[2]:
+        # Three of a kind
+        multipliers = {
+            "7️⃣": 15, "🎰": 12, "💎": 8, "⭐": 6, "🔔": 5,
+            "🍉": 4, "🍊": 3, "🍋": 2, "🍒": 2
+        }
+        win_multiplier = multipliers.get(reels[0], 3)
+        special_message = f"🎉 *ТРИ {reels[0]}!* 🎉\n"
+    elif reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
+        # Two of a kind
+        win_multiplier = 1
+        special_message = "👍 *Пара!* 👍\n"
+    elif "💎" in reels and "7️⃣" in reels:
+        # Special combo
+        win_multiplier = 3
+        special_message = "💎✨ *Джекпот комбо!* ✨💎\n"
+    
+    win_amount = bet * win_multiplier if win_multiplier > 0 else 0
+    
+    # Animate reels effect
+    await callback.answer("🎰 Крутим барабаны...")
+    
+    result_text = f"🎰 *Слот-машина*\n\n"
+    result_text += f"{' │ '.join(reels)}\n\n"
+    result_text += special_message
+    
     if win_amount > 0:
-        new_bal = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-        if new_bal:
-            await ctx.balance_mgr.update_cas(new_bal, delta_free=win_amount)
+        await update_user_balance(user_id, win_amount, "add", f"Выигрыш в слотах: {win_amount} ₽")
+        result_text += f"🎉 *ПОБЕДА!* 🎉\n"
+        result_text += f"💰 Выигрыш: {win_amount} ₽\n"
+        result_text += f"✨ Множитель: x{win_multiplier}\n"
+        GAMES_WON.labels(game_type="slot").inc()
+        BETS_WON.labels(game_type="slot").inc()
+    else:
+        result_text += f"😢 *ПРОИГРЫШ*\n"
+        result_text += f"💸 Потеряно: {bet} ₽\n"
     
-    balance_after = balance_before - bet + win_amount
+    result_text += f"\n💰 Новый баланс: {await get_user_balance(user_id)} ₽"
     
-    # Аудит
-    await log_financial_action(
-        user_id, chat_id, f"slot_{win_type}",
-        win_amount if win_amount > 0 else bet,
-        balance_before, balance_after,
-        {"bet": bet, "result": result, "win_amount": win_amount}
-    )
+    # Get AI comment
+    ai_comment = await get_ai_game_comment("slot", "выиграл" if win_amount > 0 else "проиграл", win_amount or bet)
+    if ai_comment:
+        result_text += f"\n\n🤖 *AI совет:* {ai_comment}"
     
-    # Форматирование
-    emoji = {"jackpot": "🎉🎉🎉 **ДЖЕКПОТ!** 🎉🎉🎉", "win": "🎉 **ВЫИГРЫШ!** 🎉"}.get(win_type, "😔 **ПРОИГРЫШ!**")
-    text = (
-        f"🎰 {result[0]} | {result[1]} | {result[2]}\n\n"
-        f"{emoji}\n"
-        f"{'+' if win_amount > 0 else ''}{win_amount} NCoin\n\n"
-        f"💰 Баланс: {balance_after} NCoin"
-    )
+    # Log history
+    result_status = "win" if win_amount > 0 else "loss"
+    details = {"reels": reels, "multiplier": win_multiplier}
+    await log_game_history(user_id, "slot", bet, result_status, win_amount, details)
     
-    # Сохраняем идемпотентность
-    try:
-        async with ctx.db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO idempotency_keys (key, result, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))",
-                (idem_key, json.dumps({"text": text}))
-            )
-            await conn.commit()
-    except Exception as e:
-        logger.error(f"Idempotency save failed: {e}", exc_info=True)
+    # Update metrics
+    GAMES_PLAYED.labels(game_type="slot").inc()
+    BETS_PLACED.labels(game_type="slot").inc()
+    duration = (datetime.now() - start_time).total_seconds()
+    GAME_DURATION.labels(game_type="slot").observe(duration)
     
-    # Кнопки
-    repeat_cb = SecureCallbackData.create(action="slot_bet", game_type="slot", chat_id=chat_id, amount=bet)
-    other_cb = SecureCallbackData.create(action="slot_other", game_type="slot", chat_id=chat_id)
-    menu_cb = SecureCallbackData.create(action="slot_menu", game_type="slot", chat_id=chat_id)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🔄 Повторить {bet} NCoin", callback_data=repeat_cb.pack())],
-        [InlineKeyboardButton(text="🔁 Другая ставка", callback_data=other_cb.pack()),
-         InlineKeyboardButton(text="🏠 Меню", callback_data=menu_cb.pack())]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.message.edit_text(result_text, parse_mode="Markdown")
     await callback.answer()
+    await state.clear()
+
+
+@router.callback_query(SlotState.waiting_bet, F.data == "slot_random")
+async def slot_random_bet(callback: CallbackQuery, state: FSMContext):
+    """Play slot with random bet"""
+    user_id = callback.from_user.id
+    balance = await get_user_balance(user_id)
     
-    GAMES_RESULT.labels(game="slot", result=win_type).inc()
+    if balance < MIN_BET:
+        await callback.answer("❌ Недостаточно средств!", show_alert=True)
+        return
+    
+    max_possible_bet = min(MAX_BET, balance)
+    bet = random.randint(MIN_BET, max_possible_bet)
+    
+    # Process the bet
+    await slot_play(callback, state)
+    # Need to override the bet value
+    callback.data = f"slot_bet_{bet}"
 
 
-# ---------- DUEL: Command ----------
+@router.callback_query(SlotState.waiting_bet, F.data == "slot_stats")
+async def slot_stats(callback: CallbackQuery, state: FSMContext):
+    """Show slot statistics"""
+    user_id = callback.from_user.id
+    stats = await get_user_stats(user_id)
+    
+    text = f"📊 *Ваша статистика в слотах*\n\n"
+    text += f"🎮 Всего игр: {stats.get('total_games', 0)}\n"
+    text += f"🏆 Побед: {stats.get('total_wins', 0)}\n"
+    text += f"💰 Всего поставлено: {stats.get('total_bets', 0)} ₽\n"
+    text += f"💸 Всего выиграно: {stats.get('total_won', 0)} ₽\n"
+    
+    if stats.get('total_bets', 0) > 0:
+        win_rate = (stats.get('total_wins', 0) / stats.get('total_games', 0)) * 100
+        profit = stats.get('total_won', 0) - stats.get('total_bets', 0)
+        text += f"\n📈 Процент побед: {win_rate:.1f}%\n"
+        text += f"💰 Чистая прибыль: {profit:+} ₽"
+    
+    await callback.answer()
+    await callback.message.answer(text, parse_mode="Markdown")
+
+
+@router.callback_query(SlotState.waiting_bet, F.data == "slot_cancel")
+async def slot_cancel(callback: CallbackQuery, state: FSMContext):
+    """Cancel slot game"""
+    await callback.message.edit_text("🎰 Игра отменена")
+    await callback.answer()
+    await state.clear()
+
+
+# ========== Duel ==========
+
 @router.message(Command("duel"))
+@rate_limit(limit=RATE_LIMIT_GAMES, key="duel")
 async def cmd_duel(message: Message, state: FSMContext):
-    ctx.require()
-    args = message.text.split()
+    """Start a duel with another user"""
+    if not message.reply_to_message:
+        await message.answer(
+            "⚔️ *Дуэль*\n\n"
+            "Чтобы вызвать на дуэль, ответьте на сообщение соперника:\n"
+            "`/duel [сумма]`\n\n"
+            "Пример: `/duel 1000`\n\n"
+            "⚔️ *Правила:*\n"
+            "• Оба игрока ставят одинаковую сумму\n"
+            "• Победитель забирает весь банк\n"
+            "• При ничьей ставки возвращаются",
+            parse_mode="Markdown"
+        )
+        return
     
+    args = message.text.split()
     if len(args) < 2:
         await message.answer(
-            "⚔️ **Дуэль NEXUS**\n\n"
-            "Использование: /duel @username [сумма]\n"
-            f"Пример: /duel @ivan {MIN_BET}\n\n"
-            f"💰 Ставка: {MIN_BET}-{MAX_BET} NCoin\n"
-            f"🏆 Победитель забирает банк!"
+            "❌ Укажите сумму ставки!\n"
+            "Пример: `/duel 1000`",
+            parse_mode="Markdown"
         )
         return
     
-    target_username = args[1].replace("@", "")
     try:
-        amount = int(args[2]) if len(args) > 2 else MIN_BET
+        bet = int(args[1])
     except ValueError:
-        await message.answer("❌ Неверная сумма ставки")
+        await message.answer("❌ Сумма должна быть числом!")
         return
     
-    if not (MIN_BET <= amount <= MAX_BET):
-        await message.answer(f"❌ Ставка должна быть от {MIN_BET} до {MAX_BET}")
+    if bet < MIN_BET:
+        await message.answer(f"❌ Минимальная ставка: {MIN_BET} ₽")
         return
     
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    # Rate limit
-    ok, wait = await ctx.rate_limiter.check(user_id, "duel", 5, 60)
-    if not ok:
-        await message.answer(f"⏰ Подождите {wait} сек.")
+    if bet > MAX_BET:
+        await message.answer(f"❌ Максимальная ставка: {MAX_BET} ₽")
         return
     
-    # Поиск соперника
-    target_id = await ctx.user_cache.find_user(chat_id, target_username, user_id)
-    if not target_id:
-        await message.answer(f"❌ Пользователь @{target_username} не найден")
+    challenger_id = message.from_user.id
+    opponent_id = message.reply_to_message.from_user.id
+    
+    if challenger_id == opponent_id:
+        await message.answer("❌ Нельзя вызвать самого себя на дуэль!")
         return
     
-    if target_id == user_id:
-        await message.answer("❌ Нельзя вызвать самого себя")
+    # Check if opponent is bot
+    if message.reply_to_message.from_user.is_bot:
+        await message.answer("❌ Нельзя вызвать бота на дуэль!")
         return
     
-    # Проверка баланса
-    balance = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-    if not balance or not balance.can_spend(amount):
-        await message.answer(f"❌ Недостаточно средств. Баланс: {balance.total if balance else 0}")
+    challenger_balance = await get_user_balance(challenger_id)
+    if challenger_balance < bet:
+        await message.answer(f"❌ У вас недостаточно средств! Нужно: {bet} ₽")
         return
     
-    # Создаём дуэль
-    duel = await DuelManager.create(user_id, target_id, amount, chat_id, message.message_id)
+    opponent_balance = await get_user_balance(opponent_id)
+    if opponent_balance < bet:
+        await message.answer(f"❌ У {message.reply_to_message.from_user.full_name} недостаточно средств!")
+        return
     
-    await state.update_data(duel_id=duel.duel_id)
+    # Store duel data
+    duel_id = str(uuid.uuid4())
+    duel_data = {
+        "challenger": challenger_id,
+        "opponent": opponent_id,
+        "bet": bet,
+        "status": "pending",
+        "created_at": datetime.now().isoformat(),
+        "challenger_name": message.from_user.full_name,
+        "opponent_name": message.reply_to_message.from_user.full_name
+    }
     
-    accept_cb = SecureCallbackData.create(action="duel_accept", game_type="duel", chat_id=chat_id, amount=amount)
-    decline_cb = SecureCallbackData.create(action="duel_decline", game_type="duel", chat_id=chat_id)
+    await state.update_data(duel_id=duel_id, duel_data=duel_data)
+    await state.set_state(DuelState.waiting_confirmation)
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚔️ Принять", callback_data=accept_cb.pack())],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=decline_cb.pack())]
-    ])
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="✅ Принять дуэль",
+        callback_data=f"duel_accept_{duel_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отклонить",
+        callback_data=f"duel_decline_{duel_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="💰 Увеличить ставку",
+        callback_data=f"duel_increase_{duel_id}"
+    ))
     
     await message.answer(
-        f"⚔️ **ВЫЗОВ НА ДУЭЛЬ!**\n\n"
-        f"{message.from_user.full_name} вызывает @{target_username}\n"
-        f"💰 Ставка: {amount} NCoin\n\n"
-        f"⏱ Время на ответ: {DUEL_TIMEOUT} сек",
-        reply_markup=keyboard
+        f"⚔️ *ВЫЗОВ НА ДУЭЛЬ!* ⚔️\n\n"
+        f"👤 {message.from_user.full_name} вызывает {message.reply_to_message.from_user.full_name}\n"
+        f"💰 Ставка: {bet} ₽\n\n"
+        f"⏰ У вас есть {DUEL_TIMEOUT} секунд, чтобы ответить!\n\n"
+        f"*Правила:* Победитель определяется случайным броском кубика.",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
     )
     
-    GAMES_STARTED.labels(game="duel", user_role="challenger").inc()
+    # Auto-cancel after timeout
+    await asyncio.sleep(DUEL_TIMEOUT)
+    current_state = await state.get_state()
+    if current_state == DuelState.waiting_confirmation:
+        await state.clear()
+        await message.answer("⏰ Время на принятие дуэли истекло!")
 
 
-# ---------- DUEL: Callback (✅ ИСПРАВЛЕНО: добавлен state параметр)
-@router.callback_query(SecureCallbackData.filter(F.game_type == "duel"))
-async def duel_callback(callback: CallbackQuery, c: SecureCallbackData, state: FSMContext):
-    ctx.require()
+@router.callback_query(DuelState.waiting_confirmation, F.data.startswith("duel_accept_"))
+async def duel_accept(callback: CallbackQuery, state: FSMContext):
+    """Accept duel"""
+    start_time = datetime.now()
+    duel_id = callback.data.split("_")[2]
+    data = await state.get_data()
     
-    # ✅ Replay-защита
-    if ctx.is_signature_seen(c.chat_id, c.signature):
-        await callback.answer("⚠️ Этот запрос уже обработан", show_alert=True)
+    if data.get("duel_id") != duel_id:
+        await callback.answer("❌ Дуэль не найдена или истекло время", show_alert=True)
         return
     
-    if not c.verify()[0]:
-        await callback.answer("❌ Неверная подпись или срок действия", show_alert=True)
-        API_ERRORS.labels(endpoint="duel", error_type="invalid_signature").inc()
+    duel_data = data.get("duel_data")
+    if callback.from_user.id != duel_data["opponent"]:
+        await callback.answer("❌ Это не ваша дуэль!", show_alert=True)
         return
     
-    if c.chat_id != callback.message.chat.id:
-        await callback.answer("❌ Неверный чат", show_alert=True)
+    # Deduct bets from both players
+    bet = duel_data["bet"]
+    challenger_id = duel_data["challenger"]
+    opponent_id = duel_data["opponent"]
+    challenger_name = duel_data["challenger_name"]
+    opponent_name = duel_data["opponent_name"]
+    
+    # Check balances again
+    if not await update_user_balance(challenger_id, bet, "subtract", f"Дуэль с {opponent_name}: ставка {bet} ₽"):
+        await callback.answer("❌ У соперника недостаточно средств!", show_alert=True)
+        await state.clear()
         return
     
-    if callback.from_user.id != callback.message.from_user.id:
-        await callback.answer("❌ Это не ваш вызов!", show_alert=True)
+    if not await update_user_balance(opponent_id, bet, "subtract", f"Дуэль с {challenger_name}: ставка {bet} ₽"):
+        # Refund challenger
+        await update_user_balance(challenger_id, bet, "add", "Возврат ставки по дуэли")
+        await callback.answer("❌ У вас недостаточно средств!", show_alert=True)
+        await state.clear()
         return
     
-    if c.action == "duel_accept":
-        state_data = await state.get_data()
-        duel_id = state_data.get("duel_id")
-        if not duel_id:
-            await callback.answer("❌ Дуэль не найдена", show_alert=True)
-            return
-        
-        success, msg, duel = await DuelManager.accept(duel_id, callback.from_user.id)
-        if not success:
-            await callback.answer(msg, show_alert=True)
-            return
-        
-        # Проверка балансов
-        challenger_bal = await ctx.balance_mgr.get_with_version(duel.challenger_id, duel.chat_id)
-        target_bal = await ctx.balance_mgr.get_with_version(duel.target_id, duel.chat_id)
-        
-        if not challenger_bal or not challenger_bal.can_spend(duel.amount):
-            await callback.message.edit_text("❌ У вызывающего недостаточно средств")
-            return
-        
-        if not target_bal or not target_bal.can_spend(duel.amount):
-            await callback.message.edit_text("❌ У вас недостаточно средств")
-            return
-        
-        # Списываем ставки
-        await ctx.balance_mgr.update_cas(challenger_bal, delta_free=-duel.amount)
-        await ctx.balance_mgr.update_cas(target_bal, delta_free=-duel.amount)
-        
-        # Определяем победителя
-        result = await DuelManager.resolve(duel_id)
-        if not result:
-            await callback.message.edit_text("❌ Ошибка при определении победителя")
-            return
-        
-        winner_id, win_amount = result
-        
-        winner_name = "победитель"
-        try:
-            winner = await ctx.bot.get_chat(winner_id)
-            winner_name = winner.full_name or winner.username or winner_name
-        except Exception as e:
-            logger.warning(f"Failed to get winner info: {e}", exc_info=True)
-        
-        # Уведомление победителя в ЛС
-        try:
-            await ctx.bot.send_message(
-                winner_id,
-                f"🏆 **Вы выиграли дуэль!**\n\n"
-                f"💰 Выигрыш: {win_amount} NCoin"
-            )
-        except TelegramForbiddenError:
-            logger.warning(f"Cannot send DM to winner {winner_id}")
-        except Exception as e:
-            logger.warning(f"Failed to send winner DM: {e}", exc_info=True)
-        
-        await callback.message.edit_text(
-            f"⚔️ **РЕЗУЛЬТАТ ДУЭЛИ!**\n\n"
-            f"🏆 **ПОБЕДИТЕЛЬ:** {winner_name}\n"
-            f"💰 Выигрыш: {win_amount} NCoin"
-        )
-        
-        await callback.answer()
-        GAMES_RESULT.labels(game="duel", result="win").inc()
+    # Determine winner with animated roll
+    await callback.answer("🎲 Бросаем кубики...")
     
-    elif c.action == "duel_decline":
-        state_data = await state.get_data()
-        duel_id = state_data.get("duel_id")
-        if duel_id:
-            await DuelManager.decline(duel_id, callback.from_user.id)
-            await callback.message.edit_text("❌ Дуэль отклонена")
-        await callback.answer()
-        GAMES_RESULT.labels(game="duel", result="declined").inc()
+    challenger_roll = random.randint(1, 100)
+    opponent_roll = random.randint(1, 100)
+    
+    # Add some randomness with skill factor (previous game wins)
+    challenger_stats = await get_user_stats(challenger_id)
+    opponent_stats = await get_user_stats(opponent_id)
+    
+    # Small bonus for experienced players (max 5%)
+    challenger_bonus = min(5, challenger_stats.get('total_games', 0) // 100)
+    opponent_bonus = min(5, opponent_stats.get('total_games', 0) // 100)
+    
+    challenger_final = challenger_roll + challenger_bonus
+    opponent_final = opponent_roll + opponent_bonus
+    
+    # Determine winner
+    if challenger_final > opponent_final:
+        winner_id = challenger_id
+        winner_name = challenger_name
+        win_amount = bet * 2
+        await update_user_balance(winner_id, win_amount, "add", f"Выигрыш в дуэли: {win_amount} ₽")
+        result_text = f"⚔️ *РЕЗУЛЬТАТ ДУЭЛИ* ⚔️\n\n"
+        result_text += f"🏆 *ПОБЕДИТЕЛЬ: {winner_name}!* 🏆\n\n"
+        loser_id = opponent_id
+    elif opponent_final > challenger_final:
+        winner_id = opponent_id
+        winner_name = opponent_name
+        win_amount = bet * 2
+        await update_user_balance(winner_id, win_amount, "add", f"Выигрыш в дуэли: {win_amount} ₽")
+        result_text = f"⚔️ *РЕЗУЛЬТАТ ДУЭЛИ* ⚔️\n\n"
+        result_text += f"🏆 *ПОБЕДИТЕЛЬ: {winner_name}!* 🏆\n\n"
+        loser_id = challenger_id
+    else:
+        # Draw - refund both
+        await update_user_balance(challenger_id, bet, "add", "Возврат ставки (ничья)")
+        await update_user_balance(opponent_id, bet, "add", "Возврат ставки (ничья)")
+        winner_id = None
+        win_amount = 0
+        result_text = f"⚔️ *РЕЗУЛЬТАТ ДУЭЛИ* ⚔️\n\n"
+        result_text += f"🤝 *НИЧЬЯ!* 🤝\n"
+        result_text += f"💰 Ставки возвращены\n"
+        loser_id = None
+    
+    result_text += f"🎲 Результаты:\n"
+    result_text += f"👤 {challenger_name}: {challenger_roll}"
+    if challenger_bonus > 0:
+        result_text += f" +{challenger_bonus} (опыт)"
+    result_text += f" = {challenger_final}\n"
+    
+    result_text += f"👤 {opponent_name}: {opponent_roll}"
+    if opponent_bonus > 0:
+        result_text += f" +{opponent_bonus} (опыт)"
+    result_text += f" = {opponent_final}\n\n"
+    
+    if win_amount > 0:
+        result_text += f"💰 Приз: {win_amount} ₽"
+    
+    # Get AI comment
+    if winner_id:
+        ai_comment = await get_ai_game_comment("duel", "выиграл", win_amount)
+        if ai_comment:
+            result_text += f"\n\n🤖 *AI комментатор:* {ai_comment}"
+    
+    # Log history
+    if winner_id:
+        await log_game_history(winner_id, "duel", bet, "win", win_amount, {"opponent": loser_id, "roll": challenger_final if winner_id == challenger_id else opponent_final})
+        if loser_id:
+            await log_game_history(loser_id, "duel", bet, "loss", 0, {"opponent": winner_id})
+    else:
+        await log_game_history(challenger_id, "duel", bet, "draw", 0, {"opponent": opponent_id})
+        await log_game_history(opponent_id, "duel", bet, "draw", 0, {"opponent": challenger_id})
+    
+    # Update metrics
+    GAMES_PLAYED.labels(game_type="duel").inc()
+    BETS_PLACED.labels(game_type="duel").inc()
+    if win_amount > 0:
+        BETS_WON.labels(game_type="duel").inc()
+        GAMES_WON.labels(game_type="duel").inc()
+    
+    duration = (datetime.now() - start_time).total_seconds()
+    GAME_DURATION.labels(game_type="duel").observe(duration)
+    
+    await callback.message.edit_text(result_text, parse_mode="Markdown")
+    await callback.answer()
+    await state.clear()
 
 
-# ---------- ROULETTE: Command ----------
+@router.callback_query(DuelState.waiting_confirmation, F.data.startswith("duel_decline_"))
+async def duel_decline(callback: CallbackQuery, state: FSMContext):
+    """Decline duel"""
+    duel_id = callback.data.split("_")[2]
+    data = await state.get_data()
+    
+    if data.get("duel_id") != duel_id:
+        await callback.answer("❌ Дуэль не найдена", show_alert=True)
+        return
+    
+    await callback.message.edit_text("⚔️ Дуэль отклонена")
+    await callback.answer()
+    await state.clear()
+
+
+@router.callback_query(DuelState.waiting_confirmation, F.data.startswith("duel_increase_"))
+async def duel_increase(callback: CallbackQuery, state: FSMContext):
+    """Increase duel bet"""
+    duel_id = callback.data.split("_")[2]
+    data = await state.get_data()
+    
+    if data.get("duel_id") != duel_id:
+        await callback.answer("❌ Дуэль не найдена", show_alert=True)
+        return
+    
+    duel_data = data.get("duel_data")
+    current_bet = duel_data["bet"]
+    new_bet = min(current_bet * 2, MAX_BET)
+    
+    if new_bet == current_bet:
+        await callback.answer("❌ Нельзя увеличить ставку (максимум)", show_alert=True)
+        return
+    
+    duel_data["bet"] = new_bet
+    await state.update_data(duel_data=duel_data)
+    
+    await callback.answer(f"💰 Ставка увеличена до {new_bet} ₽", show_alert=True)
+    
+    # Update message
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="✅ Принять дуэль",
+        callback_data=f"duel_accept_{duel_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отклонить",
+        callback_data=f"duel_decline_{duel_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="💰 Увеличить ставку",
+        callback_data=f"duel_increase_{duel_id}"
+    ))
+    
+    await callback.message.edit_text(
+        f"⚔️ *ВЫЗОВ НА ДУЭЛЬ!* ⚔️\n\n"
+        f"👤 {duel_data['challenger_name']} вызывает {duel_data['opponent_name']}\n"
+        f"💰 Новая ставка: {new_bet} ₽\n\n"
+        f"⏰ У вас есть {DUEL_TIMEOUT} секунд, чтобы ответить!",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+
+# ========== Roulette ==========
+
 @router.message(Command("roulette"))
-async def cmd_roulette(message: Message):
-    ctx.require()
-    args = message.text.split()
-    
-    if len(args) < 3:
-        await message.answer(
-            "🎲 **Рулетка NEXUS**\n\n"
-            "Использование: /roulette [сумма] [red/black]\n"
-            f"Пример: /roulette {MIN_BET} red\n\n"
-            f"💰 Ставка: {MIN_BET}-{MAX_BET} NCoin\n"
-            f"🎯 Выигрыш: x2"
-        )
-        return
-    
-    try:
-        amount = int(args[1])
-        color = args[2].lower()
-    except ValueError:
-        await message.answer("❌ Неверный формат")
-        return
-    
-    if not (MIN_BET <= amount <= MAX_BET):
-        await message.answer(f"❌ Ставка: {MIN_BET}-{MAX_BET}")
-        return
-    if color not in ("red", "black"):
-        await message.answer("❌ Цвет: red или black")
-        return
-    
+@rate_limit(limit=RATE_LIMIT_GAMES, key="roulette")
+async def cmd_roulette(message: Message, state: FSMContext):
+    """Roulette game with color/bet selection"""
     user_id = message.from_user.id
-    chat_id = message.chat.id
+    balance = await get_user_balance(user_id)
     
-    ok, wait = await ctx.rate_limiter.check(user_id, "roulette", 30, 60)
-    if not ok:
-        await message.answer(f"⏰ Подождите {wait} сек.")
-        return
-    
-    balance = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-    if not balance or not balance.can_spend(amount):
-        await message.answer(f"❌ Баланс: {balance.total if balance else 0}")
-        return
-    
-    balance_before = balance.total
-    if not await ctx.balance_mgr.update_cas(balance, delta_free=-amount):
-        await message.answer("❌ Ошибка списания")
-        API_ERRORS.labels(endpoint="roulette", error_type="cas_failed").inc()
-        return
-    
-    result = random.choice(["red", "black"])
-    
-    if result == color:
-        win = amount * 2
-        new_bal = await ctx.balance_mgr.get_with_version(user_id, chat_id)
-        if new_bal:
-            await ctx.balance_mgr.update_cas(new_bal, delta_free=win)
-        balance_after = balance_before - amount + win
-        text = f"🎲 Выпало: **{result.upper()}**\n\n🎉 **ПОБЕДА!** +{win} NCoin\n💰 Баланс: {balance_after}"
-        log_type = "win"
-    else:
-        balance_after = balance_before - amount
-        text = f"🎲 Выпало: **{result.upper()}**\n\n😔 **ПРОИГРЫШ!** -{amount} NCoin\n💰 Баланс: {balance_after}"
-        log_type = "loss"
-    
-    await log_financial_action(
-        user_id, chat_id, f"roulette_{log_type}", amount,
-        balance_before, balance_after, {"color": color, "result": result}
-    )
-    
-    await message.answer(text)
-    
-    GAMES_STARTED.labels(game="roulette", user_role="player").inc()
-    GAMES_RESULT.labels(game="roulette", result=log_type).inc()
-
-
-# ---------- RPS: Command ----------
-@router.message(Command("rps"))
-async def cmd_rps(message: Message):
-    args = message.text.split()
-    if len(args) < 2:
+    if balance < MIN_BET:
         await message.answer(
-            "🪨 **Камень-ножницы-бумага**\n\n"
-            "Использование: /rps [камень|ножницы|бумага]\n"
-            "💰 Бесплатно"
+            f"🎲 *Рулетка*\n\n"
+            f"❌ Недостаточно средств!\n"
+            f"💰 Ваш баланс: {balance} ₽\n"
+            f"🎲 Минимальная ставка: {MIN_BET} ₽",
+            parse_mode="Markdown"
         )
         return
     
-    choice = args[1].lower()
-    if choice not in RPS_CHOICES:
-        await message.answer("❌ Выберите: камень, ножницы или бумага")
-        return
+    await state.update_data(balance=balance)
+    await state.set_state(RouletteState.waiting_bet)
     
-    bot_choice = random.choice(list(RPS_CHOICES.keys()))
+    builder = InlineKeyboardBuilder()
+    bet_options = [MIN_BET, MIN_BET * 5, MIN_BET * 10, MIN_BET * 25, MIN_BET * 50]
+    bet_options = [b for b in bet_options if b <= min(MAX_BET, balance)]
     
-    if choice == bot_choice:
-        result = "🤝 Ничья!"
-        outcome = "draw"
-    elif (choice == "камень" and bot_choice == "ножницы") or \
-         (choice == "ножницы" and bot_choice == "бумага") or \
-         (choice == "бумага" and bot_choice == "камень"):
-        result = "🎉 Вы выиграли!"
-        outcome = "win"
-    else:
-        result = "😔 Вы проиграли!"
-        outcome = "loss"
+    for bet in bet_options:
+        builder.add(InlineKeyboardButton(
+            text=f"{bet} ₽",
+            callback_data=f"roulette_bet_{bet}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="🎲 Своя сумма",
+        callback_data="roulette_custom_bet"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data="roulette_cancel"
+    ))
+    builder.adjust(3)
     
     await message.answer(
-        f"{RPS_CHOICES[choice]} Вы: {choice}\n"
-        f"{RPS_CHOICES[bot_choice]} Бот: {bot_choice}\n\n"
-        f"{result}"
+        f"🎲 *Рулетка*\n\n"
+        f"💰 Ваш баланс: {balance} ₽\n\n"
+        f"*Шаг 1:* Выберите размер ставки",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
     )
+
+
+@router.callback_query(RouletteState.waiting_bet, F.data.startswith("roulette_bet_"))
+async def roulette_choose_color(callback: CallbackQuery, state: FSMContext):
+    """Choose color after setting bet"""
+    bet = int(callback.data.split("_")[2])
+    await state.update_data(bet=bet)
+    await state.set_state(RouletteState.waiting_color)
     
-    GAMES_STARTED.labels(game="rps", user_role="player").inc()
-    GAMES_RESULT.labels(game="rps", result=outcome).inc()
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="🔴 RED (x2)",
+        callback_data="roulette_color_red"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⚫ BLACK (x2)",
+        callback_data="roulette_color_black"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🟢 GREEN (x36)",
+        callback_data="roulette_color_green"
+    ))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"🎲 *Рулетка*\n\n"
+        f"💰 Ставка: {bet} ₽\n\n"
+        f"*Шаг 2:* Выберите цвет",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
 
 
-# ---------- HISTORY: Command ----------
-@router.message(Command("games_history"))
-async def cmd_games_history(message: Message):
-    """История игр пользователя"""
+@router.callback_query(RouletteState.waiting_color, F.data.startswith("roulette_color_"))
+async def roulette_play(callback: CallbackQuery, state: FSMContext):
+    """Play roulette"""
+    start_time = datetime.now()
+    color = callback.data.split("_")[2]
+    data = await state.get_data()
+    bet = data.get("bet")
+    user_id = callback.from_user.id
+    
+    color_map = {"red": "🔴 RED", "black": "⚫ BLACK", "green": "🟢 GREEN"}
+    color_display = color_map.get(color, color)
+    
+    # Deduct bet
+    if not await update_user_balance(user_id, bet, "subtract", f"Ставка в рулетке: {bet} ₽ ({color})"):
+        await callback.answer("❌ Ошибка списания средств", show_alert=True)
+        await state.clear()
+        return
+    
+    # Roulette logic
+    roulette_numbers = {
+        "red": [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36],
+        "black": [2, 4, 6, 8, 10, 11, 13, 15, 17, 20, 22, 24, 26, 28, 29, 31, 33, 35],
+        "green": [0]
+    }
+    
+    result_number = random.randint(0, 36)
+    result_color = "green" if result_number == 0 else "red" if result_number in roulette_numbers["red"] else "black"
+    
+    win_multiplier = 36 if color == "green" else 2
+    is_win = result_color == color
+    
+    await callback.answer("🎲 Крутим рулетку...")
+    
+    if is_win:
+        win_amount = bet * win_multiplier
+        await update_user_balance(user_id, win_amount, "add", f"Выигрыш в рулетке: {win_amount} ₽")
+        result_text = f"🎲 *РУЛЕТКА* 🎲\n\n"
+        result_text += f"🎯 Выпало: *{result_number}* ({'🔴' if result_color == 'red' else '⚫' if result_color == 'black' else '🟢'} {result_color.upper()})\n\n"
+        result_text += f"🎉 *ПОБЕДА!* 🎉\n"
+        result_text += f"💰 Выигрыш: {win_amount} ₽\n"
+        result_text += f"✨ Множитель: x{win_multiplier}\n"
+        GAMES_WON.labels(game_type="roulette").inc()
+        BETS_WON.labels(game_type="roulette").inc()
+    else:
+        win_amount = 0
+        result_text = f"🎲 *РУЛЕТКА* 🎲\n\n"
+        result_text += f"🎯 Выпало: *{result_number}* ({'🔴' if result_color == 'red' else '⚫' if result_color == 'black' else '🟢'} {result_color.upper()})\n\n"
+        result_text += f"😢 *ПРОИГРЫШ*\n"
+        result_text += f"💸 Потеряно: {bet} ₽\n"
+    
+    result_text += f"\n💰 Новый баланс: {await get_user_balance(user_id)} ₽"
+    
+    # Get AI comment
+    ai_comment = await get_ai_game_comment("roulette", "выиграл" if is_win else "проиграл", win_amount or bet)
+    if ai_comment:
+        result_text += f"\n\n🤖 *AI совет:* {ai_comment}"
+    
+    # Log history
+    result_status = "win" if is_win else "loss"
+    details = {"number": result_number, "color": result_color, "bet_color": color}
+    await log_game_history(user_id, "roulette", bet, result_status, win_amount, details)
+    
+    # Update metrics
+    GAMES_PLAYED.labels(game_type="roulette").inc()
+    BETS_PLACED.labels(game_type="roulette").inc()
+    duration = (datetime.now() - start_time).total_seconds()
+    GAME_DURATION.labels(game_type="roulette").observe(duration)
+    
+    await callback.message.edit_text(result_text, parse_mode="Markdown")
+    await callback.answer()
+    await state.clear()
+
+
+@router.callback_query(RouletteState.waiting_bet, F.data == "roulette_cancel")
+async def roulette_cancel(callback: CallbackQuery, state: FSMContext):
+    """Cancel roulette"""
+    await callback.message.edit_text("🎲 Игра отменена")
+    await callback.answer()
+    await state.clear()
+
+
+# ========== Rock Paper Scissors ==========
+
+@router.message(Command("rps"))
+@rate_limit(limit=RATE_LIMIT_GAMES, key="rps")
+async def cmd_rps(message: Message, state: FSMContext):
+    """Rock Paper Scissors game"""
     user_id = message.from_user.id
-    chat_id = message.chat.id
+    balance = await get_user_balance(user_id)
+    
+    if balance < MIN_BET:
+        await message.answer(
+            f"✊ *Камень-ножницы-бумага*\n\n"
+            f"❌ Недостаточно средств!\n"
+            f"💰 Ваш баланс: {balance} ₽\n"
+            f"🎲 Минимальная ставка: {MIN_BET} ₽",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await state.update_data(balance=balance)
+    await state.set_state(RPSState.waiting_bet)
+    
+    builder = InlineKeyboardBuilder()
+    bet_options = [MIN_BET, MIN_BET * 5, MIN_BET * 10, MIN_BET * 25]
+    bet_options = [b for b in bet_options if b <= min(MAX_BET, balance)]
+    
+    for bet in bet_options:
+        builder.add(InlineKeyboardButton(
+            text=f"{bet} ₽",
+            callback_data=f"rps_bet_{bet}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data="rps_cancel"
+    ))
+    builder.adjust(2)
+    
+    await message.answer(
+        f"✊ *Камень-ножницы-бумага*\n\n"
+        f"💰 Ваш баланс: {balance} ₽\n\n"
+        f"Выберите размер ставки:",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(RPSState.waiting_bet, F.data.startswith("rps_bet_"))
+async def rps_choose_hand(callback: CallbackQuery, state: FSMContext):
+    """Choose hand after setting bet"""
+    bet = int(callback.data.split("_")[2])
+    await state.update_data(bet=bet)
+    await state.set_state(RPSState.waiting_choice)
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="✊ Камень",
+        callback_data="rps_choice_rock"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="✌️ Ножницы",
+        callback_data="rps_choice_scissors"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="✋ Бумага",
+        callback_data="rps_choice_paper"
+    ))
+    builder.adjust(3)
+    
+    await callback.message.edit_text(
+        f"✊ *Камень-ножницы-бумага*\n\n"
+        f"💰 Ставка: {bet} ₽\n\n"
+        f"Выберите свой ход:",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(RPSState.waiting_choice, F.data.startswith("rps_choice_"))
+async def rps_play(callback: CallbackQuery, state: FSMContext):
+    """Play Rock Paper Scissors"""
+    start_time = datetime.now()
+    choice_map = {
+        "rock": {"name": "✊ Камень", "emoji": "✊"},
+        "scissors": {"name": "✌️ Ножницы", "emoji": "✌️"},
+        "paper": {"name": "✋ Бумага", "emoji": "✋"}
+    }
+    
+    player_choice_key = callback.data.split("_")[2]
+    player_choice = choice_map.get(player_choice_key, {"name": "Unknown", "emoji": "❓"})
+    
+    data = await state.get_data()
+    bet = data.get("bet")
+    user_id = callback.from_user.id
+    
+    # Deduct bet
+    if not await update_user_balance(user_id, bet, "subtract", f"Ставка в RPS: {bet} ₽"):
+        await callback.answer("❌ Ошибка списания средств", show_alert=True)
+        await state.clear()
+        return
+    
+    # Bot choice
+    bot_choices = ["rock", "scissors", "paper"]
+    bot_choice_key = random.choice(bot_choices)
+    bot_choice = choice_map[bot_choice_key]
+    
+    # Determine winner
+    win_rules = {
+        ("rock", "scissors"): "win",
+        ("scissors", "paper"): "win",
+        ("paper", "rock"): "win",
+        ("rock", "paper"): "loss",
+        ("scissors", "rock"): "loss",
+        ("paper", "scissors"): "loss"
+    }
+    
+    result = win_rules.get((player_choice_key, bot_choice_key), "draw")
+    
+    await callback.answer(f"🤖 Бот выбрал {bot_choice['name']}")
+    
+    if result == "win":
+        win_amount = bet * 2
+        await update_user_balance(user_id, win_amount, "add", f"Выигрыш в RPS: {win_amount} ₽")
+        result_text = f"✊ *КАМЕНЬ-НОЖНИЦЫ-БУМАГА* ✋\n\n"
+        result_text += f"👤 Вы: {player_choice['emoji']}\n"
+        result_text += f"🤖 Бот: {bot_choice['emoji']}\n\n"
+        result_text += f"🎉 *ПОБЕДА!* 🎉\n"
+        result_text += f"💰 Выигрыш: {win_amount} ₽\n"
+        GAMES_WON.labels(game_type="rps").inc()
+        BETS_WON.labels(game_type="rps").inc()
+    elif result == "loss":
+        win_amount = 0
+        result_text = f"✊ *КАМЕНЬ-НОЖНИЦЫ-БУМАГА* ✋\n\n"
+        result_text += f"👤 Вы: {player_choice['emoji']}\n"
+        result_text += f"🤖 Бот: {bot_choice['emoji']}\n\n"
+        result_text += f"😢 *ПРОИГРЫШ*\n"
+        result_text += f"💸 Потеряно: {bet} ₽\n"
+    else:
+        win_amount = bet
+        await update_user_balance(user_id, win_amount, "add", "Возврат ставки (ничья)")
+        result_text = f"✊ *КАМЕНЬ-НОЖНИЦЫ-БУМАГА* ✋\n\n"
+        result_text += f"👤 Вы: {player_choice['emoji']}\n"
+        result_text += f"🤖 Бот: {bot_choice['emoji']}\n\n"
+        result_text += f"🤝 *НИЧЬЯ!*\n"
+        result_text += f"💰 Возврат ставки: {bet} ₽\n"
+    
+    result_text += f"\n💰 Новый баланс: {await get_user_balance(user_id)} ₽"
+    
+    # Get AI comment
+    ai_comment = await get_ai_game_comment("rps", "выиграл" if result == "win" else "проиграл" if result == "loss" else "сыграл вничью", win_amount if result == "win" else bet)
+    if ai_comment:
+        result_text += f"\n\n🤖 *AI совет:* {ai_comment}"
+    
+    # Log history
+    result_status = "win" if result == "win" else "loss" if result == "loss" else "draw"
+    details = {"player_choice": player_choice_key, "bot_choice": bot_choice_key}
+    await log_game_history(user_id, "rps", bet, result_status, win_amount if result == "win" else 0, details)
+    
+    # Update metrics
+    GAMES_PLAYED.labels(game_type="rps").inc()
+    BETS_PLACED.labels(game_type="rps").inc()
+    duration = (datetime.now() - start_time).total_seconds()
+    GAME_DURATION.labels(game_type="rps").observe(duration)
+    
+    await callback.message.edit_text(result_text, parse_mode="Markdown")
+    await callback.answer()
+    await state.clear()
+
+
+@router.callback_query(RPSState.waiting_bet, F.data == "rps_cancel")
+async def rps_cancel(callback: CallbackQuery, state: FSMContext):
+    """Cancel RPS game"""
+    await callback.message.edit_text("✊ Игра отменена")
+    await callback.answer()
+    await state.clear()
+
+
+# ========== Game History ==========
+
+@router.message(Command("games_history"))
+@rate_limit(limit=10, key="history")
+async def cmd_games_history(message: Message):
+    """Show user's game history with pagination"""
+    user_id = message.from_user.id
+    page = 0
     
     try:
-        async with ctx.db_pool.acquire() as conn:
-            rows = await conn.execute("""
-                SELECT action, amount, created_at 
-                FROM audit_log 
-                WHERE user_id=? AND chat_id=? 
-                AND (action LIKE 'slot_%' OR action LIKE 'roulette_%' OR action LIKE 'duel_%')
-                ORDER BY created_at DESC 
-                LIMIT 20
-            """, (user_id, chat_id)).fetchall()
+        history = await db.get_game_history(user_id, limit=20, offset=page * 20)
+        
+        if not history:
+            await message.answer("📜 *История игр*\n\nУ вас пока нет истории игр.\n\nСыграйте в любую игру: /slot, /duel, /roulette, /rps", parse_mode="Markdown")
+            return
+        
+        stats = await get_user_stats(user_id)
+        
+        text = "📜 *ИСТОРИЯ ИГР*\n\n"
+        text += f"📊 *Общая статистика:*\n"
+        text += f"🎮 Всего игр: {stats.get('total_games', 0)}\n"
+        text += f"🏆 Побед: {stats.get('total_wins', 0)}\n"
+        text += f"💰 Поставлено: {stats.get('total_bets', 0)} ₽\n"
+        text += f"💸 Выиграно: {stats.get('total_won', 0)} ₽\n\n"
+        
+        if stats.get('total_bets', 0) > 0:
+            win_rate = (stats.get('total_wins', 0) / stats.get('total_games', 0)) * 100 if stats.get('total_games', 0) > 0 else 0
+            profit = stats.get('total_won', 0) - stats.get('total_bets', 0)
+            text += f"📈 Процент побед: {win_rate:.1f}%\n"
+            text += f"💰 Чистая прибыль: {profit:+} ₽\n\n"
+        
+        text += "*Последние игры:*\n"
+        
+        for game in history:
+            game_type = game.get("game_type", "unknown")
+            bet = game.get("bet", 0)
+            result = game.get("result", "unknown")
+            win_amount = game.get("win_amount", 0)
+            created_at = game.get("created_at", datetime.now())
+            
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            
+            time_str = created_at.strftime("%d.%m %H:%M")
+            
+            game_emoji = {
+                "slot": "🎰", "duel": "⚔️", "roulette": "🎲", "rps": "✊"
+            }.get(game_type, "🎮")
+            
+            if result == "win":
+                result_emoji = "✅"
+                result_text = f"+{win_amount} ₽"
+            elif result == "loss":
+                result_emoji = "❌"
+                result_text = f"-{bet} ₽"
+            else:
+                result_emoji = "🔄"
+                result_text = "0 ₽"
+            
+            text += f"{result_emoji} {time_str} {game_emoji} {game_type}: {result_text}\n"
+        
+        # Add pagination if more games
+        total_games = stats.get('total_games', 0)
+        if total_games > 20:
+            text += f"\n📄 Страница {page + 1}/{(total_games + 19) // 20}"
+            
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(
+                text="▶️ Следующая",
+                callback_data=f"history_next_{page + 1}"
+            ))
+            await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+        else:
+            await message.answer(text, parse_mode="Markdown")
+        
     except Exception as e:
-        logger.error(f"Failed to fetch history: {e}", exc_info=True)
-        await message.answer("❌ Ошибка при загрузке истории")
-        return
-    
-    if not rows:
-        await message.answer("📊 История игр пуста. Сыграйте в слоты или рулетку!")
-        return
-    
-    text = "🎮 **История игр**\n\n"
-    for row in rows:
-        action_name = row[0].replace("_", " ").title()
-        text += f"• {row[2][:16]} | {action_name} | {row[1]} NCoin\n"
-    
-    await message.answer(text)
+        logger.error(f"Games history error: {e}")
+        await message.answer("❌ Ошибка загрузки истории игр")
 
 
-# ---------- METRICS: Command (✅ ИСПРАВЛЕНО: ADMIN_IDS определён)
+@router.callback_query(F.data.startswith("history_next_"))
+async def history_next(callback: CallbackQuery):
+    """Show next page of history"""
+    page = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    
+    try:
+        history = await db.get_game_history(user_id, limit=20, offset=page * 20)
+        
+        if not history:
+            await callback.answer("Больше нет записей", show_alert=True)
+            return
+        
+        text = "📜 *ИСТОРИЯ ИГР*\n\n"
+        
+        for game in history:
+            game_type = game.get("game_type", "unknown")
+            bet = game.get("bet", 0)
+            result = game.get("result", "unknown")
+            win_amount = game.get("win_amount", 0)
+            created_at = game.get("created_at", datetime.now())
+            
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            
+            time_str = created_at.strftime("%d.%m %H:%M")
+            
+            game_emoji = {
+                "slot": "🎰", "duel": "⚔️", "roulette": "🎲", "rps": "✊"
+            }.get(game_type, "🎮")
+            
+            if result == "win":
+                result_emoji = "✅"
+                result_text = f"+{win_amount} ₽"
+            elif result == "loss":
+                result_emoji = "❌"
+                result_text = f"-{bet} ₽"
+            else:
+                result_emoji = "🔄"
+                result_text = "0 ₽"
+            
+            text += f"{result_emoji} {time_str} {game_emoji} {game_type}: {result_text}\n"
+        
+        stats = await get_user_stats(user_id)
+        total_games = stats.get('total_games', 0)
+        text += f"\n📄 Страница {page + 1}/{(total_games + 19) // 20}"
+        
+        builder = InlineKeyboardBuilder()
+        if page > 0:
+            builder.add(InlineKeyboardButton(
+                text="◀️ Предыдущая",
+                callback_data=f"history_prev_{page - 1}"
+            ))
+        if (page + 1) * 20 < total_games:
+            builder.add(InlineKeyboardButton(
+                text="▶️ Следующая",
+                callback_data=f"history_next_{page + 1}"
+            ))
+        
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup() if builder.buttons else None)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"History pagination error: {e}")
+        await callback.answer("Ошибка загрузки", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("history_prev_"))
+async def history_prev(callback: CallbackQuery):
+    """Show previous page of history"""
+    page = int(callback.data.split("_")[2])
+    await history_next(callback)  # Reuse logic with prev button
+
+
+# ========== Metrics ==========
+
 @router.message(Command("metrics"))
 async def cmd_metrics(message: Message):
-    """Показать метрики (только для админов)"""
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("❌ Только для администраторов")
-        API_ERRORS.labels(endpoint="metrics", error_type="unauthorized").inc()
+    """Show bot metrics (admin only)"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.answer("🔒 *Доступ запрещен*\n\nТолько для администраторов.", parse_mode="Markdown")
         return
     
-    status = await health_check()
-    
-    text = "📊 **Статус сервиса**\n\n"
-    text += f"🤖 Бот: {status['checks'].get('telegram', 'unknown')}\n"
-    text += f"🗄️ База данных: {status['checks'].get('database', 'unknown')}\n"
-    text += f"🔄 Redis: {status['checks'].get('redis', 'unknown')}\n"
-    text += f"🎰 Активных дуэлей: {len(DuelManager._duels)}\n"
-    text += f"🔗 Активные подключения БД: {len(ctx.db_pool._active_connections) if ctx.db_pool else 0}\n"
-    
-    await message.answer(text)
-
-
-# ============================================================================
-# 🔍 HEALTH CHECK
-# ============================================================================
-async def health_check() -> Dict[str, Any]:
-    """Проверка здоровья сервиса"""
-    status = {"status": "healthy", "checks": {}}
-    
-    # Проверка БД
-    if ctx.db_pool:
-        status["checks"]["database"] = "ok" if await ctx.db_pool.health_check() else "error"
-        if status["checks"]["database"] == "error":
-            status["status"] = "degraded"
-    
-    # Проверка Redis
-    if ctx.redis:
-        try:
-            await ctx.redis.ping()
-            status["checks"]["redis"] = "ok"
-        except Exception as e:
-            logger.warning(f"Redis health check failed: {e}", exc_info=True)
-            status["checks"]["redis"] = "error"
-            status["status"] = "degraded"
-    else:
-        status["checks"]["redis"] = "disabled"
-    
-    # Проверка Telegram
-    if ctx.bot:
-        try:
-            await ctx.bot.get_me()
-            status["checks"]["telegram"] = "ok"
-        except Exception as e:
-            logger.warning(f"Telegram health check failed: {e}", exc_info=True)
-            status["checks"]["telegram"] = "error"
-            status["status"] = "degraded"
-    
-    return status
-
-
-# ============================================================================
-# 🚀 GRACEFUL SHUTDOWN
-# ============================================================================
-async def shutdown_handler(signum=None):
-    """Обработчик завершения"""
-    logger.info(f"Shutdown initiated (signal: {signum})")
-    
-    # Завершаем все активные задачи
-    await ctx.shutdown()
-    
-    # Закрываем соединения
-    if ctx.db_pool:
-        await ctx.db_pool.close()
-    if ctx.redis:
-        try:
-            await ctx.redis.close()
-        except Exception as e:
-            logger.warning(f"Redis close error: {e}", exc_info=True)
-    
-    logger.info("Shutdown complete")
-    sys.exit(0)
-
-
-# ============================================================================
-# 🎯 MAIN ENTRY POINT
-# ============================================================================
-dp = Dispatcher()
-dp.include_router(router)
-
-
-async def on_startup(bot: Bot):
-    """Инициализация при запуске"""
-    # Инициализация БД
-    db_pool = AsyncDBPool(DATABASE_PATH)
-    await db_pool.initialize()
-    
-    # Инициализация Redis
-    redis_client = None
     try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        await redis_client.ping()
-        logger.info("Redis connected")
-        REDIS_CONNECTED.set(1)
+        total_users = await db.get_total_users()
+        active_today = await db.get_active_users_today()
+        total_games = await db.get_total_games()
+        total_bets = await db.get_total_bets()
+        total_wins = await db.get_total_wins()
+        active_games = await get_active_games_count()
+        
+        text = "📊 *СТАТИСТИКА БОТА* 📊\n\n"
+        text += "👥 *Пользователи:*\n"
+        text += f"• Всего: {total_users}\n"
+        text += f"• Активных сегодня: {active_today}\n"
+        text += f"• Активных игр: {active_games}\n\n"
+        
+        text += "🎮 *Игры:*\n"
+        text += f"• Всего игр: {total_games}\n"
+        text += f"• Всего ставок: {total_bets:,} ₽\n"
+        text += f"• Всего выигрышей: {total_wins:,} ₽\n\n"
+        
+        if total_bets > 0:
+            house_edge = ((total_bets - total_wins) / total_bets) * 100
+            profit = total_bets - total_wins
+            text += "💰 *Финансы:*\n"
+            text += f"• Прибыль бота: {profit:,} ₽\n"
+            text += f"• Преимущество казино: {house_edge:.2f}%\n\n"
+        
+        # AI stats if enabled
+        if AI_ENABLED:
+            text += "🤖 *AI (OpenRouter):*\n"
+            text += f"• Статус: ✅ Активен\n"
+            text += f"• Модель: GPT-3.5 Turbo\n"
+        else:
+            text += "🤖 *AI:* ❌ Отключен\n"
+        
+        text += f"\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+        
+        await message.answer(text, parse_mode="Markdown")
+        
+        # Update metrics
+        TOTAL_USERS.set(total_users)
+        
     except Exception as e:
-        logger.warning(f"Redis unavailable: {e}", exc_info=True)
-        REDIS_CONNECTED.set(0)
-    
-    ctx.initialize(bot=bot, db_pool=db_pool, redis_client=redis_client)
-    
-    # Запуск метрик
-    start_http_server(PROMETHEUS_PORT)
-    logger.info(f"Prometheus metrics on :{PROMETHEUS_PORT}/metrics")
-    
-    # Команды бота
-    await bot.set_my_commands([
-        BotCommand(command="slot", description="🎰 Слот-машина"),
-        BotCommand(command="duel", description="⚔️ Дуэль с игроком"),
-        BotCommand(command="roulette", description="🎲 Рулетка"),
-        BotCommand(command="rps", description="🪨 Камень-ножницы-бумага"),
-        BotCommand(command="games_history", description="📊 История игр"),
-        BotCommand(command="metrics", description="🔧 Статус сервиса (админ)"),
-    ], scope=BotCommandScopeDefault())
-    
-    logger.info("Bot started successfully")
-
-
-async def on_shutdown(bot: Bot):
-    """Очистка при завершении"""
-    await shutdown_handler()
-
-
-def main():
-    """Точка входа"""
-    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
-    
-    # Регистрация обработчиков сигналов
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown_handler(s)))
-    
-    # Запуск
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    logger.info("Starting NEXUS Games bot v2.0...")
-    dp.run_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
-
-if __name__ == "__main__":
-    main()
-
+        logger.error(f"Metrics error: {e}")
+        await message.answer("❌ Ошибка загрузки статистики")
