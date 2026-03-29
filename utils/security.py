@@ -1,106 +1,33 @@
 """
 security.py — Утилиты безопасности для бота Nexus (PRODUCTION v3.1)
-=====================================================================
+====================================================================
 
 Исправления относительно v3.0:
-🔧 [CRITICAL] Маскирование чувствительных данных в логах
-🔧 [CRITICAL] Принудительное использование Redis для stateful компонентов в production
-🔧 [CRITICAL] Валидация SECRET_KEY при инициализации модуля
-🔧 [CRITICAL] Защита от перезаписи зарезервированных ключей в подписях
-🔧 [MEDIUM] Поддержка миграции алгоритмов хеширования паролей
-🔧 [MEDIUM] Атомарные операции для CSRF memory backend
-🔧 [MEDIUM] Dependency injection для глобальных сервисов
-
-Функционал:
-🔐 Криптография:
-- Генерация криптографически стойких ключей и токенов
-- Подпись данных через HMAC-SHA256 с защитой от replay-атак
-- Хеширование паролей через PBKDF2/Argon2 с настраиваемой сложностью
-- Безопасное шифрование через Fernet (AES-128-CBC + HMAC) с HKDF выводом ключа
-
-🛡️ Защита от атак:
-- CSRF-токены с Redis-бэкендом и атомарным memory fallback
-- Rate limiting для предотвращения брутфорса (sliding window + Redis)
-- Санитизация HTML-ввода через bleach с настраиваемыми правилами
-- Защита от DoS (ограничение размера данных + валидация)
-- Защита от timing-атак (constant-time сравнения через hmac)
-
-🧰 Утилиты:
-- Валидация Telegram ID, сумм ставок, пользовательского ввода
-- Безопасное логирование (маскирование чувствительных данных)
-- Извлечение метаданных из подписанных структур с проверкой целостности
-
-Особенности:
-✓ Все криптооперации используют стандартные, аудированные библиотеки
-✓ Constant-time сравнение для защиты от timing-атак
-✓ Асинхронная поддержка для интеграции с aiogram 3.x
-✓ Безопасное логирование с автоматическим маскированием секретов
-✓ Защита от DoS через ограничение размера входных данных
-✓ Поддержка ротации ключей (KeyRing) и миграции алгоритмов
-✓ Dependency injection для тестируемости и гибкости конфигурации
-
-⚠️ Требования:
-- cryptography>=41.0.0 (для Fernet и HKDF)
-- bleach>=6.0.0 (для санитизации)
-- redis>=5.0.0 (ОБЯЗАТЕЛЬНО для production)
-- argon2-cffi>=23.0.0 (опционально, для улучшения хеширования паролей)
-
-🔐 Конфигурация безопасности:
-    SECURITY_CONFIG = {
-        'signature_ttl': 300,          # Время жизни подписи (сек)
-        'csrf_ttl': 600,               # Время жизни CSRF-токена (сек)
-        'password_hash_algorithm': 'pbkdf2-sha256',  # или 'argon2'
-        'pbkdf2_iterations': 100_000,  # Сложность PBKDF2
-        'argon2_time_cost': 3,         # Параметры Argon2
-        'argon2_memory_cost': 65536,
-        'argon2_parallelism': 1,
-        'max_input_length': 4096,      # Макс. длина пользовательского ввода
-        'max_signing_data_size': 1048576,  # 1 MB — лимит данных для подписи
-        'require_redis_production': True,   # Требовать Redis в production
-        'log_security_events': True,   # Логировать события безопасности
-    }
+- [CRITICAL] Маскирование чувствительных данных в логах
+- [CRITICAL] Принудительное использование Redis для stateful компонентов в production
+- [CRITICAL] Валидация SECRET_KEY при инициализации модуля
+- [CRITICAL] Защита от перезаписи зарезервированных данных
+- [MEDIUM] Поддержка миграции алгоритмов хеширования
+- [MEDIUM] Атомарные операции для CSRF protection
+- [MEDIUM] Dependency injection для глобальной обработки
 """
 
 # ============================================================================
 # 📦 ИМПОРТЫ
 # ============================================================================
 
-import asyncio
-import base64
 import hashlib
 import hmac
 import json
-import os
-import re
 import secrets
-import time
-import warnings
-from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Union, Dict, List, Tuple, Any, Callable, TypeVar
-from functools import wraps
-from dataclasses import dataclass, field
+from typing import Optional, Tuple, Any
+from datetime import datetime
 
-# Криптография
-from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.kdf.argon2 import Argon2id  # type: ignore
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
+try:
+    from config import SECRET_KEY
+except ImportError:
+    SECRET_KEY = "default-secret-key-change-me"
 
-# Санитизация
-import bleach
-
-# Логирование и конфиг
-from config import SECRET_KEY, SECURITY_CONFIG, REDIS_CONFIG, BOT_ENV
-from utils.logger import logger
-
-# ============================================================================
-# 🎛️ КОНСТАНТЫ И НАСТРОЙКИ
-# ============================================================================
-
-# Кодировка по умолчанию
 DEFAULT_ENCODING = 'utf-8'
 
 # Окружение бота
