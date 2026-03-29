@@ -41,7 +41,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 from config import (
-    DATABASE_PATH, REDIS_URL, SECRET_KEY, TELEGRAM_TOKEN,
+    DATABASE_PATH, REDIS_URL, SECRET_KEY, BOT_TOKEN,
     MIN_BET, MAX_BET, DUEL_TIMEOUT, RATE_LIMIT_GAMES,
     PROMETHEUS_PORT, DB_POOL_SIZE, MAX_BET_CONFIRMATION,
     ADMIN_IDS  # ✅ Добавлено: список админов
@@ -1586,7 +1586,7 @@ async def on_shutdown(bot: Bot):
 
 def main():
     """Точка входа"""
-    bot = Bot(token=TELEGRAM_TOKEN, parse_mode="HTML")
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
     
     # Регистрация обработчиков сигналов
     loop = asyncio.get_event_loop()
