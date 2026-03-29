@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import os
 import random
 import uuid
 from datetime import datetime, timedelta
@@ -30,6 +31,9 @@ from config import (
 from database import db
 from utils.rate_limiter import rate_limit
 from utils.logger import logger
+
+# ========== Удалён импорт utils.security — не используется ==========
+# from utils.security import verify_signature, generate_signature
 
 # Prometheus metrics - ИСПРАВЛЕННАЯ ВЕРСИЯ
 try:
