@@ -1,91 +1,137 @@
 """
 Умный парсер естественного языка для NEXUS
-Понимает обращения к боту и команды в любом формате
+С атомарными транзакциями, rate-limiting и полной обработкой ошибок
 """
 
 import re
 import random
+import asyncio
+import time
 from datetime import datetime, timedelta
+from typing import Optional, Tuple, Dict, Any
+from dataclasses import dataclass
 from aiogram import Router, F, Bot
 from aiogram.types import Message, ChatPermissions
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 from database.db import (
     get_balance, update_balance, spend_balance, add_free_balance,
-    get_user_stats, add_user
+    get_user_stats, add_user, get_db
 )
 from handlers.roles import can_ban, can_mute, get_user_role
 from handlers.rp_commands import RP_ACTIONS
 from keyboards.main_menu import get_main_menu
-from utils.logger import log_user, log_game, log_admin
+from utils.logger import log_user, log_game, log_admin, log_error
 
 router = Router()
 bot: Bot = None
 
-# Состояния для дуэли
-class DuelState(StatesGroup):
-    waiting_accept = State()
+# ========== КОНФИГУРАЦИЯ ==========
+RATE_LIMITS = {
+    "ban": {"limit": 10, "window": 60},
+    "mute": {"limit": 10, "window": 60},
+    "gift": {"limit": 20, "window": 60},
+    "duel": {"limit": 10, "window": 60},
+    "roulette": {"limit": 30, "window": 60},
+    "slot": {"limit": 30, "window": 60},
+    "daily": {"limit": 1, "window": 86400}
+}
 
-# Хранилище ожидающих дуэлей
-pending_duels = {}
+# Хранилище для rate-limiting
+user_actions: Dict[str, list] = {}
+daily_lock = asyncio.Lock()
 
-def set_bot(bot_instance: Bot):
-    global bot
-    bot = bot_instance
+# Хранилище для дуэлей
+pending_duels: Dict[str, dict] = {}
 
-# Варианты обращения к боту
+# ========== ВАЛИДАЦИЯ ==========
+@dataclass
+class CommandData:
+    command: str
+    target: Optional[str] = None
+    amount: Optional[int] = None
+    color: Optional[str] = None
+    duration: Optional[int] = None
+    choice: Optional[str] = None
+    params: Optional[dict] = None
+
+def validate_amount(amount: int, min_val: int = 10, max_val: int = 10000) -> Tuple[bool, str]:
+    """Валидация суммы"""
+    if amount < min_val:
+        return False, f"Минимальная сумма {min_val} NCoin"
+    if amount > max_val:
+        return False, f"Максимальная сумма {max_val} NCoin"
+    return True, ""
+
+def validate_username(username: str) -> Tuple[bool, str]:
+    """Валидация username"""
+    if not username:
+        return False, "Укажите пользователя"
+    if len(username) < 2:
+        return False, "Слишком короткое имя"
+    return True, ""
+
+# ========== RATE LIMITING ==========
+async def check_rate_limit(user_id: int, command: str) -> Tuple[bool, int]:
+    """Проверка rate-limiting"""
+    key = f"{user_id}:{command}"
+    now = time.time()
+    
+    if key not in user_actions:
+        user_actions[key] = []
+    
+    limits = RATE_LIMITS.get(command, {"limit": 30, "window": 60})
+    limit = limits["limit"]
+    window = limits["window"]
+    
+    # Очищаем старые записи
+    user_actions[key] = [t for t in user_actions[key] if now - t < window]
+    
+    if len(user_actions[key]) >= limit:
+        wait_time = int(window - (now - user_actions[key][0]))
+        return False, wait_time
+    
+    user_actions[key].append(now)
+    return True, 0
+
+# ========== ПАРСИНГ ==========
 BOT_NAMES = [
     "nexus", "некс", "нэкс", "нэксус", "нексус",
     "nex", "некс", "nеxus", "nехus", "нексуc"
 ]
 
-# Ключевые слова для распознавания команд
 COMMAND_PATTERNS = {
-    "ban": [r"забан(и|ь)(ть)?", r"заблокируй", r"кикни", r"выгони", r"удали", r"бан", r"block", r"ban"],
-    "mute": [r"заглуш(и|ь)(ть)?", r"замут(и|ь)(ть)?", r"заткни", r"молчать", r"запрети писать", r"mute"],
-    "all": [r"отметь всех", r"всех отметь", r"тег всех", r"все сюда", r"созови всех", r"позови всех"],
-    "balance": [r"баланс", r"сколько денег", r"сколько монет", r"мой баланс", r"покажи баланс", r"сколько у меня"],
+    "ban": [r"забан(и|ь)(ть)?", r"заблокируй", r"кикни", r"выгони", r"удали", r"бан"],
+    "mute": [r"заглуш(и|ь)(ть)?", r"замут(и|ь)(ть)?", r"заткни", r"молчать", r"запрети писать"],
+    "all": [r"отметь всех", r"всех отметь", r"тег всех", r"все сюда", r"созови всех"],
+    "balance": [r"баланс", r"сколько денег", r"сколько монет", r"мой баланс", r"покажи баланс"],
     "daily": [r"бонус", r"ежедневный", r"награда", r"получить бонус"],
-    "gift": [r"подар(и|ю)", r"дай (.*?) монет", r"отправь (.*?) монет", r"переведи (.*?) монет", r"gift", r"подарок"],
-    "rps": [r"камень", r"ножницы", r"бумага", r"сыграем в камень", r"давай в камень", r"камень-ножницы-бумага", r"rps"],
-    "roulette": [r"рулетка", r"сыграем в рулетку", r"крути рулетку", r"рулет", r"roulette"],
-    "slot": [r"слот", r"слоты", r"казино", r"слот-машина", r"slot"],
-    "duel": [r"дуэль", r"вызови на дуэль", r"битва", r"сразиться", r"duel"],
+    "gift": [r"подар(и|ю)", r"дай.*?монет", r"отправь.*?монет", r"переведи.*?монет", r"подарок"],
+    "rps": [r"камень", r"ножницы", r"бумага", r"сыграем в камень", r"давай в камень", r"rps"],
+    "roulette": [r"рулетка", r"сыграем в рулетку", r"крути рулетку", r"рулет"],
+    "slot": [r"слот", r"слоты", r"казино", r"слот-машина"],
+    "duel": [r"дуэль", r"вызови на дуэль", r"битва", r"сразиться"],
     "accept_duel": [r"принять дуэль", r"согласен", r"принимаю", r"давай", r"ок"],
     "decline_duel": [r"отклонить", r"отказ", r"нет", r"не хочу"],
     "hug": [r"обними", r"обнять", r"обнял", r"обняла"],
     "kiss": [r"поцелуй", r"поцеловать", r"чмокни"],
     "slap": [r"шлепни", r"шлёпни", r"ударь"],
-    "vip": [r"вип", r"купить вип", r"vip"],
-    "menu": [r"меню", r"главное меню", r"открой меню", r"покажи меню"],
-    "stats": [r"статистика", r"моя статистика", r"стата"],
+    "vip": [r"вип", r"купить вип"],
+    "menu": [r"меню", r"главное меню", r"открой меню"],
+    "stats": [r"статистика", r"моя статистика"],
     "top": [r"топ", r"топ богачей", r"кто самый богатый"]
 }
 
-# Хранилище для ежедневного бонуса
-last_daily = {}
-
-def extract_username(text: str) -> str:
-    """Извлекает username из текста"""
-    patterns = [
-        r'@(\w+)',
-        r'пользователя\s+(\w+)',
-        r'юзера\s+(\w+)',
-        r'участника\s+(\w+)'
-    ]
+def extract_username(text: str) -> Optional[str]:
+    patterns = [r'@(\w+)', r'пользователя\s+(\w+)', r'юзера\s+(\w+)', r'участника\s+(\w+)']
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1)
     return None
 
-def extract_amount(text: str) -> int:
-    """Извлекает сумму из текста"""
-    patterns = [
-        r'(\d+)\s*монет', r'(\d+)\s*ncoin', r'(\d+)\s*нкоин',
-        r'(\d+)\s*руб', r'(\d+)\s*₽', r'(\d+)\s*шт'
-    ]
+def extract_amount(text: str) -> Optional[int]:
+    patterns = [r'(\d+)\s*монет', r'(\d+)\s*ncoin', r'(\d+)\s*нкоин', r'(\d+)\s*руб', r'(\d+)\s*₽']
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -93,79 +139,81 @@ def extract_amount(text: str) -> int:
     return None
 
 def extract_color(text: str) -> str:
-    """Извлекает цвет для рулетки"""
     if 'красн' in text.lower():
         return 'red'
     if 'черн' in text.lower():
         return 'black'
     return 'red'
 
-def extract_choice(text: str) -> str:
-    """Извлекает выбор для камень-ножницы-бумага"""
-    if 'камень' in text.lower() or 'камень' in text.lower():
+def extract_choice(text: str) -> Optional[str]:
+    text_lower = text.lower()
+    if 'камень' in text_lower:
         return 'камень'
-    if 'ножниц' in text.lower():
+    if 'ножниц' in text_lower:
         return 'ножницы'
-    if 'бумаг' in text.lower():
+    if 'бумаг' in text_lower:
         return 'бумага'
     return None
 
 def extract_duration(text: str) -> int:
-    """Извлекает время для мута"""
-    patterns = [r'(\d+)\s*мин', r'(\d+)\s*минут', r'(\d+)\s*м', r'(\d+)\s*час', r'(\d+)\s*ч']
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            duration = int(match.group(1))
-            if 'час' in pattern or 'ч' in pattern:
-                return duration * 60
-            return duration
+    match = re.search(r'(\d+)\s*(мин|минут|м|час|ч)', text, re.IGNORECASE)
+    if match:
+        duration = int(match.group(1))
+        if 'час' in match.group(2) or 'ч' in match.group(2):
+            return duration * 60
+        return duration
     return 10
 
-def detect_command(text: str) -> tuple:
-    """Определяет команду по тексту"""
+def detect_command(text: str) -> Tuple[Optional[str], Optional[CommandData]]:
     text_lower = text.lower()
     
     for command, patterns in COMMAND_PATTERNS.items():
         for pattern in patterns:
             if re.search(pattern, text_lower, re.IGNORECASE):
-                return command, None
+                data = CommandData(command=command)
+                
+                if command in ["ban", "mute", "hug", "kiss", "slap"]:
+                    data.target = extract_username(text)
+                    if command == "mute":
+                        data.duration = extract_duration(text)
+                
+                elif command == "gift":
+                    data.amount = extract_amount(text)
+                    data.target = extract_username(text)
+                
+                elif command == "roulette":
+                    data.amount = extract_amount(text) or 100
+                    data.color = extract_color(text)
+                
+                elif command == "slot":
+                    data.amount = extract_amount(text) or 100
+                
+                elif command == "duel":
+                    data.target = extract_username(text)
+                    data.amount = extract_amount(text) or 50
+                
+                elif command == "rps":
+                    data.choice = extract_choice(text)
+                
+                return command, data
     
-    username = extract_username(text)
-    if username:
-        amount = extract_amount(text)
-        if amount:
-            return 'gift', amount
-    
+    # Проверка дуэли отдельно
     if 'дуэль' in text_lower or 'вызови' in text_lower:
-        username = extract_username(text)
-        if username:
-            amount = extract_amount(text) or 50
-            return 'duel', {'target': username, 'amount': amount}
+        target = extract_username(text)
+        if target:
+            return 'duel', CommandData(command='duel', target=target, amount=extract_amount(text) or 50)
     
+    # Проверка РП команд
     for action in RP_ACTIONS.keys():
         if action in text_lower:
-            username = extract_username(text)
-            if username:
-                return action, username
-    
-    if 'рулетк' in text_lower:
-        amount = extract_amount(text) or 100
-        color = extract_color(text)
-        return 'roulette', {'amount': amount, 'color': color}
-    
-    if 'слот' in text_lower:
-        amount = extract_amount(text) or 100
-        return 'slot', amount
-    
-    choice = extract_choice(text)
-    if choice:
-        return 'rps', choice
+            target = extract_username(text)
+            if target:
+                return action, CommandData(command=action, target=target)
     
     return None, None
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 async def find_user_by_name(chat_id: int, name: str):
-    """Находит пользователя по имени или username"""
     try:
         chat = await bot.get_chat(chat_id)
         async for member in chat.get_members():
@@ -173,9 +221,31 @@ async def find_user_by_name(chat_id: int, name: str):
                 return member.user
             if member.user.full_name and name.lower() in member.user.full_name.lower():
                 return member.user
-    except:
-        pass
+    except Exception as e:
+        log_error(f"Ошибка поиска пользователя: {e}")
     return None
+
+async def safe_send_message(chat_id: int, user_id: int, text: str):
+    """Безопасная отправка сообщения в ЛС"""
+    try:
+        await bot.send_message(user_id, text)
+    except Exception:
+        pass  # Пользователь заблокировал бота или не начал диалог
+
+async def atomic_transaction(user_id: int, chat_id: int, amount: int, operation: str) -> bool:
+    """Атомарная транзакция с блокировкой"""
+    async with asyncio.Lock():
+        if operation == "spend":
+            return spend_balance(user_id, chat_id, amount)
+        elif operation == "add":
+            update_balance(user_id, chat_id, amount)
+            return True
+    return False
+
+# ========== ОСНОВНОЙ ОБРАБОТЧИК ==========
+def set_bot(bot_instance: Bot):
+    global bot
+    bot = bot_instance
 
 @router.message(F.text)
 async def smart_parser(message: Message, state: FSMContext):
@@ -186,23 +256,19 @@ async def smart_parser(message: Message, state: FSMContext):
     text = message.text
     text_lower = text.lower()
     
-    # Проверяем, обращаются ли к боту
+    # Проверяем обращение к боту
     is_bot_mentioned = any(name in text_lower for name in BOT_NAMES)
-    
-    # Проверяем команды со слешем (всегда работают)
-    if text_lower.startswith('/'):
-        return  # пропускаем, они обрабатываются другими роутерами
-    
-    # Если не обращаются к боту — пропускаем
     if not is_bot_mentioned:
         return
     
     user_id = message.from_user.id
     chat_id = message.chat.id
     
+    # Добавляем пользователя
     add_user(user_id, chat_id, message.from_user.username)
     
-    command, params = detect_command(text)
+    # Определяем команду
+    command, data = detect_command(text)
     
     if not command:
         await message.answer(
@@ -223,20 +289,30 @@ async def smart_parser(message: Message, state: FSMContext):
         )
         return
     
+    # Rate limiting
+    ok, wait_time = await check_rate_limit(user_id, command)
+    if not ok:
+        await message.answer(f"⏰ Слишком часто! Подождите {wait_time} секунд.")
+        return
+    
     # ========== БАН ==========
     if command == "ban":
         if not await can_ban(chat_id, user_id):
             await message.answer("❌ У вас нет прав банить пользователей.")
             return
         
-        username = extract_username(text)
-        if not username:
+        if not data.target:
             await message.answer("❌ Укажите пользователя: @NEXUS забани @username")
             return
         
-        target_user = await find_user_by_name(chat_id, username)
+        valid, msg = validate_username(data.target)
+        if not valid:
+            await message.answer(msg)
+            return
+        
+        target_user = await find_user_by_name(chat_id, data.target)
         if not target_user:
-            await message.answer(f"❌ Пользователь {username} не найден.")
+            await message.answer(f"❌ Пользователь {data.target} не найден.")
             return
         
         try:
@@ -252,17 +328,16 @@ async def smart_parser(message: Message, state: FSMContext):
             await message.answer("❌ У вас нет прав мутить пользователей.")
             return
         
-        username = extract_username(text)
-        if not username:
+        if not data.target:
             await message.answer("❌ Укажите пользователя: @NEXUS заглуши @username")
             return
         
-        target_user = await find_user_by_name(chat_id, username)
+        target_user = await find_user_by_name(chat_id, data.target)
         if not target_user:
-            await message.answer(f"❌ Пользователь {username} не найден.")
+            await message.answer(f"❌ Пользователь {data.target} не найден.")
             return
         
-        duration = extract_duration(text)
+        duration = data.duration or 10
         try:
             permissions = ChatPermissions(can_send_messages=False)
             await message.chat.restrict(target_user.id, permissions)
@@ -298,55 +373,66 @@ async def smart_parser(message: Message, state: FSMContext):
     
     # ========== ЕЖЕДНЕВНЫЙ БОНУС ==========
     elif command == "daily":
-        now = datetime.now()
-        last = last_daily.get(user_id)
-        
-        if last and now - last < timedelta(hours=24):
-            hours_left = 24 - (now - last).seconds // 3600
-            await message.answer(f"⏰ Бонус уже получен сегодня. Следующий через {hours_left} часов.")
-            return
-        
-        update_balance(user_id, chat_id, 50)
-        last_daily[user_id] = now
-        add_user(user_id, chat_id, message.from_user.username)
+        async with daily_lock:
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT last_bonus FROM users WHERE user_id=? AND chat_id=?",
+                    (user_id, chat_id)
+                ).fetchone()
+                last_bonus = row["last_bonus"] if row else None
+            
+            if last_bonus == today:
+                await message.answer("⏰ Бонус уже получен сегодня. Завтра будет новый!")
+                return
+            
+            update_balance(user_id, chat_id, 50)
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE users SET last_bonus=? WHERE user_id=? AND chat_id=?",
+                    (today, user_id, chat_id)
+                )
         
         new_balance = get_balance(user_id, chat_id)
         await message.answer(f"🎁 **Ежедневный бонус!**\n\n+50 NCoin\n💰 Баланс: {new_balance} NCoin")
     
     # ========== ПОДАРОК ==========
     elif command == "gift":
-        amount = params if isinstance(params, int) else extract_amount(text)
-        if not amount:
+        if not data.amount:
             await message.answer("🎁 Укажите сумму: @NEXUS подари @username 100 монет")
             return
         
-        username = extract_username(text)
-        if not username:
+        valid, msg = validate_amount(data.amount, 10, 5000)
+        if not valid:
+            await message.answer(msg)
+            return
+        
+        if not data.target:
             await message.answer("🎁 Укажите получателя: @NEXUS подари @username 100 монет")
             return
         
-        target_user = await find_user_by_name(chat_id, username)
+        target_user = await find_user_by_name(chat_id, data.target)
         if not target_user:
-            await message.answer(f"❌ Пользователь {username} не найден.")
+            await message.answer(f"❌ Пользователь {data.target} не найден.")
             return
         
         balance = get_balance(user_id, chat_id)
-        if balance < amount:
+        if balance < data.amount:
             await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {balance}")
             return
         
-        spend_balance(user_id, chat_id, amount)
-        add_free_balance(target_user.id, chat_id, amount)
-        
-        await message.answer(f"🎁 Вы подарили {amount} NCoin пользователю @{username}")
-        try:
-            await bot.send_message(target_user.id, f"🎁 Вам подарили {amount} NCoin от {message.from_user.full_name}")
-        except:
-            pass
+        if await atomic_transaction(user_id, chat_id, data.amount, "spend"):
+            add_free_balance(target_user.id, chat_id, data.amount)
+            await message.answer(f"🎁 Вы подарили {data.amount} NCoin пользователю @{data.target}")
+            await safe_send_message(chat_id, target_user.id, f"🎁 Вам подарили {data.amount} NCoin от {message.from_user.full_name}")
     
     # ========== КАМЕНЬ-НОЖНИЦЫ-БУМАГА ==========
     elif command == "rps":
-        choice = params if isinstance(params, str) else extract_choice(text)
+        choice = data.choice
+        if not choice:
+            choice = extract_choice(text)
         if not choice:
             await message.answer("🎮 Выберите: камень, ножницы или бумага\nПример: @NEXUS камень")
             return
@@ -374,20 +460,22 @@ async def smart_parser(message: Message, state: FSMContext):
     
     # ========== РУЛЕТКА ==========
     elif command == "roulette":
-        if isinstance(params, dict):
-            amount = params.get('amount', 100)
-            color = params.get('color', 'red')
-        else:
-            amount = extract_amount(text) or 100
-            color = extract_color(text)
+        amount = data.amount or 100
+        valid, msg = validate_amount(amount, 10, 10000)
+        if not valid:
+            await message.answer(msg)
+            return
         
+        color = data.color or 'red'
         balance = get_balance(user_id, chat_id)
+        
         if balance < amount:
             await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {balance}")
             return
         
-        # Списываем ставку
-        spend_balance(user_id, chat_id, amount)
+        if not await atomic_transaction(user_id, chat_id, amount, "spend"):
+            await message.answer("❌ Ошибка при списании средств")
+            return
         
         result = random.choice(['red', 'black'])
         
@@ -410,15 +498,20 @@ async def smart_parser(message: Message, state: FSMContext):
     
     # ========== СЛОТ-МАШИНА ==========
     elif command == "slot":
-        amount = params if isinstance(params, int) else extract_amount(text) or 100
+        amount = data.amount or 100
+        valid, msg = validate_amount(amount, 10, 10000)
+        if not valid:
+            await message.answer(msg)
+            return
         
         balance = get_balance(user_id, chat_id)
         if balance < amount:
             await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {balance}")
             return
         
-        # Списываем ставку
-        spend_balance(user_id, chat_id, amount)
+        if not await atomic_transaction(user_id, chat_id, amount, "spend"):
+            await message.answer("❌ Ошибка при списании средств")
+            return
         
         slots = ["🍒", "🍋", "🍊", "🍉", "🔔", "💎", "7️⃣"]
         result = [random.choice(slots) for _ in range(3)]
@@ -458,20 +551,19 @@ async def smart_parser(message: Message, state: FSMContext):
     
     # ========== ДУЭЛЬ ==========
     elif command == "duel":
-        if isinstance(params, dict):
-            target_name = params.get('target')
-            amount = params.get('amount', 50)
-        else:
-            target_name = extract_username(text)
-            amount = extract_amount(text) or 50
-        
-        if not target_name:
+        if not data.target:
             await message.answer("⚔️ Укажите соперника: @NEXUS дуэль @username 100")
             return
         
-        target_user = await find_user_by_name(chat_id, target_name)
+        amount = data.amount or 50
+        valid, msg = validate_amount(amount, 10, 5000)
+        if not valid:
+            await message.answer(msg)
+            return
+        
+        target_user = await find_user_by_name(chat_id, data.target)
         if not target_user:
-            await message.answer(f"❌ Пользователь {target_name} не найден.")
+            await message.answer(f"❌ Пользователь {data.target} не найден.")
             return
         
         balance = get_balance(user_id, chat_id)
@@ -479,27 +571,26 @@ async def smart_parser(message: Message, state: FSMContext):
             await message.answer(f"❌ Недостаточно NCoin. Ваш баланс: {balance}")
             return
         
-        # Сохраняем дуэль
         duel_id = f"{chat_id}_{user_id}_{target_user.id}"
         pending_duels[duel_id] = {
             'challenger_id': user_id,
             'challenger_name': message.from_user.full_name,
             'target_id': target_user.id,
-            'target_name': target_name,
+            'target_name': data.target,
             'amount': amount,
-            'chat_id': chat_id
+            'chat_id': chat_id,
+            'created_at': time.time()
         }
         
         await message.answer(
             f"⚔️ **ДУЭЛЬ!**\n\n"
-            f"{message.from_user.full_name} вызывает @{target_name} на дуэль!\n"
+            f"{message.from_user.full_name} вызывает @{data.target} на дуэль!\n"
             f"💰 Ставка: {amount} NCoin\n\n"
-            f"@{target_name}, принять вызов? Напишите: @NEXUS принять дуэль"
+            f"@{data.target}, принять вызов? Напишите: @NEXUS принять дуэль"
         )
     
     # ========== ПРИНЯТЬ ДУЭЛЬ ==========
     elif command == "accept_duel":
-        # Ищем ожидающую дуэль
         duel_id = None
         for d_id, duel in pending_duels.items():
             if duel['target_id'] == user_id and duel['chat_id'] == chat_id:
@@ -517,7 +608,6 @@ async def smart_parser(message: Message, state: FSMContext):
         challenger_name = duel['challenger_name']
         target_name = duel['target_name']
         
-        # Проверяем баланс у обоих
         balance_challenger = get_balance(challenger_id, chat_id)
         balance_target = get_balance(target_id, chat_id)
         
@@ -531,11 +621,17 @@ async def smart_parser(message: Message, state: FSMContext):
             del pending_duels[duel_id]
             return
         
-        # Списываем ставки
-        spend_balance(challenger_id, chat_id, amount)
-        spend_balance(target_id, chat_id, amount)
+        if not await atomic_transaction(challenger_id, chat_id, amount, "spend"):
+            await message.answer("❌ Ошибка при списании средств у challenger")
+            del pending_duels[duel_id]
+            return
         
-        # Результат дуэли (случайный победитель)
+        if not await atomic_transaction(target_id, chat_id, amount, "spend"):
+            await message.answer("❌ Ошибка при списании средств у target")
+            update_balance(challenger_id, chat_id, amount)
+            del pending_duels[duel_id]
+            return
+        
         winner_id = random.choice([challenger_id, target_id])
         winner_name = challenger_name if winner_id == challenger_id else target_name
         win_amount = amount * 2
@@ -549,29 +645,40 @@ async def smart_parser(message: Message, state: FSMContext):
             f"💰 Выигрыш: {win_amount} NCoin"
         )
         
-        # Уведомляем победителя
-        try:
-            await bot.send_message(winner_id, f"🏆 Вы выиграли дуэль! +{win_amount} NCoin")
-        except:
-            pass
+        await safe_send_message(chat_id, winner_id, f"🏆 Вы выиграли дуэль! +{win_amount} NCoin")
         
         del pending_duels[duel_id]
     
+    # ========== ОТКЛОНИТЬ ДУЭЛЬ ==========
+    elif command == "decline_duel":
+        duel_id = None
+        for d_id, duel in pending_duels.items():
+            if duel['target_id'] == user_id and duel['chat_id'] == chat_id:
+                duel_id = d_id
+                break
+        
+        if duel_id:
+            duel = pending_duels[duel_id]
+            challenger_id = duel['challenger_id']
+            await message.answer(f"❌ Дуэль отклонена. {duel['challenger_name']}, ваш вызов не принят.")
+            del pending_duels[duel_id]
+        else:
+            await message.answer("❌ Нет активного вызова на дуэль.")
+    
     # ========== РП-КОМАНДЫ ==========
     elif command in RP_ACTIONS:
-        username = params if isinstance(params, str) else extract_username(text)
-        if not username:
+        if not data.target:
             await message.answer(f"{RP_ACTIONS[command]['emoji']} Укажите пользователя: @NEXUS {command} @username")
             return
         
-        target_user = await find_user_by_name(chat_id, username)
+        target_user = await find_user_by_name(chat_id, data.target)
         if not target_user:
-            await message.answer(f"❌ Пользователь {username} не найден.")
+            await message.answer(f"❌ Пользователь {data.target} не найден.")
             return
         
         variation = random.choice(RP_ACTIONS[command]["variations"])
         await message.answer(
-            f"{RP_ACTIONS[command]['emoji']} **{message.from_user.full_name}** {variation.format(target=f'@{username}')}"
+            f"{RP_ACTIONS[command]['emoji']} **{message.from_user.full_name}** {variation.format(target=f'@{data.target}')}"
         )
     
     # ========== МЕНЮ ==========
@@ -615,7 +722,6 @@ async def smart_parser(message: Message, state: FSMContext):
     
     # ========== ТОП ==========
     elif command == "top":
-        from database.db import get_db
         with get_db() as conn:
             results = conn.execute("""
                 SELECT username, (free_balance + paid_balance) as total
