@@ -29,23 +29,14 @@ def _normalize_for_signing(data: Any) -> bytes:
         return json.dumps(data).encode(DEFAULT_ENCODING)
 
 
-def generate_signature(
-    data: Any,
-    secret_key: Optional[str] = None,
-    algorithm: str = 'sha256'
-) -> str:
+def generate_signature(data: Any, secret_key: Optional[str] = None, algorithm: str = 'sha256') -> str:
     key = (secret_key or SECRET_KEY).encode(DEFAULT_ENCODING)
     data_bytes = _normalize_for_signing(data)
     return hmac.new(key, data_bytes, hashlib.sha256).hexdigest()
 
 
-def verify_signature(
-    data: Any,
-    signature: str,
-    secret_key: Optional[str] = None,
-    algorithm: str = 'sha256',
-    ttl: Optional[int] = None
-) -> Tuple[bool, Optional[str]]:
+def verify_signature(data: Any, signature: str, secret_key: Optional[str] = None,
+                    algorithm: str = 'sha256', ttl: Optional[int] = None) -> Tuple[bool, Optional[str]]:
     try:
         expected = generate_signature(data, secret_key, algorithm)
         if not hmac.compare_digest(signature, expected):
@@ -64,15 +55,8 @@ def sanitize_html(text: str, max_length: int = 4096) -> str:
 
 
 async def run_security_tests() -> dict:
-    return {
-        'key_generation': True,
-        'signatures': True,
-        'password_hashing': True,
-        'encryption': True,
-        'sanitization': True,
-        'csrf': True,
-        'rate_limiting': True,
-    }
+    return {'key_generation': True, 'signatures': True, 'password_hashing': True,
+            'encryption': True, 'sanitization': True, 'csrf': True, 'rate_limiting': True}
 
 
 class SecureEncryption:
@@ -144,18 +128,8 @@ password_login_limiter = RateLimiter(max_attempts=5, window_seconds=300)
 password_reset_limiter = RateLimiter(max_attempts=3, window_seconds=3600)
 api_call_limiter = RateLimiter(max_attempts=60, window_seconds=60)
 
-
 __all__ = [
-    'generate_signature',
-    'verify_signature',
-    'sanitize_html',
-    'run_security_tests',
-    'encryptor',
-    'csrf',
-    'password_login_limiter',
-    'password_reset_limiter',
-    'api_call_limiter',
-    'SecureEncryption',
-    'CSRFProtection',
-    'RateLimiter',
+    'generate_signature', 'verify_signature', 'sanitize_html', 'run_security_tests',
+    'encryptor', 'csrf', 'password_login_limiter', 'password_reset_limiter', 'api_call_limiter',
+    'SecureEncryption', 'CSRFProtection', 'RateLimiter'
 ]
