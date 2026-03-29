@@ -29,7 +29,6 @@ from config import (
 )
 from database import db
 from utils.rate_limiter import rate_limit
-from utils.security import verify_signature, generate_signature
 from utils.logger import logger
 
 # Prometheus metrics - ИСПРАВЛЕННАЯ ВЕРСИЯ
