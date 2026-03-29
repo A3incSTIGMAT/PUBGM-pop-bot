@@ -1,11 +1,14 @@
 import os
 
 # Telegram Bot
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ← было TELEGRAM_TOKEN
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Database
 DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/nexus.db")
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+
+# Redis (опционально)
+REDIS_URL = os.getenv("REDIS_URL", None)
 
 # Game settings
 MIN_BET = int(os.getenv("MIN_BET", "10"))
