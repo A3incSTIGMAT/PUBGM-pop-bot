@@ -1,10 +1,9 @@
 meta:
-  version: 1.0
-  toolchain: python
+  version: 3.11
 
 build:
   requirementsPath: requirements.txt
-  useCache: false
+  useCache: true
 
 run:
   command: python bot.py
