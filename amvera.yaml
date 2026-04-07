@@ -1,0 +1,10 @@
+meta:
+  version: 3.11
+
+build:
+  requirementsPath: requirements.txt
+  useCache: false
+
+run:
+  command: python bot.py
+  persistenceMount: /data
