@@ -1,13 +1,14 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is required")
 
-ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+if ADMIN_IDS_RAW:
+    ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",")]
+else:
+    ADMIN_IDS = []
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/nexus.db")
 
@@ -17,9 +18,9 @@ DUEL_TIMEOUT = int(os.getenv("DUEL_TIMEOUT", "60"))
 RATE_LIMIT_GAMES = int(os.getenv("RATE_LIMIT_GAMES", "30"))
 
 MAX_WARN_COUNT = int(os.getenv("MAX_WARN_COUNT", "3"))
-MAX_CLEAR_MESSAGES = int(os.getenv("MAX_CLEAR_MESSAGES", "100"))
+MAX_CLEAR_MESSAGES = int(os.getenv("MAX_CLEAR_MESSAGES", "10"))
 MAX_MUTE_DAYS = int(os.getenv("MAX_MUTE_DAYS", "30"))
-RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "3"))
+RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "60"))
 
 BOT_ENV = os.getenv("BOT_ENV", "development")
 
@@ -30,3 +31,4 @@ OZON_SBP_QR_URL = os.getenv("OZON_SBP_QR_URL", "")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 AI_ENABLED = bool(OPENROUTER_API_KEY)
+
