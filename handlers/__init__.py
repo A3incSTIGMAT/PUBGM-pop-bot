@@ -1,2 +1,2 @@
-from . import start, profile, economy, games, moderation, stats, social, vip
-from . import ai_assistant, payments, shop, about, help, smart_commands
+# handlers/__init__.py
+# Пустой файл — все импорты делаются в bot.py
