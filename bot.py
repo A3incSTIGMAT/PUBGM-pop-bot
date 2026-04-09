@@ -29,12 +29,11 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Импорт роутеров (с проверкой наличия файлов)
+# Импорт роутеров (только те, которые есть)
 try:
     from handlers import (
         start, profile, economy, games, moderation,
-        stats, social, vip, ai_assistant, payments,
-        shop, about, help, smart_commands
+        ai_assistant, smart_commands
     )
     
     dp.include_routers(
@@ -43,14 +42,7 @@ try:
         economy.router,
         games.router,
         moderation.router,
-        stats.router,
-        social.router,
-        vip.router,
         ai_assistant.router,
-        payments.router,
-        shop.router,
-        about.router,
-        help.router,
         smart_commands.router
     )
     logger.info("✅ Все роутеры загружены")
