@@ -1,8 +1,12 @@
 meta:
-  version: "3.11"
+  version: "1.0"
+  toolchain:
+    name: pip
+    version: "3.11"
 
 build:
-  dockerfile: Dockerfile
+  requirementsPath: "requirements.txt"
 
 run:
+  scriptName: "bot.py"
   persistenceMount: "/data"
