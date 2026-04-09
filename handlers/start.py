@@ -74,11 +74,11 @@ async def cmd_start(message: types.Message):
 """
         await message.answer(welcome_back, parse_mode=ParseMode.HTML)
     
-    # Отправляем клавиатуру (если есть функция)
+    # Отправляем клавиатуру (исправлено: main_menu вместо main_keyboard)
     try:
-        from utils.keyboards import main_keyboard
+        from utils.keyboards import main_menu
         await message.answer("📱 <b>Главное меню:</b>", 
-                            reply_markup=main_keyboard(),
+                            reply_markup=main_menu(),
                             parse_mode=ParseMode.HTML)
     except ImportError:
         pass  # Клавиатура не подключена, игнорируем
@@ -194,3 +194,11 @@ async def cmd_profile(message: types.Message):
 <i>Продолжайте играть и повышайте свой статус!</i>
 """
     await message.answer(profile_text, parse_mode=ParseMode.HTML)
+
+
+# Обработчик callback "main_menu" (исправлено)
+@router.callback_query(lambda c: c.data == "main_menu")
+async def back_to_main_menu(callback: types.CallbackQuery):
+    from utils.keyboards import main_menu
+    await callback.message.edit_text("📱 Главное меню:", reply_markup=main_menu())
+    await callback.answer()
