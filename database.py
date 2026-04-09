@@ -1,0 +1,135 @@
+import aiosqlite
+import os
+import json
+from datetime import datetime
+from typing import Dict, Optional
+
+from config import DB_PATH
+
+class Database:
+    def __init__(self):
+        self.db_path = DB_PATH
+        self.conn = None
+    
+    async def init(self):
+        """Инициализация базы данных"""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        
+        self.conn = await aiosqlite.connect(self.db_path)
+        
+        # Таблица пользователей
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                balance INTEGER DEFAULT 1000,
+                daily_streak INTEGER DEFAULT 0,
+                last_daily TEXT,
+                vip_level INTEGER DEFAULT 0,
+                vip_until TEXT,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                register_date TEXT,
+                warns TEXT DEFAULT '[]'
+            )
+        """)
+        
+        # Таблица транзакций
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_id INTEGER,
+                to_id INTEGER,
+                amount INTEGER,
+                reason TEXT,
+                date TEXT
+            )
+        """)
+        
+        # Таблица магазина
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS shop_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                price INTEGER,
+                description TEXT
+            )
+        """)
+        
+        await self.conn.commit()
+        
+        await self._add_default_shop_items()
+        
+        return self
+    
+    async def _add_default_shop_items(self):
+        cursor = await self.conn.execute("SELECT COUNT(*) FROM shop_items")
+        count = (await cursor.fetchone())[0]
+        await cursor.close()
+        
+        if count == 0:
+            items = [
+                ("⭐ VIP 1 месяц", 5000, "Доступ к VIP-комнатам + бонусы"),
+                ("🎰 10 билетов на слот", 400, "10 игр в слот-машину"),
+                ("💎 1000 монет", 100, "Пополнение баланса"),
+                ("🎁 Случайный подарок", 200, "Получи случайную награду")
+            ]
+            for item in items:
+                await self.conn.execute("INSERT INTO shop_items (name, price, description) VALUES (?, ?, ?)", item)
+            await self.conn.commit()
+    
+    async def close(self):
+        """Закрытие соединения"""
+        if self.conn:
+            await self.conn.close()
+    
+    async def get_user(self, user_id: int) -> Optional[Dict]:
+        """Получить пользователя"""
+        cursor = await self.conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        
+        if row:
+            return {
+                "user_id": row[0],
+                "username": row[1],
+                "first_name": row[2],
+                "balance": row[3],
+                "daily_streak": row[4],
+                "last_daily": row[5],
+                "vip_level": row[6],
+                "vip_until": row[7],
+                "wins": row[8],
+                "losses": row[9],
+                "register_date": row[10],
+                "warns": json.loads(row[11]) if row[11] else []
+            }
+        return None
+    
+    async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
+        """Создать пользователя"""
+        await self.conn.execute("""
+            INSERT INTO users (user_id, username, first_name, balance, register_date)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, username, first_name, balance, datetime.now().isoformat()))
+        await self.conn.commit()
+    
+    async def update_balance(self, user_id: int, delta: int, reason: str = ""):
+        """Обновить баланс"""
+        await self.conn.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
+        await self.conn.commit()
+        
+        if reason:
+            await self.conn.execute("""
+                INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, user_id, delta, reason, datetime.now().isoformat()))
+            await self.conn.commit()
+    
+    async def get_balance(self, user_id: int) -> int:
+        """Получить баланс"""
+        user = await self.get_user(user_id)
+        return user["balance"] if user else 0
+
+db = Database()
