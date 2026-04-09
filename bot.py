@@ -5,50 +5,46 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-# Импорты конфига и БД
 from config import BOT_TOKEN
 from database import db
 
-# Создаём папку для данных Amvera
 DATA_DIR = "/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Логирование
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Проверка токена
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не задан в переменных окружения!")
+    logger.error("❌ BOT_TOKEN не задан!")
     exit(1)
 
-# Инициализация бота
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Импорт роутеров (только те, которые есть)
-try:
-    from handlers import (
-        start, profile, economy, games, moderation,
-        ai_assistant, smart_commands
-    )
-    
-    dp.include_routers(
-        start.router,
-        profile.router,
-        economy.router,
-        games.router,
-        moderation.router,
-        ai_assistant.router,
-        smart_commands.router
-    )
-    logger.info("✅ Все роутеры загружены")
-except ImportError as e:
-    logger.error(f"❌ Ошибка импорта роутеров: {e}")
-    exit(1)
+# Импортируем ТОЛЬКО существующие модули
+from handlers.start import router as start_router
+from handlers.profile import router as profile_router
+from handlers.economy import router as economy_router
+from handlers.games import router as games_router
+from handlers.moderation import router as moderation_router
+from handlers.ai_assistant import router as ai_assistant_router
+from handlers.smart_commands import router as smart_commands_router
+
+# Подключаем роутеры
+dp.include_routers(
+    start_router,
+    profile_router,
+    economy_router,
+    games_router,
+    moderation_router,
+    ai_assistant_router,
+    smart_commands_router
+)
+
+logger.info("✅ Все роутеры загружены")
 
 async def on_startup():
     await db.init()
