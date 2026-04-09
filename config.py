@@ -31,6 +31,10 @@ MAX_WARN_COUNT = int(os.getenv("MAX_WARN_COUNT", "3"))
 VIP_PRICE = int(os.getenv("VIP_PRICE", "5000"))
 VIP_DURATION_DAYS = int(os.getenv("VIP_DURATION_DAYS", "30"))
 
+# ==================== AI (OpenRouter) ====================
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+AI_ENABLED = os.getenv("AI_ENABLED", "False").lower() == "true"
+
 # ==================== ЛОГИРОВАНИЕ ====================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
@@ -43,9 +47,6 @@ OZON_BANK_NAME = os.getenv("OZON_BANK_NAME", "Озон Банк")
 OZON_RECEIVER = os.getenv("OZON_RECEIVER", "")
 OZON_CARD_LAST4 = os.getenv("OZON_CARD_LAST4", "")
 OZON_SBP_QR_URL = os.getenv("OZON_SBP_QR_URL", "")
-
-# ==================== AI (опционально) ====================
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # ==================== ПРОВЕРКА ТОКЕНА ====================
 if not BOT_TOKEN:
