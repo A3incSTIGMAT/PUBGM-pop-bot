@@ -37,14 +37,14 @@ async def cmd_tag(message: types.Message):
 @router.message(Command("all"))
 async def cmd_all(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="confirm_all"),
+        [InlineKeyboardButton(text="✅ Да, мне есть 18", callback_data="confirm_all"),
          InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_all")]
     ])
     
     await message.answer(
         "📢 *МАССОВОЕ УПОМИНАНИЕ*\n\n"
         "⚠️ Вы собираетесь упомянуть всех участников чата.\n\n"
-        "Подтвердите действие:",
+        "Подтвердите, что вам есть 18 лет:",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -55,49 +55,58 @@ async def confirm_all(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     user_name = callback.from_user.full_name
     
-    # Сразу отвечаем на callback
-    await callback.answer("✅ Оповещение отправляется!")
+    # Сразу отвечаем, чтобы бот не вис
+    await callback.answer("✅ Отправляю оповещение!")
     
-    # Получаем список администраторов (это быстро)
-    admins = []
+    # Получаем всех участников с username (для уведомлений)
+    mentions = []
     try:
-        administrators = await callback.bot.get_chat_administrators(chat_id)
-        for admin in administrators:
-            if not admin.user.is_bot:
-                admins.append(admin.user)
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        # Пытаемся получить всех участников чата
+        async for member in callback.bot.get_chat_members(chat_id):
+            if not member.user.is_bot and member.user.id != callback.from_user.id:
+                if member.user.username:
+                    mentions.append(f"@{member.user.username}")
+                else:
+                    # У пользователей без username всё равно будет уведомление через ID
+                    mentions.append(f"[{member.user.full_name}](tg://user?id={member.user.id})")
+                if len(mentions) >= 50:
+                    break
+    except:
+        # Если не получилось получить всех, берём хотя бы администраторов
+        try:
+            admins = await callback.bot.get_chat_administrators(chat_id)
+            for admin in admins:
+                if not admin.user.is_bot and admin.user.id != callback.from_user.id:
+                    if admin.user.username:
+                        mentions.append(f"@{admin.user.username}")
+                    else:
+                        mentions.append(f"[{admin.user.full_name}](tg://user?id={admin.user.id})")
+        except:
+            pass
+    
+    if not mentions:
+        # Если совсем никого не нашли
+        await callback.message.edit_text(
+            f"🔔 *{user_name}* обращается к участникам чата!\n\n"
+            f"📢 ВНИМАНИЕ ВСЕМ!",
+            parse_mode="Markdown"
+        )
         return
     
-    # Формируем упоминания администраторов
-    admin_mentions = []
-    for admin in admins:
-        if admin.username:
-            admin_mentions.append(f"@{admin.username}")
-        else:
-            admin_mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
+    # Формируем одно сообщение со всеми упоминаниями
+    mention_text = " ".join(mentions)
     
-    # Отправляем сообщение с упоминанием администраторов
-    admin_text = f"🔔 *ОБЩИЙ СБОР!* 🔔\n\n👤 {user_name}\n\n📢 Важное сообщение!\n\n"
-    if admin_mentions:
-        admin_text += f"🛡️ *Администраторы:* {' '.join(admin_mentions)}\n\n"
-    admin_text += f"👥 *Участники:* Всем внимание!"
-    
-    # Редактируем исходное сообщение
-    await callback.message.edit_text(admin_text, parse_mode="Markdown")
-    
-    # Дополнительно отправляем простое сообщение в чат для остальных
-    await callback.bot.send_message(
-        chat_id,
-        f"🔔 *ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!*\n\n"
-        f"👤 {user_name} обращается к сообществу!\n\n"
-        f"👉 Пожалуйста, обратите внимание на сообщение выше.",
+    # Отправляем сообщение с упоминаниями (у всех сработает уведомление)
+    await callback.message.edit_text(
+        f"🔔 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!* 🔔\n\n"
+        f"👤 *{user_name}*\n\n"
+        f"📢 Важное сообщение для всех участников!\n\n"
+        f"{mention_text}",
         parse_mode="Markdown"
     )
     
-    # Удаляем кнопки через пару секунд
+    # Удаляем кнопки
     try:
-        await asyncio.sleep(2)
         await callback.message.edit_reply_markup(reply_markup=None)
     except:
         pass
@@ -115,7 +124,7 @@ async def cmd_tag_role(message: types.Message):
     if len(args) < 2:
         await message.answer(
             "📢 Использование: `/tagrole админы текст`\n"
-            "Пример: `/tagrole админы Внимание, проверьте чат!`",
+            "Пример: `/tagrole админы Внимание!`",
             parse_mode="Markdown"
         )
         return
@@ -160,6 +169,8 @@ async def cmd_tag_role(message: types.Message):
     await message.answer(result, parse_mode="Markdown")
 
 
+# ==================== КНОПКИ В МЕНЮ ====================
+
 @router.callback_query(lambda c: c.data == "tag_menu")
 async def tag_menu(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -171,9 +182,13 @@ async def tag_menu(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "📢 *Тэги и упоминания*\n\n"
         "*Команды:*\n"
-        "• `/all` — оповестить всех\n"
+        "• `/all` — оповестить всех (с уведомлениями)\n"
         "• `/tag @user текст` — упомянуть пользователя\n"
-        "• `/tagrole админы текст` — упомянуть админов",
+        "• `/tagrole админы текст` — упомянуть админов\n\n"
+        "✨ *Как это работает:*\n"
+        "• Участники получат РЕАЛЬНЫЕ уведомления\n"
+        "• Даже при выключенных уведомлениях в чате\n"
+        "• Бот должен быть администратором",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -223,7 +238,3 @@ async def back_to_menu(callback: types.CallbackQuery):
         reply_markup=main_menu()
     )
     await callback.answer()
-
-
-# Импортируем asyncio для sleep
-import asyncio
