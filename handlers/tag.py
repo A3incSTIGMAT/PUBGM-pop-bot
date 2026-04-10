@@ -44,7 +44,7 @@ async def cmd_all(message: types.Message):
     await message.answer(
         "📢 *ОБЩИЙ СБОР*\n\n"
         "Будет отправлено несколько сообщений с упоминаниями участников.\n\n"
-        "⚠️ Участники получат уведомления, даже если они выключены в чате!\n\n"
+        "⚠️ Каждый участник получит ЛИЧНОЕ уведомление!\n\n"
         "Начать?",
         parse_mode="Markdown",
         reply_markup=keyboard
@@ -60,23 +60,21 @@ async def start_all(callback: types.CallbackQuery):
     await callback.answer("✅ Начинаю общий сбор!")
     await callback.message.edit_text("🔄 *Идёт общий сбор...*\n\nСобираю участников...", parse_mode="Markdown")
     
-    # Получаем список участников (только тех, у кого есть username)
+    # Получаем список участников
     members = []
     try:
-        # Пытаемся получить участников через get_chat_administrators (это работает всегда)
+        # Получаем администраторов (это всегда работает)
         admins = await callback.bot.get_chat_administrators(chat_id)
         for admin in admins:
             if not admin.user.is_bot and admin.user.id != user_id:
-                if admin.user.username:
-                    members.append(admin.user)
+                members.append(admin.user)
         
-        # Пытаемся получить больше участников (если получится)
+        # Пытаемся получить больше участников
         try:
             async for member in callback.bot.get_chat_members(chat_id):
                 if not member.user.is_bot and member.user.id != user_id and member.user not in members:
-                    if member.user.username:
-                        members.append(member.user)
-                    if len(members) >= 100:
+                    members.append(member.user)
+                    if len(members) >= 50:
                         break
         except:
             pass
@@ -91,8 +89,6 @@ async def start_all(callback: types.CallbackQuery):
         )
         return
     
-    # Отправляем сообщения пачками по 5-10 упоминаний (как в Iris)
-    batch_size = 8  # по 8 участников в сообщении
     cancel_flag[chat_id] = False
     
     # Первое сообщение — заголовок
@@ -100,42 +96,43 @@ async def start_all(callback: types.CallbackQuery):
         chat_id,
         f"🔔 *ОБЩИЙ СБОР!* 🔔\n\n"
         f"👤 *{user_name}*\n\n"
-        f"📢 ВНИМАНИЕ, УЧАСТНИКИ!\n"
+        f"📢 Оповещение участников:\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n",
         parse_mode="Markdown"
     )
     
-    # Отправляем пачки упоминаний
-    for i in range(0, len(members), batch_size):
+    # Отправляем КАЖДОМУ участнику ОТДЕЛЬНОЕ сообщение с упоминанием
+    notified = 0
+    for member in members:
         if cancel_flag.get(chat_id, False):
             await callback.bot.send_message(chat_id, "❌ Общий сбор отменён")
             break
         
-        batch = members[i:i+batch_size]
-        mentions = []
-        for member in batch:
-            if member.username:
-                mentions.append(f"@{member.username}")
-            else:
-                mentions.append(f"[{member.full_name}](tg://user?id={member.id})")
+        # Формируем упоминание
+        if member.username:
+            mention = f"@{member.username}"
+        else:
+            mention = f"[{member.full_name}](tg://user?id={member.id})"
         
-        mention_text = " ".join(mentions)
-        
+        # Отправляем отдельное сообщение для каждого участника
         await callback.bot.send_message(
             chat_id,
-            f"📢 *Участники:*\n{mention_text}\n",
+            f"🔔 *Уведомление для {mention}*\n\n"
+            f"👤 {user_name} обращается к вам!\n\n"
+            f"📢 Пожалуйста, обратите внимание!",
             parse_mode="Markdown"
         )
         
+        notified += 1
         # Небольшая задержка, чтобы не спамить
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
     
     if not cancel_flag.get(chat_id, False):
         await callback.bot.send_message(
             chat_id,
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ *Общий сбор завершён!*\n"
-            f"👥 Упомянуто: {len(members)} участников",
+            f"👥 Оповещено: {notified} участников",
             parse_mode="Markdown"
         )
     
@@ -186,20 +183,19 @@ async def cmd_tag_role(message: types.Message):
         await message.answer("❌ Нет администраторов")
         return
     
-    mentions = []
+    # Отправляем каждому админу отдельное сообщение
     for admin in admins:
         if admin.username:
-            mentions.append(f"@{admin.username}")
+            mention = f"@{admin.username}"
         else:
-            mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
-    
-    # Отправляем как в Iris — отдельное сообщение с упоминаниями
-    await message.answer(
-        f"🛡️ *Обращение к {role}:*\n\n"
-        f"{' '.join(mentions)}\n\n"
-        f"📢 {clean_text if clean_text else 'Внимание!'}",
-        parse_mode="Markdown"
-    )
+            mention = f"[{admin.full_name}](tg://user?id={admin.id})"
+        
+        await message.answer(
+            f"🛡️ *Обращение к {role}:* {mention}\n\n"
+            f"📢 {clean_text if clean_text else 'Внимание!'}",
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(0.3)
 
 
 @router.callback_query(lambda c: c.data == "tag_menu")
@@ -212,10 +208,10 @@ async def tag_menu(callback: types.CallbackQuery):
     
     await callback.message.edit_text(
         "📢 *Общий сбор*\n\n"
-        "• `/all` — начать общий сбор (как в Iris)\n"
+        "• `/all` — начать общий сбор\n"
         "• `/tag @user` — упомянуть пользователя\n"
         "• `/tagrole админы` — написать админам\n\n"
-        "✨ Участники получат уведомления, даже если они выключены в чате!",
+        "✨ Каждый участник получит ЛИЧНОЕ уведомление!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -242,17 +238,22 @@ async def tag_admins(callback: types.CallbackQuery):
         await callback.answer()
         return
     
-    mentions = []
+    # Отправляем каждому админу отдельное сообщение
     for admin in admins:
         if admin.username:
-            mentions.append(f"@{admin.username}")
+            mention = f"@{admin.username}"
         else:
-            mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
+            mention = f"[{admin.full_name}](tg://user?id={admin.id})"
+        
+        await callback.bot.send_message(
+            chat_id,
+            f"🛡️ *Уведомление для {mention}*\n\n"
+            f"👤 {callback.from_user.full_name} обращается к администраторам!",
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(0.3)
     
-    await callback.message.edit_text(
-        f"🛡️ *Администраторы:*\n\n{' '.join(mentions)}",
-        parse_mode="Markdown"
-    )
+    await callback.message.edit_text("✅ Уведомления отправлены администраторам!")
     await callback.answer()
 
 
