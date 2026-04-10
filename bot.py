@@ -8,10 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from config import BOT_TOKEN
-from database import init_db
-from handlers import (
-    start, profile, economy, games, shop, vip, tag, ai_assistant
-)
+from database import db  # ← импортируем db, а не init_db
 
 load_dotenv()
 
@@ -27,7 +24,9 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Регистрация роутеров
+# Импорт роутеров
+from handlers import start, profile, economy, games, shop, vip, tag, ai_assistant
+
 dp.include_routers(
     start.router,
     profile.router,
@@ -40,11 +39,16 @@ dp.include_routers(
 )
 
 async def on_startup():
-    init_db()
+    await db.init()  # ← вызываем db.init(), а не init_db()
     logger.info("✅ NEXUS Bot v5.0 запущен!")
+
+async def on_shutdown():
+    await db.close()
+    logger.info("👋 Бот остановлен")
 
 async def main():
     dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
