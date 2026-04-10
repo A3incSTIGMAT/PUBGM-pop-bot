@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 NEXUS Bot v5.0 — ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ
-Все функции в одном файле для гарантированного запуска на Amvera
 """
 
 import os
@@ -13,7 +12,7 @@ import re
 import random
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from functools import wraps
 
 from aiogram import Bot, Dispatcher, types, F
@@ -35,7 +34,6 @@ DAILY_BONUS = 500
 SLOT_COST = 50
 ROULETTE_MIN = 50
 DUEL_MIN = 100
-MAX_WARN_COUNT = 3
 
 # Создаём папку для данных
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -54,16 +52,13 @@ if not BOT_TOKEN:
 # ==================== БАЗА ДАННЫХ ====================
 
 def get_connection():
-    """Получить соединение с БД"""
     return sqlite3.connect(DATABASE_PATH)
 
 
 def init_db():
-    """Инициализация базы данных"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -81,7 +76,6 @@ def init_db():
         )
     """)
     
-    # Таблица транзакций
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +87,6 @@ def init_db():
         )
     """)
     
-    # Таблица магазина
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shop_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +96,6 @@ def init_db():
         )
     """)
     
-    # Таблица для анкет
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id INTEGER PRIMARY KEY,
@@ -117,7 +109,6 @@ def init_db():
         )
     """)
     
-    # Таблица для возрастов (/all)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_ages (
             user_id INTEGER PRIMARY KEY,
@@ -129,7 +120,6 @@ def init_db():
     conn.commit()
     conn.close()
     
-    # Добавляем товары
     add_default_shop_items()
 
 
@@ -150,7 +140,6 @@ def add_default_shop_items():
 
 
 async def get_user(user_id: int) -> Optional[Dict]:
-    """Получить пользователя"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -159,24 +148,16 @@ async def get_user(user_id: int) -> Optional[Dict]:
     
     if row:
         return {
-            "user_id": row[0],
-            "username": row[1],
-            "first_name": row[2],
-            "balance": row[3],
-            "daily_streak": row[4],
-            "last_daily": row[5],
-            "vip_level": row[6],
-            "vip_until": row[7],
-            "wins": row[8],
-            "losses": row[9],
-            "register_date": row[10],
+            "user_id": row[0], "username": row[1], "first_name": row[2],
+            "balance": row[3], "daily_streak": row[4], "last_daily": row[5],
+            "vip_level": row[6], "vip_until": row[7], "wins": row[8],
+            "losses": row[9], "register_date": row[10],
             "warns": json.loads(row[11]) if row[11] else []
         }
     return None
 
 
 async def create_user(user_id: int, username: str = None, first_name: str = None, balance: int = START_BALANCE):
-    """Создать пользователя"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -188,7 +169,6 @@ async def create_user(user_id: int, username: str = None, first_name: str = None
 
 
 async def update_balance(user_id: int, delta: int, reason: str = ""):
-    """Обновить баланс"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
@@ -206,32 +186,13 @@ async def update_balance(user_id: int, delta: int, reason: str = ""):
         conn.close()
 
 
-async def get_balance(user_id: int) -> int:
-    """Получить баланс"""
-    user = await get_user(user_id)
-    return user["balance"] if user else 0
-
-
 def is_admin(user_id: int) -> bool:
-    """Проверка на админа"""
     return user_id in ADMIN_IDS
-
-
-def admin_required(func):
-    """Декоратор для админ-команд"""
-    @wraps(func)
-    async def wrapper(message: types.Message, *args, **kwargs):
-        if not is_admin(message.from_user.id):
-            await message.answer("❌ У вас нет прав администратора!")
-            return
-        return await func(message, *args, **kwargs)
-    return wrapper
 
 
 # ==================== КЛАВИАТУРЫ ====================
 
 def main_menu() -> InlineKeyboardMarkup:
-    """Главное меню"""
     keyboard = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
@@ -246,7 +207,6 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 def games_menu() -> InlineKeyboardMarkup:
-    """Меню игр"""
     keyboard = [
         [InlineKeyboardButton(text="🎰 Слот", callback_data="game_slot"),
          InlineKeyboardButton(text="🎡 Рулетка", callback_data="game_roulette")],
@@ -258,22 +218,19 @@ def games_menu() -> InlineKeyboardMarkup:
 
 
 def back_button() -> InlineKeyboardMarkup:
-    """Кнопка назад"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ИГР ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def parse_amount(text: str) -> int:
-    """Извлечь число из текста"""
     match = re.search(r'\d+', text)
     return int(match.group()) if match else 0
 
 
 def parse_color(text: str) -> str:
-    """Извлечь цвет для рулетки"""
     text = text.lower()
     if 'красн' in text or 'red' in text:
         return 'red'
@@ -283,7 +240,6 @@ def parse_color(text: str) -> str:
 
 
 def parse_rps_choice(text: str) -> str:
-    """Извлечь выбор для КНБ"""
     text = text.lower()
     if any(word in text for word in ['камень', 'rock', '🗿']):
         return 'rock'
@@ -295,16 +251,24 @@ def parse_rps_choice(text: str) -> str:
 
 
 def choice_to_emoji(choice: str) -> str:
-    """Преобразовать выбор в эмодзи"""
     emojis = {"rock": "🗿", "scissors": "✂️", "paper": "📄"}
     return emojis.get(choice, "?")
 
 
+# ==================== СОЗДАНИЕ БОТА ====================
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+# Хранилище для запросов дуэлей
+duel_requests = {}
+# Хранилище для ожидания возраста
+waiting_ages = {}
+
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
-@router.message(Command("start"))
+@dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработка команды /start"""
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
@@ -316,12 +280,6 @@ async def cmd_start(message: types.Message):
         await message.answer(
             f"✨ <b>Добро пожаловать в NEXUS Bot, {first_name}!</b> ✨\n\n"
             f"🎁 Вам начислено {START_BALANCE} монет в подарок!\n\n"
-            f"🤖 <b>NEXUS Bot v5.0</b> — это:\n"
-            f"├ 🎮 Игры на монеты\n"
-            f"├ 💰 Экономическая система\n"
-            f"├ 🛒 Магазин и транзакции\n"
-            f"├ ⭐ VIP статус\n"
-            f"└ 🤖 AI помощник\n\n"
             f"📌 <b>Быстрый старт:</b>\n"
             f"• /daily — получить ежедневный бонус\n"
             f"• /slot 100 — сыграть в слот\n"
@@ -341,9 +299,8 @@ async def cmd_start(message: types.Message):
         )
 
 
-@router.message(Command("balance"))
+@dp.message(Command("balance"))
 async def cmd_balance(message: types.Message):
-    """Показать баланс"""
     user_id = message.from_user.id
     user = await get_user(user_id)
     
@@ -360,9 +317,8 @@ async def cmd_balance(message: types.Message):
     )
 
 
-@router.message(Command("daily"))
+@dp.message(Command("daily"))
 async def cmd_daily(message: types.Message):
-    """Ежедневный бонус"""
     user_id = message.from_user.id
     user = await get_user(user_id)
     
@@ -402,9 +358,8 @@ async def cmd_daily(message: types.Message):
     )
 
 
-@router.message(Command("profile"))
+@dp.message(Command("profile"))
 async def cmd_profile(message: types.Message):
-    """Показать профиль"""
     user_id = message.from_user.id
     user = await get_user(user_id)
     
@@ -432,9 +387,8 @@ async def cmd_profile(message: types.Message):
     )
 
 
-@router.message(Command("slot"))
+@dp.message(Command("slot"))
 async def cmd_slot(message: types.Message):
-    """Слот-машина"""
     user_id = message.from_user.id
     bet = parse_amount(message.text)
     
@@ -492,9 +446,8 @@ async def cmd_slot(message: types.Message):
     await message.answer(response)
 
 
-@router.message(Command("roulette"))
+@dp.message(Command("roulette"))
 async def cmd_roulette(message: types.Message):
-    """Рулетка"""
     user_id = message.from_user.id
     bet = parse_amount(message.text)
     color = parse_color(message.text)
@@ -537,9 +490,8 @@ async def cmd_roulette(message: types.Message):
     await message.answer(response, parse_mode=ParseMode.MARKDOWN)
 
 
-@router.message(Command("rps"))
+@dp.message(Command("rps"))
 async def cmd_rps(message: types.Message):
-    """Камень-ножницы-бумага"""
     user_id = message.from_user.id
     choice = parse_rps_choice(message.text)
     
@@ -590,9 +542,8 @@ async def cmd_rps(message: types.Message):
     )
 
 
-@router.message(Command("duel"))
+@dp.message(Command("duel"))
 async def cmd_duel(message: types.Message):
-    """Дуэль с игроком"""
     args = message.text.split()
     
     if len(args) < 3:
@@ -626,7 +577,6 @@ async def cmd_duel(message: types.Message):
         await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
         return
     
-    # Поиск противника
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, first_name FROM users WHERE username = ?", (username,))
@@ -644,11 +594,7 @@ async def cmd_duel(message: types.Message):
         await message.answer("❌ Нельзя вызвать на дуэль самого себя!")
         return
     
-    # Сохраняем запрос
-    if not hasattr(cmd_duel, 'requests'):
-        cmd_duel.requests = {}
-    
-    cmd_duel.requests[target_id] = {
+    duel_requests[target_id] = {
         "from_id": user_id,
         "from_name": message.from_user.first_name,
         "bet": bet,
@@ -669,9 +615,8 @@ async def cmd_duel(message: types.Message):
     )
 
 
-@router.message(Command("shop"))
+@dp.message(Command("shop"))
 async def cmd_shop(message: types.Message):
-    """Магазин"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, name, price, description FROM shop_items")
@@ -694,9 +639,8 @@ async def cmd_shop(message: types.Message):
     await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
 
-@router.message(Command("help"))
+@dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Помощь"""
     await message.answer(
         "🤖 *NEXUS Bot v5.0 — Помощь*\n\n"
         "*💰 Экономика*\n"
@@ -723,9 +667,8 @@ async def cmd_help(message: types.Message):
     )
 
 
-@router.message(Command("about"))
+@dp.message(Command("about"))
 async def cmd_about(message: types.Message):
-    """О боте"""
     await message.answer(
         "🤖 *NEXUS Bot v5.0*\n\n"
         "Многофункциональный Telegram бот с играми, экономикой и AI.\n\n"
@@ -734,7 +677,6 @@ async def cmd_about(message: types.Message):
         "├ Игры на монеты\n"
         "├ Магазин и транзакции\n"
         "├ VIP статус\n"
-        "├ Модерация\n"
         "└ Тэги участников\n\n"
         "📝 Разработан для Amvera Cloud\n\n"
         "Используйте /help для списка команд",
@@ -742,9 +684,8 @@ async def cmd_about(message: types.Message):
     )
 
 
-@router.message(Command("ask"))
+@dp.message(Command("ask"))
 async def cmd_ask(message: types.Message):
-    """AI помощник"""
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
@@ -758,7 +699,6 @@ async def cmd_ask(message: types.Message):
     
     question = args[1]
     
-    # Простые ответы
     answers = {
         "монеты": "💰 Монеты можно получить через /daily, выигрывая в играх или покупая в магазине.",
         "игра": "🎮 Доступны: /slot, /roulette, /rps, /duel",
@@ -772,8 +712,7 @@ async def cmd_ask(message: types.Message):
             return
     
     await message.answer(
-        "🤖 *NEXUS AI*\n\n"
-        f"Ваш вопрос: {question}\n\n"
+        f"🤖 *Вопрос:* {question}\n\n"
         "Попробуйте спросить:\n"
         "- Как заработать монеты?\n"
         "- Какие есть игры?\n"
@@ -782,9 +721,8 @@ async def cmd_ask(message: types.Message):
     )
 
 
-@router.message(Command("transfer"))
+@dp.message(Command("transfer"))
 async def cmd_transfer(message: types.Message):
-    """Перевод монет"""
     args = message.text.split()
     
     if len(args) < 3:
@@ -813,7 +751,6 @@ async def cmd_transfer(message: types.Message):
         await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
         return
     
-    # Поиск получателя
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
@@ -836,9 +773,8 @@ async def cmd_transfer(message: types.Message):
     await message.answer(f"✅ Переведено {amount} монет пользователю @{username}!")
 
 
-@router.message(Command("vip"))
+@dp.message(Command("vip"))
 async def cmd_vip(message: types.Message):
-    """VIP статус"""
     user_id = message.from_user.id
     user = await get_user(user_id)
     
@@ -869,9 +805,8 @@ async def cmd_vip(message: types.Message):
         )
 
 
-@router.message(Command("tag"))
+@dp.message(Command("tag"))
 async def cmd_tag(message: types.Message):
-    """Тэгнуть пользователя"""
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
@@ -900,9 +835,8 @@ async def cmd_tag(message: types.Message):
     await message.answer(result)
 
 
-@router.message(Command("all"))
+@dp.message(Command("all"))
 async def cmd_all(message: types.Message):
-    """Тэгнуть всех участников"""
     user_id = message.from_user.id
     
     user = await get_user(user_id)
@@ -910,11 +844,7 @@ async def cmd_all(message: types.Message):
         await message.answer("❌ Используйте /start для регистрации")
         return
     
-    # Сохраняем состояние для запроса возраста
-    if not hasattr(cmd_all, 'waiting'):
-        cmd_all.waiting = {}
-    
-    cmd_all.waiting[user_id] = {"chat_id": message.chat.id}
+    waiting_ages[user_id] = {"chat_id": message.chat.id}
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="confirm_all"),
@@ -930,16 +860,14 @@ async def cmd_all(message: types.Message):
     )
 
 
-@router.message(Command("tagrole"))
+@dp.message(Command("tagrole"))
 async def cmd_tag_role(message: types.Message):
-    """Тэгнуть по роли"""
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
         await message.answer(
             "📢 *Как тэгать по роли:*\n\n"
-            "`/tagrole админы текст` — упомянуть админов\n"
-            "Доступные роли: админы, модераторы",
+            "`/tagrole админы текст` — упомянуть админов",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -958,7 +886,7 @@ async def cmd_tag_role(message: types.Message):
     admins = []
     
     try:
-        async for member in dp.bot.get_chat_members(chat_id):
+        async for member in bot.get_chat_members(chat_id):
             if not member.user.is_bot and member.status in ['creator', 'administrator']:
                 admins.append(member.user)
                 if len(admins) >= 20:
@@ -983,9 +911,8 @@ async def cmd_tag_role(message: types.Message):
 
 # ==================== ОБРАБОТЧИКИ КНОПОК ====================
 
-@router.callback_query(lambda c: c.data == "back_to_menu")
+@dp.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
-    """Возврат в главное меню"""
     await callback.message.edit_text(
         "🏠 *Главное меню NEXUS Bot*\n\nВыберите действие:",
         parse_mode=ParseMode.MARKDOWN,
@@ -994,9 +921,8 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "profile")
+@dp.callback_query(lambda c: c.data == "profile")
 async def profile_callback(callback: types.CallbackQuery):
-    """Профиль из меню"""
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
@@ -1024,9 +950,8 @@ async def profile_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "balance")
+@dp.callback_query(lambda c: c.data == "balance")
 async def balance_callback(callback: types.CallbackQuery):
-    """Баланс из меню"""
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
@@ -1044,21 +969,18 @@ async def balance_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "games")
+@dp.callback_query(lambda c: c.data == "games")
 async def games_callback(callback: types.CallbackQuery):
-    """Меню игр"""
     await callback.message.edit_text(
-        "🎮 *Игры NEXUS Bot*\n\n"
-        "Выберите игру:",
+        "🎮 *Игры NEXUS Bot*\n\nВыберите игру:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=games_menu()
     )
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "game_slot")
+@dp.callback_query(lambda c: c.data == "game_slot")
 async def game_slot_info(callback: types.CallbackQuery):
-    """Информация о слоте"""
     await callback.message.edit_text(
         "🎰 *Слот-машина*\n\n"
         "Команда: `/slot 100`\n"
@@ -1073,9 +995,8 @@ async def game_slot_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "game_roulette")
+@dp.callback_query(lambda c: c.data == "game_roulette")
 async def game_roulette_info(callback: types.CallbackQuery):
-    """Информация о рулетке"""
     await callback.message.edit_text(
         "🎡 *Рулетка*\n\n"
         "Команда: `/roulette 100 красный`\n"
@@ -1087,9 +1008,8 @@ async def game_roulette_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "game_rps")
+@dp.callback_query(lambda c: c.data == "game_rps")
 async def game_rps_info(callback: types.CallbackQuery):
-    """Информация о КНБ"""
     await callback.message.edit_text(
         "✂️ *Камень-ножницы-бумага*\n\n"
         "Команда: `/rps камень`\n"
@@ -1100,9 +1020,8 @@ async def game_rps_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "game_duel")
+@dp.callback_query(lambda c: c.data == "game_duel")
 async def game_duel_info(callback: types.CallbackQuery):
-    """Информация о дуэли"""
     await callback.message.edit_text(
         "⚔️ *Дуэль*\n\n"
         "Команда: `/duel @user 100`\n"
@@ -1113,9 +1032,8 @@ async def game_duel_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "shop")
+@dp.callback_query(lambda c: c.data == "shop")
 async def shop_callback(callback: types.CallbackQuery):
-    """Магазин из меню"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, name, price, description FROM shop_items")
@@ -1140,9 +1058,8 @@ async def shop_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "vip")
+@dp.callback_query(lambda c: c.data == "vip")
 async def vip_callback(callback: types.CallbackQuery):
-    """VIP из меню"""
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
@@ -1171,9 +1088,8 @@ async def vip_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "ai")
+@dp.callback_query(lambda c: c.data == "ai")
 async def ai_callback(callback: types.CallbackQuery):
-    """AI из меню"""
     await callback.message.edit_text(
         "🤖 *AI помощник*\n\n"
         "Используйте команду: `/ask вопрос`\n\n"
@@ -1184,9 +1100,8 @@ async def ai_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "tag_menu")
+@dp.callback_query(lambda c: c.data == "tag_menu")
 async def tag_menu_callback(callback: types.CallbackQuery):
-    """Меню тэгов"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Тэгнуть всех", callback_data="confirm_all")],
         [InlineKeyboardButton(text="🔔 Как пользоваться", callback_data="tag_help")],
@@ -1206,9 +1121,8 @@ async def tag_menu_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "help")
+@dp.callback_query(lambda c: c.data == "help")
 async def help_callback(callback: types.CallbackQuery):
-    """Помощь из меню"""
     await callback.message.edit_text(
         "🤖 *NEXUS Bot v5.0 — Помощь*\n\n"
         "*💰 Экономика*\n"
@@ -1230,15 +1144,10 @@ async def help_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "confirm_all")
+@dp.callback_query(lambda c: c.data == "confirm_all")
 async def confirm_all_callback(callback: types.CallbackQuery):
-    """Подтверждение /all из меню"""
     user_id = callback.from_user.id
-    
-    if not hasattr(cmd_all, 'waiting'):
-        cmd_all.waiting = {}
-    
-    cmd_all.waiting[user_id] = {"chat_id": callback.message.chat.id}
+    waiting_ages[user_id] = {"chat_id": callback.message.chat.id}
     
     await callback.message.edit_text(
         "📢 *Массовое упоминание*\n\n"
@@ -1248,21 +1157,18 @@ async def confirm_all_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "cancel_all")
+@dp.callback_query(lambda c: c.data == "cancel_all")
 async def cancel_all_callback(callback: types.CallbackQuery):
-    """Отмена /all"""
     user_id = callback.from_user.id
-    
-    if hasattr(cmd_all, 'waiting') and user_id in cmd_all.waiting:
-        del cmd_all.waiting[user_id]
+    if user_id in waiting_ages:
+        del waiting_ages[user_id]
     
     await callback.message.edit_text("❌ Отменено.", reply_markup=back_button())
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "tag_help")
+@dp.callback_query(lambda c: c.data == "tag_help")
 async def tag_help_callback(callback: types.CallbackQuery):
-    """Помощь по тэгам"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="tag_menu")]
     ])
@@ -1279,9 +1185,8 @@ async def tag_help_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("buy_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))
 async def buy_item_callback(callback: types.CallbackQuery):
-    """Покупка товара"""
     item_id = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     
@@ -1326,9 +1231,8 @@ async def buy_item_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "buy_vip")
+@dp.callback_query(lambda c: c.data == "buy_vip")
 async def buy_vip_callback(callback: types.CallbackQuery):
-    """Покупка VIP"""
     user_id = callback.from_user.id
     price = 5000
     
@@ -1359,9 +1263,8 @@ async def buy_vip_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "view_profile")
+@dp.callback_query(lambda c: c.data == "view_profile")
 async def view_profile_callback(callback: types.CallbackQuery):
-    """Просмотр анкеты"""
     user_id = callback.from_user.id
     
     conn = get_connection()
@@ -1391,9 +1294,8 @@ async def view_profile_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "fill_profile")
+@dp.callback_query(lambda c: c.data == "fill_profile")
 async def fill_profile_callback(callback: types.CallbackQuery):
-    """Заполнение анкеты"""
     await callback.message.edit_text(
         "📝 *Создание анкеты*\n\n"
         "Используйте команду `/setprofile` в чате.\n\n"
@@ -1404,9 +1306,8 @@ async def fill_profile_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("accept_duel_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("accept_duel_"))
 async def accept_duel_callback(callback: types.CallbackQuery):
-    """Принять дуэль"""
     target_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     
@@ -1414,11 +1315,11 @@ async def accept_duel_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Это не вам!", show_alert=True)
         return
     
-    if not hasattr(cmd_duel, 'requests') or target_id not in cmd_duel.requests:
+    if target_id not in duel_requests:
         await callback.answer("❌ Вызов устарел", show_alert=True)
         return
     
-    request = cmd_duel.requests[target_id]
+    request = duel_requests[target_id]
     from_id = request["from_id"]
     from_name = request["from_name"]
     bet = request["bet"]
@@ -1441,11 +1342,9 @@ async def accept_duel_callback(callback: types.CallbackQuery):
         await callback.answer()
         return
     
-    # Списываем ставки
     await update_balance(user_id, -bet, f"Дуэль с {from_name}")
     await update_balance(from_id, -bet, f"Дуэль с {callback.from_user.first_name}")
     
-    # Случайный победитель
     winner_id = random.choice([user_id, from_id])
     
     if winner_id == user_id:
@@ -1471,15 +1370,14 @@ async def accept_duel_callback(callback: types.CallbackQuery):
         conn.commit()
         conn.close()
     
-    del cmd_duel.requests[target_id]
+    del duel_requests[target_id]
     
     await callback.message.edit_text(f"⚔️ *Результат дуэли*\n\n{result_text}", parse_mode=ParseMode.MARKDOWN)
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("reject_duel_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("reject_duel_"))
 async def reject_duel_callback(callback: types.CallbackQuery):
-    """Отклонить дуэль"""
     target_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     
@@ -1487,13 +1385,13 @@ async def reject_duel_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Это не вам!", show_alert=True)
         return
     
-    if hasattr(cmd_duel, 'requests') and target_id in cmd_duel.requests:
-        request = cmd_duel.requests[target_id]
-        del cmd_duel.requests[target_id]
+    if target_id in duel_requests:
+        request = duel_requests[target_id]
+        del duel_requests[target_id]
         
         await callback.message.edit_text(f"❌ {callback.from_user.first_name} отклонил вызов на дуэль!")
         
-        await callback.bot.send_message(
+        await bot.send_message(
             request["from_id"],
             f"❌ {callback.from_user.first_name} отклонил ваш вызов на дуэль!"
         )
@@ -1501,13 +1399,12 @@ async def reject_duel_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== ОБРАБОТЧИК ВОЗРАСТА ДЛЯ /all ====================
+# ==================== ОБРАБОТЧИК ВОЗРАСТА ====================
 
-@router.message(lambda message: hasattr(cmd_all, 'waiting') and message.from_user.id in cmd_all.waiting)
+@dp.message(lambda message: message.from_user.id in waiting_ages)
 async def process_age_input(message: types.Message):
-    """Обработка ввода возраста для /all"""
     user_id = message.from_user.id
-    data = cmd_all.waiting.get(user_id)
+    data = waiting_ages.get(user_id)
     
     if not data:
         return
@@ -1520,7 +1417,6 @@ async def process_age_input(message: types.Message):
         await message.answer("❌ Введите корректный возраст (число от 1 до 150)")
         return
     
-    # Сохраняем возраст
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO user_ages (user_id, age, updated_at) VALUES (?, ?, ?)",
@@ -1528,15 +1424,13 @@ async def process_age_input(message: types.Message):
     conn.commit()
     conn.close()
     
-    # Очищаем состояние
-    del cmd_all.waiting[user_id]
+    del waiting_ages[user_id]
     
     chat_id = data["chat_id"]
-    
-    # Получаем участников чата
     members = []
+    
     try:
-        async for member in dp.bot.get_chat_members(chat_id):
+        async for member in bot.get_chat_members(chat_id):
             if not member.user.is_bot:
                 members.append(member.user)
                 if len(members) >= 50:
@@ -1549,7 +1443,6 @@ async def process_age_input(message: types.Message):
         await message.answer("❌ Не удалось получить список участников")
         return
     
-    # Формируем упоминания
     mentions = []
     for member in members:
         if member.username:
@@ -1572,68 +1465,11 @@ async def process_age_input(message: types.Message):
 
 async def on_startup():
     init_db()
-    logger.info("✅ Nexus Bot v5.0 успешно запущен на Amvera!")
-
-
-async def on_shutdown():
-    logger.info("👋 Nexus Bot v5.0 остановлен")
+    logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
 
 
 async def main():
-    global dp, bot
-    
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
-    
-    # Регистрируем все обработчики
-    dp.message.register(cmd_start, Command("start"))
-    dp.message.register(cmd_balance, Command("balance"))
-    dp.message.register(cmd_daily, Command("daily"))
-    dp.message.register(cmd_profile, Command("profile"))
-    dp.message.register(cmd_slot, Command("slot"))
-    dp.message.register(cmd_roulette, Command("roulette"))
-    dp.message.register(cmd_rps, Command("rps"))
-    dp.message.register(cmd_duel, Command("duel"))
-    dp.message.register(cmd_shop, Command("shop"))
-    dp.message.register(cmd_help, Command("help"))
-    dp.message.register(cmd_about, Command("about"))
-    dp.message.register(cmd_ask, Command("ask"))
-    dp.message.register(cmd_transfer, Command("transfer"))
-    dp.message.register(cmd_vip, Command("vip"))
-    dp.message.register(cmd_tag, Command("tag"))
-    dp.message.register(cmd_all, Command("all"))
-    dp.message.register(cmd_tag_role, Command("tagrole"))
-    
-    # Обработчик возраста
-    dp.message.register(process_age_input, lambda message: hasattr(cmd_all, 'waiting') and message.from_user.id in cmd_all.waiting)
-    
-    # Обработчики кнопок
-    dp.callback_query.register(back_to_menu, lambda c: c.data == "back_to_menu")
-    dp.callback_query.register(profile_callback, lambda c: c.data == "profile")
-    dp.callback_query.register(balance_callback, lambda c: c.data == "balance")
-    dp.callback_query.register(games_callback, lambda c: c.data == "games")
-    dp.callback_query.register(game_slot_info, lambda c: c.data == "game_slot")
-    dp.callback_query.register(game_roulette_info, lambda c: c.data == "game_roulette")
-    dp.callback_query.register(game_rps_info, lambda c: c.data == "game_rps")
-    dp.callback_query.register(game_duel_info, lambda c: c.data == "game_duel")
-    dp.callback_query.register(shop_callback, lambda c: c.data == "shop")
-    dp.callback_query.register(vip_callback, lambda c: c.data == "vip")
-    dp.callback_query.register(ai_callback, lambda c: c.data == "ai")
-    dp.callback_query.register(tag_menu_callback, lambda c: c.data == "tag_menu")
-    dp.callback_query.register(help_callback, lambda c: c.data == "help")
-    dp.callback_query.register(confirm_all_callback, lambda c: c.data == "confirm_all")
-    dp.callback_query.register(cancel_all_callback, lambda c: c.data == "cancel_all")
-    dp.callback_query.register(tag_help_callback, lambda c: c.data == "tag_help")
-    dp.callback_query.register(buy_item_callback, lambda c: c.data and c.data.startswith("buy_"))
-    dp.callback_query.register(buy_vip_callback, lambda c: c.data == "buy_vip")
-    dp.callback_query.register(view_profile_callback, lambda c: c.data == "view_profile")
-    dp.callback_query.register(fill_profile_callback, lambda c: c.data == "fill_profile")
-    dp.callback_query.register(accept_duel_callback, lambda c: c.data and c.data.startswith("accept_duel_"))
-    dp.callback_query.register(reject_duel_callback, lambda c: c.data and c.data.startswith("reject_duel_"))
-    
     dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
     await dp.start_polling(bot, skip_updates=True)
 
 
