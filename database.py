@@ -1,4 +1,4 @@
-import aiosqlite
+import sqlite3
 import os
 import json
 from datetime import datetime
@@ -9,16 +9,17 @@ from config import DB_PATH
 class Database:
     def __init__(self):
         self.db_path = DB_PATH
-        self.conn = None
+        self._init_db()
     
-    async def init(self):
+    def _init_db(self):
         """Инициализация базы данных"""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
-        self.conn = await aiosqlite.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
         # Таблица пользователей
-        await self.conn.execute("""
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
@@ -36,7 +37,7 @@ class Database:
         """)
         
         # Таблица транзакций
-        await self.conn.execute("""
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 from_id INTEGER,
@@ -48,7 +49,7 @@ class Database:
         """)
         
         # Таблица магазина
-        await self.conn.execute("""
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS shop_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
@@ -57,38 +58,47 @@ class Database:
             )
         """)
         
-        await self.conn.commit()
+        conn.commit()
+        conn.close()
         
-        await self._add_default_shop_items()
-        
-        return self
+        self._add_default_shop_items()
     
-    async def _add_default_shop_items(self):
-        cursor = await self.conn.execute("SELECT COUNT(*) FROM shop_items")
-        count = (await cursor.fetchone())[0]
-        await cursor.close()
-        
-        if count == 0:
+    def _add_default_shop_items(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM shop_items")
+        if cursor.fetchone()[0] == 0:
             items = [
                 ("⭐ VIP 1 месяц", 5000, "Доступ к VIP-комнатам + бонусы"),
                 ("🎰 10 билетов на слот", 400, "10 игр в слот-машину"),
                 ("💎 1000 монет", 100, "Пополнение баланса"),
                 ("🎁 Случайный подарок", 200, "Получи случайную награду")
             ]
-            for item in items:
-                await self.conn.execute("INSERT INTO shop_items (name, price, description) VALUES (?, ?, ?)", item)
-            await self.conn.commit()
+            cursor.executemany("INSERT INTO shop_items (name, price, description) VALUES (?, ?, ?)", items)
+            conn.commit()
+        conn.close()
+    
+    # ========== НОВЫЙ МЕТОД ДЛЯ СОВМЕСТИМОСТИ ==========
+    def _get_connection(self):
+        """Получить соединение с БД (для совместимости с новыми модулями)"""
+        return sqlite3.connect(self.db_path)
+    
+    async def init(self):
+        """Асинхронная инициализация"""
+        self._init_db()
+        return self
     
     async def close(self):
         """Закрытие соединения"""
-        if self.conn:
-            await self.conn.close()
+        pass
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
         """Получить пользователя"""
-        cursor = await self.conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        await cursor.close()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
         
         if row:
             return {
@@ -109,23 +119,32 @@ class Database:
     
     async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
         """Создать пользователя"""
-        await self.conn.execute("""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
             INSERT INTO users (user_id, username, first_name, balance, register_date)
             VALUES (?, ?, ?, ?, ?)
         """, (user_id, username, first_name, balance, datetime.now().isoformat()))
-        await self.conn.commit()
+        conn.commit()
+        conn.close()
     
     async def update_balance(self, user_id: int, delta: int, reason: str = ""):
         """Обновить баланс"""
-        await self.conn.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
-        await self.conn.commit()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
+        conn.commit()
+        conn.close()
         
         if reason:
-            await self.conn.execute("""
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
                 INSERT INTO transactions (from_id, to_id, amount, reason, date)
                 VALUES (?, ?, ?, ?, ?)
             """, (user_id, user_id, delta, reason, datetime.now().isoformat()))
-            await self.conn.commit()
+            conn.commit()
+            conn.close()
     
     async def get_balance(self, user_id: int) -> int:
         """Получить баланс"""
