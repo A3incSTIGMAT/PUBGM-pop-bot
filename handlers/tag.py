@@ -16,7 +16,7 @@ ALL_KEYWORDS = [
     'all', 'everyone', 'всех участников', 'все в чате'
 ]
 
-# Ключевые слова для активации бота
+# Ключевые слова для активации бота (триггерные слова)
 BOT_KEYWORDS = ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот']
 
 
@@ -33,6 +33,12 @@ def detect_all_intent(text: str) -> bool:
     return has_bot and has_all
 
 
+def detect_bot_call(text: str) -> bool:
+    """Определить, обращаются ли к боту (по ключевым словам)"""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in BOT_KEYWORDS)
+
+
 @router.message(lambda message: message.text and not message.text.startswith('/'))
 async def smart_tag_handler(message: types.Message):
     """Умный обработчик — только для общего сбора"""
@@ -46,60 +52,56 @@ async def smart_tag_handler(message: types.Message):
     # ВСЁ ОСТАЛЬНОЕ ИГНОРИРУЕМ (одиночные тэги НЕ обрабатываем)
 
 
+# ==================== УМНОЕ РАСПОЗНАВАНИЕ ГОЛОСА ====================
 @router.message(lambda message: message.voice)
-async def voice_all_handler(message: types.Message):
-    """Обработка голосовых команд для общего сбора"""
+async def smart_voice_handler(message: types.Message):
+    """Умная обработка голосовых сообщений — реагирует только если обращаются к боту"""
     user_id = message.from_user.id
     
     # Проверяем регистрацию
     from database import db
     user = await db.get_user(user_id)
     if not user:
-        await message.answer("❌ Используйте /start для регистрации")
+        # Не зарегистрирован — игнорируем (не пишем ничего)
         return
     
-    # Отправляем сообщение о распознавании
-    processing_msg = await message.answer("🎤 Распознаю голосовую команду... ⏳")
+    # Отправляем сообщение о распознавании (тихое, не спамим)
+    processing_msg = await message.answer("🎤 Слушаю...")
     
     # Пытаемся распознать
     recognized_text = await recognize_voice(message)
     
     if not recognized_text:
-        await processing_msg.edit_text(
-            "❌ Не удалось распознать голосовую команду.\n\n"
-            "Попробуйте сказать чётче:\n"
-            "• 'Нексус, оповести всех'\n"
-            "• 'Nexus, общий сбор'\n"
-            "• 'Собери всех участников'\n\n"
-            "🎤 Убедитесь, что говорите в микрофон Telegram"
-        )
+        # Не распознали — просто удаляем сообщение "Слушаю..."
+        await processing_msg.delete()
         return
     
-    await processing_msg.edit_text(f"🎤 Распознано: *{recognized_text}*\n\n🔄 Обрабатываю...", parse_mode="Markdown")
+    # Проверяем, обращаются ли к боту
+    if not detect_bot_call(recognized_text):
+        # Обращаются не к боту — удаляем сообщение и выходим
+        await processing_msg.delete()
+        return
     
     # Проверяем, хочет ли пользователь оповестить всех
     if detect_all_intent(recognized_text):
-        # Создаём имитацию сообщения для cmd_all
-        class FakeMessage:
-            def __init__(self, chat, from_user):
-                self.chat = chat
-                self.from_user = from_user
-                self.text = "/all"
-        
-        fake_msg = FakeMessage(message.chat, message.from_user)
-        await cmd_all(fake_msg)
+        await processing_msg.edit_text("🎤 Распознано: 'Оповестить всех'\n\n🔄 Начинаю общий сбор...")
+        await cmd_all(message)
         await processing_msg.delete()
     else:
+        # Обратились к боту, но команда не распознана
         await processing_msg.edit_text(
             f"🎤 *Голосовая команда*\n\n"
             f"Распознано: \"{recognized_text}\"\n\n"
             "❌ Не удалось определить команду.\n\n"
-            "Попробуйте:\n"
+            "Попробуйте сказать:\n"
             "• 'Нексус, оповести всех'\n"
             "• 'Nexus, общий сбор'\n"
             "• 'Собери всех участников'",
             parse_mode="Markdown"
         )
+        # Через 5 секунд удаляем сообщение
+        await asyncio.sleep(5)
+        await processing_msg.delete()
 
 
 async def recognize_voice(message: types.Message) -> str:
@@ -107,7 +109,6 @@ async def recognize_voice(message: types.Message) -> str:
     from config import OPENROUTER_API_KEY
     
     if not OPENROUTER_API_KEY:
-        # Если нет API ключа, возвращаем заглушку для теста
         return None
     
     try:
@@ -338,13 +339,12 @@ async def tag_menu(callback: types.CallbackQuery):
         "• `/tag @user` — упомянуть пользователя\n"
         "• `/tagrole админы` — написать админам\n\n"
         "🎤 *Голосовые команды:*\n"
-        "• 'Нексус, оповести всех'\n"
-        "• 'Nexus, общий сбор'\n"
-        "• 'Собери всех участников'\n\n"
+        "• Скажите 'Нексус, оповести всех'\n"
+        "• Скажите 'Nexus, общий сбор'\n\n"
         "📝 *Текстовые команды:*\n"
         "• 'Нексус, оповести всех'\n"
         "• 'Nexus, общий сбор'\n\n"
-        "✨ Каждый участник получит ЛИЧНОЕ уведомление!",
+        "✨ Бот реагирует только когда к нему обращаются!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
