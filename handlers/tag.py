@@ -37,14 +37,14 @@ async def cmd_tag(message: types.Message):
 @router.message(Command("all"))
 async def cmd_all(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, мне есть 18", callback_data="confirm_all"),
+        [InlineKeyboardButton(text="✅ Отправить оповещение", callback_data="confirm_all"),
          InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_all")]
     ])
     
     await message.answer(
-        "📢 *МАССОВОЕ УПОМИНАНИЕ*\n\n"
-        "⚠️ Вы собираетесь упомянуть всех участников чата.\n\n"
-        "Подтвердите, что вам есть 18 лет:",
+        "📢 *МАССОВОЕ ОПОВЕЩЕНИЕ*\n\n"
+        "⚠️ Вы собираетесь оповестить всех участников чата.\n\n"
+        "Подтвердите отправку:",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -58,21 +58,19 @@ async def confirm_all(callback: types.CallbackQuery):
     # Сразу отвечаем, чтобы бот не вис
     await callback.answer("✅ Отправляю оповещение!")
     
-    # Получаем всех участников с username (для уведомлений)
+    # Получаем всех участников с username
     mentions = []
     try:
-        # Пытаемся получить всех участников чата
         async for member in callback.bot.get_chat_members(chat_id):
             if not member.user.is_bot and member.user.id != callback.from_user.id:
                 if member.user.username:
                     mentions.append(f"@{member.user.username}")
                 else:
-                    # У пользователей без username всё равно будет уведомление через ID
                     mentions.append(f"[{member.user.full_name}](tg://user?id={member.user.id})")
                 if len(mentions) >= 50:
                     break
     except:
-        # Если не получилось получить всех, берём хотя бы администраторов
+        # Если не получилось, берём администраторов
         try:
             admins = await callback.bot.get_chat_administrators(chat_id)
             for admin in admins:
@@ -85,7 +83,6 @@ async def confirm_all(callback: types.CallbackQuery):
             pass
     
     if not mentions:
-        # Если совсем никого не нашли
         await callback.message.edit_text(
             f"🔔 *{user_name}* обращается к участникам чата!\n\n"
             f"📢 ВНИМАНИЕ ВСЕМ!",
@@ -96,12 +93,12 @@ async def confirm_all(callback: types.CallbackQuery):
     # Формируем одно сообщение со всеми упоминаниями
     mention_text = " ".join(mentions)
     
-    # Отправляем сообщение с упоминаниями (у всех сработает уведомление)
+    # Отправляем сообщение с упоминаниями
     await callback.message.edit_text(
-        f"🔔 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!* 🔔\n\n"
+        f"🔔 *ОПОВЕЩЕНИЕ!* 🔔\n\n"
         f"👤 *{user_name}*\n\n"
-        f"📢 Важное сообщение для всех участников!\n\n"
-        f"{mention_text}",
+        f"{mention_text}\n\n"
+        f"📢 ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!",
         parse_mode="Markdown"
     )
     
@@ -169,26 +166,20 @@ async def cmd_tag_role(message: types.Message):
     await message.answer(result, parse_mode="Markdown")
 
 
-# ==================== КНОПКИ В МЕНЮ ====================
-
 @router.callback_query(lambda c: c.data == "tag_menu")
 async def tag_menu(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Тэгнуть всех", callback_data="confirm_all")],
+        [InlineKeyboardButton(text="👥 Оповестить всех", callback_data="confirm_all")],
         [InlineKeyboardButton(text="🛡️ Тэгнуть админов", callback_data="tag_admins")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     
     await callback.message.edit_text(
-        "📢 *Тэги и упоминания*\n\n"
+        "📢 *Оповещения*\n\n"
         "*Команды:*\n"
-        "• `/all` — оповестить всех (с уведомлениями)\n"
-        "• `/tag @user текст` — упомянуть пользователя\n"
-        "• `/tagrole админы текст` — упомянуть админов\n\n"
-        "✨ *Как это работает:*\n"
-        "• Участники получат РЕАЛЬНЫЕ уведомления\n"
-        "• Даже при выключенных уведомлениях в чате\n"
-        "• Бот должен быть администратором",
+        "• `/all` — оповестить всех\n"
+        "• `/tag @user` — упомянуть пользователя\n"
+        "• `/tagrole админы` — упомянуть админов",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -223,7 +214,7 @@ async def tag_admins(callback: types.CallbackQuery):
             mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
     
     await callback.message.edit_text(
-        f"🛡️ *Обращение к администраторам:*\n\n{' '.join(mentions)}",
+        f"🛡️ *Администраторы:*\n\n{' '.join(mentions)}",
         parse_mode="Markdown"
     )
     await callback.answer()
