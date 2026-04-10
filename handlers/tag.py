@@ -35,7 +35,7 @@ def detect_all_intent(text: str) -> bool:
 
 @router.message(lambda message: message.text and not message.text.startswith('/'))
 async def smart_tag_handler(message: types.Message):
-    """Умный обработчик — понимает любые формы обращения"""
+    """Умный обработчик — только для общего сбора"""
     text = message.text.strip()
     
     # Проверяем, хочет ли пользователь оповестить всех
@@ -43,21 +43,7 @@ async def smart_tag_handler(message: types.Message):
         await cmd_all(message)
         return
     
-    # Проверяем на обычный тэг пользователя
-    match = re.search(r'@(\w+)', text)
-    if match:
-        username = match.group(1)
-        clean = re.sub(r'@\w+', '', text).strip()
-        
-        if clean:
-            result = f"🔔 {clean}\n\n👉 @{username}"
-        else:
-            result = f"🔔 Вас упомянул {message.from_user.full_name}\n\n👉 @{username}"
-        
-        await message.answer(result)
-        return
-    
-    # Если ничего не распознали — игнорируем
+    # ВСЁ ОСТАЛЬНОЕ ИГНОРИРУЕМ (одиночные тэги НЕ обрабатываем)
 
 
 @router.message(lambda message: message.voice)
@@ -65,6 +51,8 @@ async def voice_all_handler(message: types.Message):
     """Обработка голосовых команд для общего сбора"""
     user_id = message.from_user.id
     
+    # Проверяем регистрацию
+    from database import db
     user = await db.get_user(user_id)
     if not user:
         await message.answer("❌ Используйте /start для регистрации")
@@ -73,16 +61,17 @@ async def voice_all_handler(message: types.Message):
     # Отправляем сообщение о распознавании
     processing_msg = await message.answer("🎤 Распознаю голосовую команду... ⏳")
     
-    # Пытаемся распознать (если есть OpenAI API)
+    # Пытаемся распознать
     recognized_text = await recognize_voice(message)
     
     if not recognized_text:
         await processing_msg.edit_text(
             "❌ Не удалось распознать голосовую команду.\n\n"
-            "Попробуйте сказать:\n"
+            "Попробуйте сказать чётче:\n"
             "• 'Нексус, оповести всех'\n"
             "• 'Nexus, общий сбор'\n"
-            "• 'Собери всех участников'"
+            "• 'Собери всех участников'\n\n"
+            "🎤 Убедитесь, что говорите в микрофон Telegram"
         )
         return
     
@@ -90,7 +79,15 @@ async def voice_all_handler(message: types.Message):
     
     # Проверяем, хочет ли пользователь оповестить всех
     if detect_all_intent(recognized_text):
-        await cmd_all(message)
+        # Создаём имитацию сообщения для cmd_all
+        class FakeMessage:
+            def __init__(self, chat, from_user):
+                self.chat = chat
+                self.from_user = from_user
+                self.text = "/all"
+        
+        fake_msg = FakeMessage(message.chat, message.from_user)
+        await cmd_all(fake_msg)
         await processing_msg.delete()
     else:
         await processing_msg.edit_text(
@@ -99,7 +96,8 @@ async def voice_all_handler(message: types.Message):
             "❌ Не удалось определить команду.\n\n"
             "Попробуйте:\n"
             "• 'Нексус, оповести всех'\n"
-            "• 'Nexus, общий сбор'",
+            "• 'Nexus, общий сбор'\n"
+            "• 'Собери всех участников'",
             parse_mode="Markdown"
         )
 
@@ -109,6 +107,7 @@ async def recognize_voice(message: types.Message) -> str:
     from config import OPENROUTER_API_KEY
     
     if not OPENROUTER_API_KEY:
+        # Если нет API ключа, возвращаем заглушку для теста
         return None
     
     try:
@@ -140,9 +139,10 @@ async def recognize_voice(message: types.Message) -> str:
 
 @router.message(Command("tag"))
 async def cmd_tag(message: types.Message):
+    """Обычный тэг пользователя (только по команде)"""
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("📢 `/tag @username текст`", parse_mode="Markdown")
+        await message.answer("📢 `/tag @username текст`\nПример: `/tag @user Привет!`", parse_mode="Markdown")
         return
     
     text = args[1]
@@ -281,7 +281,7 @@ async def cancel_all(callback: types.CallbackQuery):
 async def cmd_tag_role(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("📢 `/tagrole админы текст`", parse_mode="Markdown")
+        await message.answer("📢 `/tagrole админы текст`\nПример: `/tagrole админы Внимание!`", parse_mode="Markdown")
         return
     
     text = args[1]
