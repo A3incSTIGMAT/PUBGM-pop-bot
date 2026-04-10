@@ -1,13 +1,13 @@
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from datetime import datetime
-import json
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db
 from config import START_BALANCE
 
 router = Router()
+
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -15,190 +15,179 @@ async def cmd_start(message: types.Message):
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Проверяем, существует ли пользователь
     user = await db.get_user(user_id)
     
     if not user:
-        # Создаём нового пользователя
-        await db.create_user(
-            user_id=user_id,
-            username=username,
-            first_name=first_name,
-            balance=START_BALANCE
-        )
-        
-        # Приветствие для нового пользователя
-        welcome_text = f"""
-✨ <b>Добро пожаловать в NEXUS Bot, {first_name}!</b> ✨
-
-🎁 <b>Вам начислено {START_BALANCE} монет</b> в подарок!
-
-🤖 <b>NEXUS Bot v5.0</b> — это:
-├ 🎮 Игры на монеты
-├ 💰 Экономическая система
-├ 🛒 Магазин и транзакции
-├ ⭐ VIP статус
-├ 🤖 AI помощник
-└ 💳 Платежи через Озон Банк
-
-📌 <b>Быстрый старт:</b>
-• /daily — получить ежедневный бонус
-• /slot 100 — сыграть в слот
-• /balance — проверить баланс
-• /help — все команды
-
-Приятной игры! 🎯
-"""
-        await message.answer(welcome_text, parse_mode=ParseMode.HTML)
+        await db.create_user(user_id, username, first_name, START_BALANCE)
     
-    else:
-        # Приветствие для существующего пользователя
-        welcome_back = f"""
-👋 <b>С возвращением, {first_name}!</b>
+    # Красивая презентация бота
+    presentation_text = f"""
+🤖 *ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!* 🤖
 
-💰 <b>Ваш баланс:</b> {user['balance']} монет
-⭐ <b>VIP статус:</b> {'Да' if user.get('vip_level', 0) > 0 else 'Нет'}
-🔥 <b>Daily стрик:</b> {user.get('daily_streak', 0)} дней
+✨ *Привет, {first_name}!*
 
-📌 <b>Доступные команды:</b>
-• /daily — бонус дня
-• /slot — слот-машина
-• /roulette — рулетка
-• /duel — дуэль с игроком
-• /shop — магазин
-• /balance — баланс
-• /profile — профиль
-• /help — помощь
+Я — *NEXUS Chat Manager* — твой личный помощник в управлении чатом!
 
-Выберите действие в меню 👇
+━━━━━━━━━━━━━━━━━━━━━
+
+*🎯 ЧТО Я УМЕЮ:*
+
+├ 🎮 *Игры* — слоты, рулетка, КНБ, дуэли
+├ 💰 *Экономика* — баланс, переводы, магазин
+├ ⭐ *VIP статус* — бонусы и привилегии
+├ 📢 *Общий сбор* — оповещение всех участников
+├ 🛡️ *Модерация* — бан, мут, варны (для админов)
+├ 🤖 *AI помощник* — отвечаю на вопросы
+└ 💳 *Озон Банк* — пополнение баланса
+
+━━━━━━━━━━━━━━━━━━━━━
+
+*🗣️ КАК КО МНЕ ОБРАЩАТЬСЯ:*
+
+Я понимаю любые формы обращения:
+
+📝 *Текстовые команды:*
+• `Нексус, оповести всех`
+• `Nexus, общий сбор`
+• `собери всех участников`
+• `отметь всех в чате`
+• `@username` — упомянуть пользователя
+
+🎤 *Голосовые команды:*
+• "Нексус, оповести всех"
+• "Nexus, общий сбор"
+• "Собери всех участников"
+
+✨ *Достаточно просто сказать или написать — я пойму!*
+
+━━━━━━━━━━━━━━━━━━━━━
+
+*📌 БЫСТРЫЙ СТАРТ:*
+
+├ /daily — получить бонус {START_BALANCE} монет
+├ /slot 100 — сыграть в слот
+├ /balance — проверить баланс
+└ /all — оповестить всех участников
+
+━━━━━━━━━━━━━━━━━━━━━
+
+*🎁 ВАМ НАЧИСЛЕНО: {START_BALANCE} МОНЕТ!*
+
+Нажми на кнопку ниже, чтобы начать 👇
 """
-        await message.answer(welcome_back, parse_mode=ParseMode.HTML)
     
-    # Отправляем клавиатуру (исправлено: main_menu вместо main_keyboard)
-    try:
-        from utils.keyboards import main_menu
-        await message.answer("📱 <b>Главное меню:</b>", 
-                            reply_markup=main_menu(),
-                            parse_mode=ParseMode.HTML)
-    except ImportError:
-        pass  # Клавиатура не подключена, игнорируем
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Начать использовать", callback_data="back_to_menu")],
+        [InlineKeyboardButton(text="📢 Как оповестить всех?", callback_data="tag_help")]
+    ])
+    
+    await message.answer(
+        presentation_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = """
-🤖 <b>NEXUS Bot v5.0 — Справка</b>
+🤖 *NEXUS Chat Manager — ПОМОЩЬ*
 
 ━━━━━━━━━━━━━━━━━━━━━
-💰 <b>ЭКОНОМИКА</b>
-━━━━━━━━━━━━━━━━━━━━━
-/balance — Проверить баланс
-/daily — Ежедневный бонус
-/transfer @user 100 — Перевести монеты
+
+*🗣️ КАК ОБРАЩАТЬСЯ:*
+
+Я понимаю команды без слеша!
+
+📝 *Примеры текстовых команд:*
+• `Нексус, оповести всех`
+• `Nexus, общий сбор`
+• `собери всех участников`
+• `@username привет!`
+
+🎤 *Голосовые команды:*
+• Скажите "Нексус, оповести всех"
+• Скажите "Nexus, общий сбор"
 
 ━━━━━━━━━━━━━━━━━━━━━
-🎮 <b>ИГРЫ</b>
-━━━━━━━━━━━━━━━━━━━━━
-/slot 100 — Слот-машина (x3, x5, x10)
-/roulette 100 красный — Рулетка
-/rps камень — Камень-ножницы-бумага
-/duel @user 100 — Дуэль с игроком
+
+*📋 ОСНОВНЫЕ КОМАНДЫ:*
+
+*💰 Экономика*
+/balance — баланс
+/daily — бонус дня
+/transfer @user 100 — перевод
+
+*🎮 Игры*
+/slot 100 — слот
+/roulette 100 красный — рулетка
+/rps камень — КНБ
+/duel @user 100 — дуэль
+
+*👤 Профиль*
+/profile — профиль
+/shop — магазин
+/vip — VIP статус
+
+*📢 Оповещения*
+/all — общий сбор
+/tag @user — упомянуть
+/tagrole админы — написать админам
 
 ━━━━━━━━━━━━━━━━━━━━━
-👤 <b>ПРОФИЛЬ И ПРОГРЕСС</b>
-━━━━━━━━━━━━━━━━━━━━━
-/profile — Ваш профиль
-/stats — Статистика бота
-/vip — Информация о VIP
+
+*🤖 AI ПОМОЩНИК*
+/ask вопрос — задай любой вопрос
 
 ━━━━━━━━━━━━━━━━━━━━━
-🛒 <b>МАГАЗИН И ПЛАТЕЖИ</b>
-━━━━━━━━━━━━━━━━━━━━━
-/shop — Магазин товаров
-/add_ncoin — Пополнить баланс через Озон Банк
 
-━━━━━━━━━━━━━━━━━━━━━
-🤖 <b>ПРОЧЕЕ</b>
-━━━━━━━━━━━━━━━━━━━━━
-/ask вопрос — AI помощник
-/about — О боте
-/help — Эта справка
-
-━━━━━━━━━━━━━━━━━━━━━
-<i>Разработано с ❤️ для NEXUS Community</i>
+✨ *Все команды работают и через меню!*
 """
-    await message.answer(help_text, parse_mode=ParseMode.HTML)
+    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
 
 @router.message(Command("about"))
 async def cmd_about(message: types.Message):
     about_text = """
-🤖 <b>NEXUS Bot v5.0</b>
+🤖 *NEXUS Chat Manager v5.0*
 
-<b>Версия:</b> 5.0
-<b>Статус:</b> ✅ Активен
+━━━━━━━━━━━━━━━━━━━━━
 
-<b>Возможности:</b>
-├ 🎮 Игровая система
-├ 💰 Экономика
-├ 🛒 Магазин
-├ ⭐ VIP статусы
-├ 🤖 AI помощник
-├ 💳 Озон Банк платежи
-└ 📊 Статистика
+*📖 О БОТЕ:*
 
-<b>Технологии:</b>
+NEXUS Chat Manager — это многофункциональный бот для управления чатами, игр и экономики.
+
+*🔧 ТЕХНОЛОГИИ:*
 ├ Python 3.11
 ├ Aiogram 3.x
 ├ SQLite
 └ Docker
 
-<b>Разработчик:</b> @A3incSTIGMAT
+*👨‍💻 РАЗРАБОТЧИК:*
+@A3incSTIGMAT
 
-Спасибо, что используете NEXUS Bot! 🎯
+*🗣️ ОБРАЩЕНИЯ:*
+• Нексус, Нэкс, Nexus
+• Отметь, тэгни, упомяни, оповести
+• Собери, созывай, общий сбор
+
+*🎤 ГОЛОСОВЫЕ КОМАНДЫ:*
+• "Нексус, оповести всех"
+• "Nexus, общий сбор"
+
+━━━━━━━━━━━━━━━━━━━━━
+
+✨ *Спасибо, что используете NEXUS!*
 """
-    await message.answer(about_text, parse_mode=ParseMode.HTML)
+    await message.answer(about_text, parse_mode=ParseMode.MARKDOWN)
 
 
-@router.message(Command("profile"))
-async def cmd_profile(message: types.Message):
-    user_id = message.from_user.id
-    user = await db.get_user(user_id)
-    
-    if not user:
-        await message.answer("❌ Пользователь не найден! Используйте /start для регистрации")
-        return
-    
-    profile_text = f"""
-👤 <b>Профиль пользователя</b>
-
-━━━━━━━━━━━━━━━━━━━━━
-📛 <b>Имя:</b> {user.get('first_name', 'Не указано')}
-🆔 <b>ID:</b> {user_id}
-📅 <b>Регистрация:</b> {user.get('register_date', 'Неизвестно')[:10]}
-━━━━━━━━━━━━━━━━━━━━━
-
-💰 <b>Баланс:</b> {user.get('balance', 0)} монет
-
-⭐ <b>VIP статус:</b> {'✅ Активирован' if user.get('vip_level', 0) > 0 else '❌ Нет'}
-{f'📅 VIP до: {user.get("vip_until", "")[:10]}' if user.get('vip_level', 0) > 0 else ''}
-
-🏆 <b>Статистика:</b>
-├ Побед: {user.get('wins', 0)}
-├ Поражений: {user.get('losses', 0)}
-└ Всего игр: {user.get('wins', 0) + user.get('losses', 0)}
-
-🔥 <b>Daily стрик:</b> {user.get('daily_streak', 0)} дней
-
-━━━━━━━━━━━━━━━━━━━━━
-<i>Продолжайте играть и повышайте свой статус!</i>
-"""
-    await message.answer(profile_text, parse_mode=ParseMode.HTML)
-
-
-# Обработчик callback "main_menu" (исправлено)
-@router.callback_query(lambda c: c.data == "main_menu")
-async def back_to_main_menu(callback: types.CallbackQuery):
+@router.callback_query(lambda c: c.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
     from utils.keyboards import main_menu
-    await callback.message.edit_text("📱 Главное меню:", reply_markup=main_menu())
+    await callback.message.edit_text(
+        "🏠 *Главное меню NEXUS Chat Manager*\n\nВыберите действие:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu()
+    )
     await callback.answer()
