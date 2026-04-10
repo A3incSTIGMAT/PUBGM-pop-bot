@@ -2,12 +2,8 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import re
-import asyncio
 
 router = Router()
-
-# Хранилище для ожидающих подтверждения (если нужно)
-waiting_all = {}
 
 
 @router.message(Command("tag"))
@@ -56,87 +52,53 @@ async def cmd_all(message: types.Message):
 
 @router.callback_query(lambda c: c.data == "confirm_all")
 async def confirm_all(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
     chat_id = callback.message.chat.id
+    user_name = callback.from_user.full_name
     
-    # Отвечаем на callback сразу, чтобы не было "висения"
-    await callback.answer("🔔 Обрабатываю...")
+    # Сразу отвечаем на callback
+    await callback.answer("✅ Оповещение отправляется!")
     
-    # Отправляем сообщение "печатает"
-    await callback.bot.send_chat_action(chat_id, "typing")
-    
-    # Проверяем права бота
+    # Получаем список администраторов (это быстро)
+    admins = []
     try:
-        bot_member = await callback.bot.get_chat_member(chat_id, callback.bot.id)
-        if bot_member.status not in ['creator', 'administrator']:
-            await callback.message.edit_text(
-                "❌ *Ошибка:* Бот не является администратором чата!\n\n"
-                "Чтобы использовать /all, добавьте бота в группу и выдайте ему права администратора.\n\n"
-                "Необходимые права: `Получать список участников`",
-                parse_mode="Markdown"
-            )
-            return
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка проверки прав: {e}")
-        return
-    
-    # Получаем участников чата (упрощённо — только администраторов)
-    members = []
-    try:
-        # Получаем администраторов (это всегда работает)
-        admins = await callback.bot.get_chat_administrators(chat_id)
-        for admin in admins:
+        administrators = await callback.bot.get_chat_administrators(chat_id)
+        for admin in administrators:
             if not admin.user.is_bot:
-                members.append(admin.user)
-        
-        # Пытаемся получить обычных участников через get_chat (если бот может)
-        try:
-            chat = await callback.bot.get_chat(chat_id)
-            # Если есть возможность получить участников
-            async for member in callback.bot.get_chat_members(chat_id):
-                if not member.user.is_bot and member.user.id not in [m.id for m in members]:
-                    members.append(member.user)
-                    if len(members) >= 30:  # Ограничиваем до 30, чтобы не виснуть
-                        break
-        except:
-            pass
-            
+                admins.append(admin.user)
     except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка получения участников: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
         return
     
-    if not members:
-        await callback.message.edit_text(
-            "❌ Не удалось получить список участников.\n\n"
-            "Убедитесь, что бот является администратором чата."
-        )
-        return
-    
-    # Формируем упоминания
-    mentions = []
-    for member in members:
-        if member.username:
-            mentions.append(f"@{member.username}")
+    # Формируем упоминания администраторов
+    admin_mentions = []
+    for admin in admins:
+        if admin.username:
+            admin_mentions.append(f"@{admin.username}")
         else:
-            mentions.append(f"[{member.full_name}](tg://user?id={member.id})")
+            admin_mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
     
-    # Отправляем сообщение с упоминаниями
-    mention_text = " ".join(mentions[:30])
+    # Отправляем сообщение с упоминанием администраторов
+    admin_text = f"🔔 *ОБЩИЙ СБОР!* 🔔\n\n👤 {user_name}\n\n📢 Важное сообщение!\n\n"
+    if admin_mentions:
+        admin_text += f"🛡️ *Администраторы:* {' '.join(admin_mentions)}\n\n"
+    admin_text += f"👥 *Участники:* Всем внимание!"
     
-    await callback.message.edit_text(
-        f"🔔 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!* 🔔\n\n"
-        f"👤 *{callback.from_user.full_name}*\n\n"
-        f"📢 Важное сообщение для всех участников!\n\n"
-        f"{mention_text}",
+    # Редактируем исходное сообщение
+    await callback.message.edit_text(admin_text, parse_mode="Markdown")
+    
+    # Дополнительно отправляем простое сообщение в чат для остальных
+    await callback.bot.send_message(
+        chat_id,
+        f"🔔 *ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!*\n\n"
+        f"👤 {user_name} обращается к сообществу!\n\n"
+        f"👉 Пожалуйста, обратите внимание на сообщение выше.",
         parse_mode="Markdown"
     )
     
-    if len(mentions) > 30:
-        await callback.message.answer(f"... и ещё {len(mentions) - 30} участников")
-    
-    # Удаляем исходное сообщение с кнопками
+    # Удаляем кнопки через пару секунд
     try:
-        await callback.message.delete()
+        await asyncio.sleep(2)
+        await callback.message.edit_reply_markup(reply_markup=None)
     except:
         pass
 
@@ -162,7 +124,7 @@ async def cmd_tag_role(message: types.Message):
     role_match = re.match(r'(админы?|модераторы?)\s*(.*)', text, re.IGNORECASE)
     
     if not role_match:
-        await message.answer("❌ Не распознана роль. Используйте: `админы` или `модераторы`", parse_mode="Markdown")
+        await message.answer("❌ Не распознана роль. Используйте: `админы`", parse_mode="Markdown")
         return
     
     role = role_match.group(1).lower()
@@ -175,10 +137,8 @@ async def cmd_tag_role(message: types.Message):
         for admin in administrators:
             if not admin.user.is_bot:
                 admins.append(admin.user)
-                if len(admins) >= 20:
-                    break
     except Exception as e:
-        await message.answer(f"❌ Ошибка получения администраторов: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
         return
     
     if not admins:
@@ -200,27 +160,20 @@ async def cmd_tag_role(message: types.Message):
     await message.answer(result, parse_mode="Markdown")
 
 
-# ==================== КНОПКА В МЕНЮ ====================
-
 @router.callback_query(lambda c: c.data == "tag_menu")
 async def tag_menu(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Тэгнуть всех", callback_data="confirm_all")],
         [InlineKeyboardButton(text="🛡️ Тэгнуть админов", callback_data="tag_admins")],
-        [InlineKeyboardButton(text="🔔 Как пользоваться", callback_data="tag_help")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     
     await callback.message.edit_text(
         "📢 *Тэги и упоминания*\n\n"
-        "*Как пользоваться:*\n\n"
-        "📝 *Команды:*\n"
-        "• `/all` — упомянуть всех\n"
+        "*Команды:*\n"
+        "• `/all` — оповестить всех\n"
         "• `/tag @user текст` — упомянуть пользователя\n"
-        "• `/tagrole админы текст` — упомянуть админов\n\n"
-        "📝 *Без команд:*\n"
-        "• Напишите: `Нексус, отметь всех`\n"
-        "• Или: `@user Привет!`",
+        "• `/tagrole админы текст` — упомянуть админов",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -229,7 +182,6 @@ async def tag_menu(callback: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "tag_admins")
 async def tag_admins(callback: types.CallbackQuery):
-    """Тэгнуть админов из меню"""
     chat_id = callback.message.chat.id
     admins = []
     
@@ -262,28 +214,6 @@ async def tag_admins(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "tag_help")
-async def tag_help(callback: types.CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="tag_menu")]
-    ])
-    
-    await callback.message.edit_text(
-        "📢 *Помощь по тэгам*\n\n"
-        "*Примеры команд:*\n\n"
-        "📝 *Текстовые:*\n"
-        "• `/all` — упомянуть всех\n"
-        "• `/tag @user Привет` — упомянуть пользователя\n"
-        "• `/tagrole админы Срочно!` — упомянуть админов\n\n"
-        "✨ Бот понимает команды без `/`:\n"
-        "• `Нексус, отметь всех`\n"
-        "• `@user Привет`",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
 @router.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
     from utils.keyboards import main_menu
@@ -293,3 +223,7 @@ async def back_to_menu(callback: types.CallbackQuery):
         reply_markup=main_menu()
     )
     await callback.answer()
+
+
+# Импортируем asyncio для sleep
+import asyncio
