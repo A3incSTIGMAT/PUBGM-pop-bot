@@ -5,13 +5,16 @@ load_dotenv()
 
 # ==================== ОБЯЗАТЕЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is required! Add it to environment variables.")
 
 # ==================== АДМИНИСТРИРОВАНИЕ ====================
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # ==================== ПУТИ ДЛЯ AMVERA ====================
 DATA_DIR = "/data"
-DB_PATH = os.getenv("DATABASE_PATH", f"{DATA_DIR}/nexus.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", f"{DATA_DIR}/nexus.db")
+DB_PATH = DATABASE_PATH  # Для совместимости
 LOG_FILE = os.getenv("LOG_FILE", f"{DATA_DIR}/nexus.log")
 
 # ==================== ЭКОНОМИКА ====================
@@ -48,6 +51,11 @@ OZON_RECEIVER = os.getenv("OZON_RECEIVER", "")
 OZON_CARD_LAST4 = os.getenv("OZON_CARD_LAST4", "")
 OZON_SBP_QR_URL = os.getenv("OZON_SBP_QR_URL", "")
 
-# ==================== ПРОВЕРКА ТОКЕНА ====================
+# ==================== СОЦИАЛЬНЫЕ СЕТИ (опционально) ====================
+TWITCH_URL = os.getenv("TWITCH_URL", "")
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")
+
+# ==================== ПРОВЕРКИ ====================
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is required! Add it to environment variables.")
+    raise ValueError("BOT_TOKEN is required!")
