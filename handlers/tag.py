@@ -2,12 +2,8 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import re
-import asyncio
 
 router = Router()
-
-# Хранилище для отмены
-cancel_flag = {}
 
 
 @router.message(Command("tag"))
@@ -36,107 +32,48 @@ async def cmd_tag(message: types.Message):
 
 @router.message(Command("all"))
 async def cmd_all(message: types.Message):
+    """Использует встроенный @all Telegram"""
+    chat_id = message.chat.id
+    chat_type = message.chat.type
+    
+    # Проверяем, что это группа
+    if chat_type not in ['group', 'supergroup']:
+        await message.answer("❌ Команда /all работает только в группах!")
+        return
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Начать общий сбор", callback_data="start_all"),
+        [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="confirm_all"),
          InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_all")]
     ])
     
     await message.answer(
-        "📢 *ОБЩИЙ СБОР*\n\n"
-        "Будет отправлено несколько сообщений с упоминаниями участников.\n\n"
-        "⚠️ Каждый участник получит ЛИЧНОЕ уведомление!\n\n"
-        "Начать?",
+        "📢 *ВНИМАНИЕ!*\n\n"
+        "Вы собираетесь упомянуть ВСЕХ участников чата.\n\n"
+        "Для этого будет использована команда `@all` (встроенная функция Telegram).\n\n"
+        "Подтвердите действие:",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
 
 
-@router.callback_query(lambda c: c.data == "start_all")
-async def start_all(callback: types.CallbackQuery):
+@router.callback_query(lambda c: c.data == "confirm_all")
+async def confirm_all(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     user_name = callback.from_user.full_name
-    user_id = callback.from_user.id
     
-    await callback.answer("✅ Начинаю общий сбор!")
-    await callback.message.edit_text("🔄 *Идёт общий сбор...*\n\nСобираю участников...", parse_mode="Markdown")
+    await callback.answer("✅ Отправляю!")
     
-    # Получаем список участников
-    members = []
-    try:
-        # Получаем администраторов (это всегда работает)
-        admins = await callback.bot.get_chat_administrators(chat_id)
-        for admin in admins:
-            if not admin.user.is_bot and admin.user.id != user_id:
-                members.append(admin.user)
-        
-        # Пытаемся получить больше участников
-        try:
-            async for member in callback.bot.get_chat_members(chat_id):
-                if not member.user.is_bot and member.user.id != user_id and member.user not in members:
-                    members.append(member.user)
-                    if len(members) >= 50:
-                        break
-        except:
-            pass
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    
-    if not members:
-        await callback.message.edit_text(
-            f"🔔 *{user_name}* обращается к участникам!\n\n"
-            f"📢 ВНИМАНИЕ ВСЕМ!",
-            parse_mode="Markdown"
-        )
-        return
-    
-    cancel_flag[chat_id] = False
-    
-    # Первое сообщение — заголовок
+    # Отправляем сообщение с @all (Telegram сам разошлёт уведомления)
     await callback.bot.send_message(
         chat_id,
         f"🔔 *ОБЩИЙ СБОР!* 🔔\n\n"
         f"👤 *{user_name}*\n\n"
-        f"📢 Оповещение участников:\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n",
+        f"📢 ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!\n\n"
+        f"@all",
         parse_mode="Markdown"
     )
     
-    # Отправляем КАЖДОМУ участнику ОТДЕЛЬНОЕ сообщение с упоминанием
-    notified = 0
-    for member in members:
-        if cancel_flag.get(chat_id, False):
-            await callback.bot.send_message(chat_id, "❌ Общий сбор отменён")
-            break
-        
-        # Формируем упоминание
-        if member.username:
-            mention = f"@{member.username}"
-        else:
-            mention = f"[{member.full_name}](tg://user?id={member.id})"
-        
-        # Отправляем отдельное сообщение для каждого участника
-        await callback.bot.send_message(
-            chat_id,
-            f"🔔 *Уведомление для {mention}*\n\n"
-            f"👤 {user_name} обращается к вам!\n\n"
-            f"📢 Пожалуйста, обратите внимание!",
-            parse_mode="Markdown"
-        )
-        
-        notified += 1
-        # Небольшая задержка, чтобы не спамить
-        await asyncio.sleep(0.3)
-    
-    if not cancel_flag.get(chat_id, False):
-        await callback.bot.send_message(
-            chat_id,
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ *Общий сбор завершён!*\n"
-            f"👥 Оповещено: {notified} участников",
-            parse_mode="Markdown"
-        )
-    
-    # Удаляем исходное сообщение с кнопками
+    # Удаляем сообщение с кнопками
     try:
         await callback.message.delete()
     except:
@@ -145,8 +82,6 @@ async def start_all(callback: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "cancel_all")
 async def cancel_all(callback: types.CallbackQuery):
-    chat_id = callback.message.chat.id
-    cancel_flag[chat_id] = True
     await callback.message.edit_text("❌ Отменено")
     await callback.answer()
 
@@ -183,35 +118,35 @@ async def cmd_tag_role(message: types.Message):
         await message.answer("❌ Нет администраторов")
         return
     
-    # Отправляем каждому админу отдельное сообщение
+    mentions = []
     for admin in admins:
         if admin.username:
-            mention = f"@{admin.username}"
+            mentions.append(f"@{admin.username}")
         else:
-            mention = f"[{admin.full_name}](tg://user?id={admin.id})"
-        
-        await message.answer(
-            f"🛡️ *Обращение к {role}:* {mention}\n\n"
-            f"📢 {clean_text if clean_text else 'Внимание!'}",
-            parse_mode="Markdown"
-        )
-        await asyncio.sleep(0.3)
+            mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
+    
+    await message.answer(
+        f"🛡️ *Обращение к {role}:*\n\n"
+        f"{' '.join(mentions)}\n\n"
+        f"📢 {clean_text if clean_text else 'Внимание!'}",
+        parse_mode="Markdown"
+    )
 
 
 @router.callback_query(lambda c: c.data == "tag_menu")
 async def tag_menu(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Общий сбор", callback_data="start_all")],
+        [InlineKeyboardButton(text="📢 Общий сбор (@all)", callback_data="confirm_all")],
         [InlineKeyboardButton(text="🛡️ Написать админам", callback_data="tag_admins")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     
     await callback.message.edit_text(
         "📢 *Общий сбор*\n\n"
-        "• `/all` — начать общий сбор\n"
+        "• `/all` — упомянуть ВСЕХ участников (через @all)\n"
         "• `/tag @user` — упомянуть пользователя\n"
         "• `/tagrole админы` — написать админам\n\n"
-        "✨ Каждый участник получит ЛИЧНОЕ уведомление!",
+        "✨ `@all` — встроенная команда Telegram, которая гарантированно оповещает всех!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -238,22 +173,17 @@ async def tag_admins(callback: types.CallbackQuery):
         await callback.answer()
         return
     
-    # Отправляем каждому админу отдельное сообщение
+    mentions = []
     for admin in admins:
         if admin.username:
-            mention = f"@{admin.username}"
+            mentions.append(f"@{admin.username}")
         else:
-            mention = f"[{admin.full_name}](tg://user?id={admin.id})"
-        
-        await callback.bot.send_message(
-            chat_id,
-            f"🛡️ *Уведомление для {mention}*\n\n"
-            f"👤 {callback.from_user.full_name} обращается к администраторам!",
-            parse_mode="Markdown"
-        )
-        await asyncio.sleep(0.3)
+            mentions.append(f"[{admin.full_name}](tg://user?id={admin.id})")
     
-    await callback.message.edit_text("✅ Уведомления отправлены администраторам!")
+    await callback.message.edit_text(
+        f"🛡️ *Администраторы:*\n\n{' '.join(mentions)}",
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 
