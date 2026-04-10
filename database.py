@@ -4,11 +4,11 @@ import json
 from datetime import datetime
 from typing import Dict, Optional
 
-from config import DB_PATH
+from config import DATABASE_PATH
 
 class Database:
     def __init__(self):
-        self.db_path = DB_PATH
+        self.db_path = DATABASE_PATH
         self._init_db()
     
     def _init_db(self):
@@ -58,6 +58,20 @@ class Database:
             )
         """)
         
+        # Таблица для анкет пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                age INTEGER,
+                city TEXT,
+                timezone TEXT,
+                about TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+        
         conn.commit()
         conn.close()
         
@@ -78,7 +92,6 @@ class Database:
             conn.commit()
         conn.close()
     
-    # ========== НОВЫЙ МЕТОД ДЛЯ СОВМЕСТИМОСТИ ==========
     def _get_connection(self):
         """Получить соединение с БД (для совместимости с новыми модулями)"""
         return sqlite3.connect(self.db_path)
@@ -150,5 +163,37 @@ class Database:
         """Получить баланс"""
         user = await self.get_user(user_id)
         return user["balance"] if user else 0
+    
+    async def save_profile(self, user_id: int, full_name: str, age: int, city: str, timezone: str, about: str):
+        """Сохранить анкету пользователя"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO user_profiles 
+            (user_id, full_name, age, city, timezone, about, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM user_profiles WHERE user_id = ?), ?), ?)
+        """, (user_id, full_name, age, city, timezone, about, user_id, datetime.now().isoformat(), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    
+    async def get_profile(self, user_id: int) -> Optional[Dict]:
+        """Получить анкету пользователя"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                "full_name": row[1],
+                "age": row[2],
+                "city": row[3],
+                "timezone": row[4],
+                "about": row[5],
+                "created_at": row[6],
+                "updated_at": row[7]
+            }
+        return None
 
 db = Database()
