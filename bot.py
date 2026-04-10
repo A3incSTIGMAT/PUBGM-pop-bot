@@ -885,14 +885,16 @@ async def cmd_tag_role(message: types.Message):
     chat_id = message.chat.id
     admins = []
     
+    # ИСПРАВЛЕНО: правильный метод для aiogram 3.x
     try:
-        async for member in bot.get_chat_members(chat_id):
-            if not member.user.is_bot and member.status in ['creator', 'administrator']:
-                admins.append(member.user)
+        administrators = await bot.get_chat_administrators(chat_id)
+        for admin in administrators:
+            if not admin.user.is_bot:
+                admins.append(admin.user)
                 if len(admins) >= 20:
                     break
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка получения администраторов: {e}")
         return
     
     if not admins:
@@ -1429,22 +1431,27 @@ async def process_age_input(message: types.Message):
     chat_id = data["chat_id"]
     members = []
     
+    # ИСПРАВЛЕНО: правильный метод для aiogram 3.x
     try:
-        async for member in bot.get_chat_members(chat_id):
-            if not member.user.is_bot:
-                members.append(member.user)
-                if len(members) >= 50:
-                    break
+        # Пытаемся получить администраторов
+        admins = await bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if not admin.user.is_bot:
+                members.append(admin.user)
     except Exception as e:
-        await message.answer(f"❌ Ошибка получения участников: {e}")
-        return
+        await message.answer(f"❌ Ошибка получения участников: {e}\n\nУпомянуты доступные участники.")
     
     if not members:
-        await message.answer("❌ Не удалось получить список участников")
+        await message.answer(
+            f"📢 *ОБРАЩЕНИЕ К УЧАСТНИКАМ!*\n\n"
+            f"👤 {message.from_user.full_name} (возраст: {age})\n\n"
+            f"👋 Всем привет!",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
     
     mentions = []
-    for member in members:
+    for member in members[:30]:
         if member.username:
             mentions.append(f"@{member.username}")
         else:
@@ -1452,13 +1459,120 @@ async def process_age_input(message: types.Message):
     
     await message.answer(
         f"📢 *ОБРАЩЕНИЕ К УЧАСТНИКАМ!*\n\n"
-        f"Пользователь {message.from_user.full_name} (возраст: {age}) обращается к сообществу.\n\n"
-        f"{' '.join(mentions[:30])}",
+        f"👤 {message.from_user.full_name} (возраст: {age})\n\n"
+        f"{' '.join(mentions)}",
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+# ==================== ОБРАБОТЧИК АНКЕТЫ /setprofile ====================
+
+# Хранилище состояний для анкеты
+profile_states = {}
+
+@dp.message(Command("setprofile"))
+async def cmd_setprofile(message: types.Message):
+    user_id = message.from_user.id
+    profile_states[user_id] = {'step': 1}
     
-    if len(mentions) > 30:
-        await message.answer(f"... и ещё {len(mentions) - 30} участников")
+    await message.answer(
+        "📝 *Создание анкеты*\n\n"
+        "Шаг 1 из 5: Введите ваше имя\n\n"
+        "Пример: `Александр`\n\n"
+        "❌ Отмена: /cancel_profile",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.message(Command("cancel_profile"))
+async def cmd_cancel_profile(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in profile_states:
+        del profile_states[user_id]
+    await message.answer("❌ Заполнение анкеты отменено.")
+
+
+@dp.message(lambda message: message.from_user.id in profile_states)
+async def process_profile_step(message: types.Message):
+    user_id = message.from_user.id
+    state = profile_states[user_id]
+    step = state['step']
+    
+    if step == 1:
+        state['full_name'] = message.text
+        state['step'] = 2
+        await message.answer(
+            "📝 *Шаг 2 из 5*\n\n"
+            "Введите ваш возраст (число):\n\n"
+            "Пример: `25`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif step == 2:
+        try:
+            age = int(message.text)
+            if age < 1 or age > 150:
+                raise ValueError
+            state['age'] = age
+            state['step'] = 3
+            await message.answer(
+                "📝 *Шаг 3 из 5*\n\n"
+                "Введите ваш город:\n\n"
+                "Пример: `Москва`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except ValueError:
+            await message.answer("❌ Введите корректный возраст (число от 1 до 150)")
+    
+    elif step == 3:
+        state['city'] = message.text
+        state['step'] = 4
+        await message.answer(
+            "📝 *Шаг 4 из 5*\n\n"
+            "Введите ваш часовой пояс (UTC):\n\n"
+            "Пример: `UTC+3` или `+3`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif step == 4:
+        state['timezone'] = message.text
+        state['step'] = 5
+        await message.answer(
+            "📝 *Шаг 5 из 5*\n\n"
+            "Расскажите немного о себе:\n\n"
+            "Пример: `Люблю игры и программирование`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif step == 5:
+        state['about'] = message.text
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO user_profiles 
+            (user_id, full_name, age, city, timezone, about, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM user_profiles WHERE user_id = ?), ?), ?)
+        """, (
+            user_id, state['full_name'], state['age'], state['city'], 
+            state['timezone'], state['about'], user_id, datetime.now().isoformat(),
+            datetime.now().isoformat()
+        ))
+        conn.commit()
+        conn.close()
+        
+        await message.answer(
+            "✅ *Анкета сохранена!*\n\n"
+            f"📛 Имя: {state['full_name']}\n"
+            f"📅 Возраст: {state['age']}\n"
+            f"🏙️ Город: {state['city']}\n"
+            f"🕐 Часовой пояс: {state['timezone']}\n"
+            f"📝 О себе: {state['about']}\n\n"
+            "Используйте /profile для просмотра анкеты",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        del profile_states[user_id]
 
 
 # ==================== ЗАПУСК БОТА ====================
