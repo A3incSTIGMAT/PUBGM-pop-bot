@@ -838,13 +838,24 @@ async def cmd_tag(message: types.Message):
 @dp.message(Command("all"))
 async def cmd_all(message: types.Message):
     user_id = message.from_user.id
+    chat_id = message.chat.id
+    chat_type = message.chat.type
+    
+    # Проверяем, что это группа/супергруппа
+    if chat_type not in ['group', 'supergroup']:
+        await message.answer(
+            "❌ Команда /all работает только в группах!\n\n"
+            "Добавьте бота в группу и сделайте его администратором."
+        )
+        return
     
     user = await get_user(user_id)
     if not user:
         await message.answer("❌ Используйте /start для регистрации")
         return
     
-    waiting_ages[user_id] = {"chat_id": message.chat.id}
+    # Сохраняем состояние для запроса возраста
+    waiting_ages[user_id] = {"chat_id": chat_id}
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="confirm_all"),
@@ -852,7 +863,7 @@ async def cmd_all(message: types.Message):
     ])
     
     await message.answer(
-        "📢 *Массовое упоминание*\n\n"
+        "📢 *МАССОВОЕ УПОМИНАНИЕ*\n\n"
         "⚠️ Вы собираетесь упомянуть всех участников чата.\n\n"
         "Подтвердите, что вам есть 18 лет:",
         parse_mode=ParseMode.MARKDOWN,
@@ -885,7 +896,6 @@ async def cmd_tag_role(message: types.Message):
     chat_id = message.chat.id
     admins = []
     
-    # ИСПРАВЛЕНО: правильный метод для aiogram 3.x
     try:
         administrators = await bot.get_chat_administrators(chat_id)
         for admin in administrators:
@@ -1149,10 +1159,29 @@ async def help_callback(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "confirm_all")
 async def confirm_all_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    waiting_ages[user_id] = {"chat_id": callback.message.chat.id}
+    chat_id = callback.message.chat.id
+    
+    # Проверяем права бота
+    try:
+        bot_member = await bot.get_chat_member(chat_id, bot.id)
+        if bot_member.status not in ['creator', 'administrator']:
+            await callback.message.edit_text(
+                "❌ *Ошибка:* Бот не является администратором чата!\n\n"
+                "Чтобы использовать /all, добавьте бота в группу и выдайте ему права администратора.\n\n"
+                "Необходимые права: `Получать список участников`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await callback.answer()
+            return
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка проверки прав: {e}")
+        await callback.answer()
+        return
+    
+    waiting_ages[user_id] = {"chat_id": chat_id}
     
     await callback.message.edit_text(
-        "📢 *Массовое упоминание*\n\n"
+        "📢 *МАССОВОЕ УПОМИНАНИЕ*\n\n"
         "Напишите ваш возраст (число от 1 до 150):",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -1419,6 +1448,7 @@ async def process_age_input(message: types.Message):
         await message.answer("❌ Введите корректный возраст (число от 1 до 150)")
         return
     
+    # Сохраняем возраст
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO user_ages (user_id, age, updated_at) VALUES (?, ?, ?)",
@@ -1427,42 +1457,65 @@ async def process_age_input(message: types.Message):
     conn.close()
     
     del waiting_ages[user_id]
-    
     chat_id = data["chat_id"]
-    members = []
     
-    # ИСПРАВЛЕНО: правильный метод для aiogram 3.x
+    # Получаем участников чата
+    members = []
     try:
-        # Пытаемся получить администраторов
+        # Сначала получаем администраторов (их всегда можно получить)
         admins = await bot.get_chat_administrators(chat_id)
         for admin in admins:
             if not admin.user.is_bot:
                 members.append(admin.user)
+        
+        # Пытаемся получить обычных участников
+        try:
+            async for member in bot.get_chat_members(chat_id):
+                if not member.user.is_bot and member.user.id not in [m.id for m in members]:
+                    members.append(member.user)
+                    if len(members) >= 100:
+                        break
+        except Exception as e:
+            await message.answer(f"⚠️ Не удалось получить всех участников. Упомянуты администраторы.\n\nОшибка: {e}")
+            
     except Exception as e:
-        await message.answer(f"❌ Ошибка получения участников: {e}\n\nУпомянуты доступные участники.")
+        await message.answer(f"❌ Ошибка получения участников: {e}")
+        return
     
     if not members:
         await message.answer(
-            f"📢 *ОБРАЩЕНИЕ К УЧАСТНИКАМ!*\n\n"
-            f"👤 {message.from_user.full_name} (возраст: {age})\n\n"
-            f"👋 Всем привет!",
-            parse_mode=ParseMode.MARKDOWN
+            "❌ Не удалось получить список участников.\n\n"
+            "Убедитесь, что бот является администратором чата.\n"
+            "Необходимые права: `Получать список участников`"
         )
         return
     
+    # Формируем упоминания с реальными уведомлениями
     mentions = []
-    for member in members[:30]:
+    for member in members:
         if member.username:
             mentions.append(f"@{member.username}")
         else:
             mentions.append(f"[{member.full_name}](tg://user?id={member.id})")
     
+    # Отправляем одно сообщение со всеми упоминаниями
+    mention_text = " ".join(mentions[:50])  # Не более 50 упоминаний за раз
+    
     await message.answer(
-        f"📢 *ОБРАЩЕНИЕ К УЧАСТНИКАМ!*\n\n"
-        f"👤 {message.from_user.full_name} (возраст: {age})\n\n"
-        f"{' '.join(mentions)}",
+        f"📢 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!*\n\n"
+        f"👤 *{message.from_user.full_name}* (возраст: {age})\n\n"
+        f"🔔 Уважаемые участники!\n\n"
+        f"{mention_text}\n\n"
+        f"✅ Всего упомянуто: {len(mentions)} участников",
         parse_mode=ParseMode.MARKDOWN
     )
+    
+    if len(mentions) > 50:
+        await message.answer(
+            f"📢 *ПРОДОЛЖЕНИЕ ОБЩЕГО СБОРА*\n\n"
+            f"{' '.join(mentions[50:100])}",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 
 # ==================== ОБРАБОТЧИК АНКЕТЫ /setprofile ====================
