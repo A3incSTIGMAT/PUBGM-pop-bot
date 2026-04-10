@@ -18,13 +18,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не задан!")
+    logger.error("❌ BOT_TOKEN не задан в переменных окружения!")
     exit(1)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Импортируем ТОЛЬКО существующие модули
+# ==================== ИМПОРТЫ РОУТЕРОВ ====================
+# Существующие роутеры
 from handlers.start import router as start_router
 from handlers.profile import router as profile_router
 from handlers.economy import router as economy_router
@@ -33,7 +34,10 @@ from handlers.moderation import router as moderation_router
 from handlers.ai_assistant import router as ai_assistant_router
 from handlers.smart_commands import router as smart_commands_router
 
-# Подключаем роутеры
+# НОВЫЙ роутер для чат-менеджера
+from handlers.chat_manager import router as chat_manager_router
+
+# ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
 dp.include_routers(
     start_router,
     profile_router,
@@ -41,7 +45,8 @@ dp.include_routers(
     games_router,
     moderation_router,
     ai_assistant_router,
-    smart_commands_router
+    smart_commands_router,
+    chat_manager_router,  # <-- ДОБАВЛЕНО
 )
 
 logger.info("✅ Все роутеры загружены")
