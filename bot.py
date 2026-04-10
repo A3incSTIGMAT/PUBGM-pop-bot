@@ -1430,7 +1430,7 @@ async def reject_duel_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== ОБРАБОТЧИК ВОЗРАСТА ====================
+# ==================== ОБРАБОТЧИК ВОЗРАСТА (МАССОВОЕ УПОМИНАНИЕ) ====================
 
 @dp.message(lambda message: message.from_user.id in waiting_ages)
 async def process_age_input(message: types.Message):
@@ -1459,10 +1459,13 @@ async def process_age_input(message: types.Message):
     del waiting_ages[user_id]
     chat_id = data["chat_id"]
     
+    # Отправляем "печатает" для реалистичности
+    await bot.send_chat_action(chat_id, "typing")
+    
     # Получаем участников чата
     members = []
     try:
-        # Сначала получаем администраторов (их всегда можно получить)
+        # Получаем администраторов (их всегда можно получить)
         admins = await bot.get_chat_administrators(chat_id)
         for admin in admins:
             if not admin.user.is_bot:
@@ -1473,10 +1476,10 @@ async def process_age_input(message: types.Message):
             async for member in bot.get_chat_members(chat_id):
                 if not member.user.is_bot and member.user.id not in [m.id for m in members]:
                     members.append(member.user)
-                    if len(members) >= 100:
+                    if len(members) >= 80:
                         break
         except Exception as e:
-            await message.answer(f"⚠️ Не удалось получить всех участников. Упомянуты администраторы.\n\nОшибка: {e}")
+            logger.warning(f"Не удалось получить всех участников: {e}")
             
     except Exception as e:
         await message.answer(f"❌ Ошибка получения участников: {e}")
@@ -1490,7 +1493,15 @@ async def process_age_input(message: types.Message):
         )
         return
     
-    # Формируем упоминания с реальными уведомлениями
+    # Формируем текст оповещения
+    notification_text = (
+        f"🔔 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!* 🔔\n\n"
+        f"👤 *{message.from_user.full_name}* (возраст: {age})\n\n"
+        f"📢 Важное сообщение для всех участников!\n\n"
+        f"👇👇👇\n\n"
+    )
+    
+    # Формируем упоминания
     mentions = []
     for member in members:
         if member.username:
@@ -1498,24 +1509,41 @@ async def process_age_input(message: types.Message):
         else:
             mentions.append(f"[{member.full_name}](tg://user?id={member.id})")
     
-    # Отправляем одно сообщение со всеми упоминаниями
-    mention_text = " ".join(mentions[:50])  # Не более 50 упоминаний за раз
+    # Отправляем ОДНО сообщение со всеми упоминаниями
+    mention_groups = []
+    current_group = []
+    current_length = 0
+    
+    for mention in mentions:
+        # Учитываем длину строки (Telegram лимит ~4000 символов)
+        mention_len = len(mention) + 1
+        if current_length + mention_len > 3500:
+            mention_groups.append(" ".join(current_group))
+            current_group = [mention]
+            current_length = mention_len
+        else:
+            current_group.append(mention)
+            current_length += mention_len
+    
+    if current_group:
+        mention_groups.append(" ".join(current_group))
+    
+    # Отправляем первое сообщение с текстом + первой группой упоминаний
+    if mention_groups:
+        first_message = notification_text + mention_groups[0]
+        await message.answer(first_message, parse_mode=ParseMode.MARKDOWN)
+        
+        # Если есть ещё группы, отправляем их отдельно
+        for i, group in enumerate(mention_groups[1:], 2):
+            await message.answer(f"📢 *Продолжение ({i}/{len(mention_groups)})*\n\n{group}", parse_mode=ParseMode.MARKDOWN)
+            await asyncio.sleep(0.5)
     
     await message.answer(
-        f"📢 *ОБЩИЙ СБОР! ВНИМАНИЕ ВСЕМ!*\n\n"
-        f"👤 *{message.from_user.full_name}* (возраст: {age})\n\n"
-        f"🔔 Уважаемые участники!\n\n"
-        f"{mention_text}\n\n"
-        f"✅ Всего упомянуто: {len(mentions)} участников",
+        f"✅ *Оповещение отправлено!*\n\n"
+        f"📊 Всего упомянуто участников: {len(mentions)}\n"
+        f"📨 Количество сообщений: {len(mention_groups)}",
         parse_mode=ParseMode.MARKDOWN
     )
-    
-    if len(mentions) > 50:
-        await message.answer(
-            f"📢 *ПРОДОЛЖЕНИЕ ОБЩЕГО СБОРА*\n\n"
-            f"{' '.join(mentions[50:100])}",
-            parse_mode=ParseMode.MARKDOWN
-        )
 
 
 # ==================== ОБРАБОТЧИК АНКЕТЫ /setprofile ====================
