@@ -10,6 +10,8 @@ def main_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
         [InlineKeyboardButton(text="⭐ VIP", callback_data="vip"),
          InlineKeyboardButton(text="📢 Тэги", callback_data="tag_menu")],
+        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_menu"),
+         InlineKeyboardButton(text="🔒 Политика", callback_data="privacy")],
         [InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
          InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
     ])
@@ -37,6 +39,7 @@ def tag_menu() -> InlineKeyboardMarkup:
     """Меню тэгов"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Тэгнуть всех", callback_data="confirm_all")],
+        [InlineKeyboardButton(text="🛡️ Написать админам", callback_data="tag_admins")],
         [InlineKeyboardButton(text="🔔 Как пользоваться", callback_data="tag_help")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
