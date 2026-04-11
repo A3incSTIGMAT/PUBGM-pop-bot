@@ -4,42 +4,30 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 def main_menu() -> InlineKeyboardMarkup:
     """Главное меню"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-         InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
-        [InlineKeyboardButton(text="🎮 Игры", callback_data="games"),
-         InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="⭐ VIP", callback_data="vip"),
-         InlineKeyboardButton(text="📢 Тэги", callback_data="tag_menu")],
-        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_menu"),
-         InlineKeyboardButton(text="🔒 Политика", callback_data="privacy")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
-         InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
+        [InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile"),
+         InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance")],
+        [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
+         InlineKeyboardButton(text="⭐ VIP", callback_data="vip")],
+        [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
+         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
+        [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
+         InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
     ])
 
 
 def games_menu() -> InlineKeyboardMarkup:
     """Меню игр"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Слот", callback_data="game_slot"),
-         InlineKeyboardButton(text="🎡 Рулетка", callback_data="game_roulette")],
+        [InlineKeyboardButton(text="🎰 СЛОТ", callback_data="game_slot"),
+         InlineKeyboardButton(text="🎡 РУЛЕТКА", callback_data="game_roulette")],
         [InlineKeyboardButton(text="✂️ КНБ", callback_data="game_rps"),
-         InlineKeyboardButton(text="⚔️ Дуэль", callback_data="game_duel")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+         InlineKeyboardButton(text="⚔️ ДУЭЛЬ", callback_data="game_duel")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
 
 def back_button() -> InlineKeyboardMarkup:
-    """Кнопка возврата в главное меню"""
+    """Кнопка возврата"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-    ])
-
-
-def tag_menu() -> InlineKeyboardMarkup:
-    """Меню тэгов"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Тэгнуть всех", callback_data="confirm_all")],
-        [InlineKeyboardButton(text="🛡️ Написать админам", callback_data="tag_admins")],
-        [InlineKeyboardButton(text="🔔 Как пользоваться", callback_data="tag_help")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
