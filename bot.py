@@ -33,6 +33,7 @@ from handlers.vip import router as vip_router
 from handlers.tag import router as tag_router
 from handlers.ai_assistant import router as ai_assistant_router
 from handlers.referral import router as referral_router
+from handlers.smart_commands import router as smart_commands_router  # ← ДОБАВИТЬ ЭТУ СТРОКУ
 
 # ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
 dp.include_routers(
@@ -44,6 +45,7 @@ dp.include_routers(
     tag_router,
     ai_assistant_router,
     referral_router,
+    smart_commands_router,  # ← ДОБАВИТЬ ЭТУ СТРОКУ
 )
 
 logger.info("✅ Все роутеры загружены")
