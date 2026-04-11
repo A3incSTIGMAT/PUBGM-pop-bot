@@ -1,10 +1,9 @@
 """
-Модуль игр NEXUS Bot
-Слот-машина, рулетка, дуэль, камень-ножницы-бумага
+Модуль игр NEXUS Bot с инлайн-кнопками
+Слот, рулетка, камень-ножницы-бумага, дуэль
 """
 
 import random
-import re
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
@@ -16,93 +15,152 @@ from config import SLOT_COST, ROULETTE_MIN, DUEL_MIN
 router = Router()
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== КЛАВИАТУРЫ ИГР ====================
 
-def parse_amount(text: str) -> int:
-    """Извлечь число из текста"""
-    match = re.search(r'\d+', text)
-    return int(match.group()) if match else 0
-
-
-def parse_color(text: str) -> str:
-    """Извлечь цвет (красный/черный)"""
-    text = text.lower()
-    if 'красн' in text or 'red' in text:
-        return 'red'
-    if 'черн' in text or 'black' in text:
-        return 'black'
-    return None
-
-
-def parse_rps_choice(text: str) -> str:
-    """Извлечь выбор для КНБ"""
-    text = text.lower()
-    if any(word in text for word in ['камень', 'rock', '🗿']):
-        return 'rock'
-    if any(word in text for word in ['ножницы', 'scissors', '✂️']):
-        return 'scissors'
-    if any(word in text for word in ['бумага', 'paper', '📄']):
-        return 'paper'
-    return None
-
-
-def choice_to_emoji(choice: str) -> str:
-    """Преобразовать выбор в эмодзи"""
-    emojis = {"rock": "🗿", "scissors": "✂️", "paper": "📄"}
-    return emojis.get(choice, "?")
-
-
-def get_games_keyboard():
-    """Клавиатура игр"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Слот", callback_data="game_slot"),
-         InlineKeyboardButton(text="🎡 Рулетка", callback_data="game_roulette")],
-        [InlineKeyboardButton(text="⚔️ Дуэль", callback_data="game_duel"),
-         InlineKeyboardButton(text="✂️ КНБ", callback_data="game_rps")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+def games_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню игр"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 СЛОТ", callback_data="game_slot"),
+         InlineKeyboardButton(text="🎡 РУЛЕТКА", callback_data="game_roulette")],
+        [InlineKeyboardButton(text="✂️ КАМЕНЬ-НОЖНИЦЫ-БУМАГА", callback_data="game_rps"),
+         InlineKeyboardButton(text="⚔️ ДУЭЛЬ", callback_data="game_duel")],
+        [InlineKeyboardButton(text="◀️ НАЗАД В МЕНЮ", callback_data="back_to_menu")]
     ])
-    return keyboard
 
 
-# ==================== ОБНОВЛЕНИЕ VIP ПРИ ПОБЕДАХ ====================
+def slot_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для слота (ставки)"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 50", callback_data="slot_50"),
+         InlineKeyboardButton(text="🎰 100", callback_data="slot_100"),
+         InlineKeyboardButton(text="🎰 200", callback_data="slot_200")],
+        [InlineKeyboardButton(text="🎰 500", callback_data="slot_500"),
+         InlineKeyboardButton(text="🎰 1000", callback_data="slot_1000"),
+         InlineKeyboardButton(text="🎰 МАКС", callback_data="slot_max")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="games_back")]
+    ])
 
-async def update_vip_by_wins(user_id: int) -> bool:
-    """Обновляет VIP статус пользователя на основе побед"""
+
+def roulette_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для рулетки (цвета и ставки)"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 КРАСНОЕ (x2)", callback_data="roulette_red_50"),
+         InlineKeyboardButton(text="⚫ ЧЁРНОЕ (x2)", callback_data="roulette_black_50")],
+        [InlineKeyboardButton(text="🔴 КРАСНОЕ (x2)", callback_data="roulette_red_100"),
+         InlineKeyboardButton(text="⚫ ЧЁРНОЕ (x2)", callback_data="roulette_black_100")],
+        [InlineKeyboardButton(text="🔴 КРАСНОЕ (x2)", callback_data="roulette_red_200"),
+         InlineKeyboardButton(text="⚫ ЧЁРНОЕ (x2)", callback_data="roulette_black_200")],
+        [InlineKeyboardButton(text="🔴 КРАСНОЕ (x2)", callback_data="roulette_red_500"),
+         InlineKeyboardButton(text="⚫ ЧЁРНОЕ (x2)", callback_data="roulette_black_500")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="games_back")]
+    ])
+
+
+def rps_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для КНБ"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗿 КАМЕНЬ", callback_data="rps_rock"),
+         InlineKeyboardButton(text="✂️ НОЖНИЦЫ", callback_data="rps_scissors"),
+         InlineKeyboardButton(text="📄 БУМАГА", callback_data="rps_paper")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="games_back")]
+    ])
+
+
+def duel_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для дуэли"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ 100", callback_data="duel_100"),
+         InlineKeyboardButton(text="⚔️ 200", callback_data="duel_200"),
+         InlineKeyboardButton(text="⚔️ 500", callback_data="duel_500")],
+        [InlineKeyboardButton(text="⚔️ 1000", callback_data="duel_1000"),
+         InlineKeyboardButton(text="⚔️ 5000", callback_data="duel_5000"),
+         InlineKeyboardButton(text="⚔️ МАКС", callback_data="duel_max")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="games_back")]
+    ])
+
+
+# ==================== МЕНЮ ИГР ====================
+
+@router.message(Command("games"))
+async def cmd_games(message: types.Message):
+    """Меню игр"""
+    await message.answer(
+        "🎮 *ДОБРО ПОЖАЛОВАТЬ В ИГРЫ NEXUS!* 🎮\n\n"
+        "Выберите игру на кнопках ниже:\n\n"
+        f"🎰 *Слот* — минимальная ставка {SLOT_COST} NCoins\n"
+        f"🎡 *Рулетка* — минимальная ставка {ROULETTE_MIN} NCoins\n"
+        f"✂️ *КНБ* — ставка 50 NCoins\n"
+        f"⚔️ *Дуэль* — минимальная ставка {DUEL_MIN} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=games_keyboard()
+    )
+
+
+@router.callback_query(lambda c: c.data == "games")
+async def games_callback(callback: types.CallbackQuery):
+    await cmd_games(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "games_back")
+async def games_back(callback: types.CallbackQuery):
+    await cmd_games(callback.message)
+    await callback.answer()
+
+
+# ==================== СЛОТ ====================
+
+@router.callback_query(lambda c: c.data == "game_slot")
+async def slot_menu(callback: types.CallbackQuery):
+    """Меню слота с выбором ставки"""
+    await callback.message.edit_text(
+        "🎰 *СЛОТ-МАШИНА* 🎰\n\n"
+        "Выберите ставку:\n\n"
+        "✨ *Выигрыши:*\n"
+        "├ 💎💎💎 → x10\n"
+        "├ ⭐⭐⭐ → x5\n"
+        "└ 🍒🍒🍒 → x3\n"
+        "└ 🍒🍒🍊 → x0.5\n\n"
+        f"💰 Ваш баланс: {await get_balance(callback.from_user.id)} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=slot_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("slot_"))
+async def play_slot(callback: types.CallbackQuery):
+    """Игра в слот"""
+    user_id = callback.from_user.id
+    bet_str = callback.data.split("_")[1]
+    
+    # Определяем ставку
+    if bet_str == "max":
+        user = await db.get_user(user_id)
+        if not user:
+            await callback.answer("❌ Используйте /start", show_alert=True)
+            return
+        bet = user["balance"]
+        if bet > 10000:
+            bet = 10000
+    else:
+        bet = int(bet_str)
+    
+    # Проверки
+    if bet < SLOT_COST:
+        await callback.answer(f"❌ Минимальная ставка: {SLOT_COST} NCoins", show_alert=True)
+        return
+    
     user = await db.get_user(user_id)
     if not user:
-        return False
+        await callback.answer("❌ Используйте /start", show_alert=True)
+        return
     
-    wins = user.get("wins", 0)
-    current_vip = user.get("vip_level", 0)
+    if user["balance"] < bet:
+        await callback.answer(f"❌ Не хватает NCoins! Баланс: {user['balance']}", show_alert=True)
+        return
     
-    # Определяем новый уровень VIP
-    new_vip = 0
-    if wins >= 100:
-        new_vip = 3
-    elif wins >= 50:
-        new_vip = 2
-    elif wins >= 10:
-        new_vip = 1
-    
-    # Обновляем если изменилось
-    if new_vip > current_vip:
-        from datetime import datetime, timedelta
-        new_until = (datetime.now() + timedelta(days=30)).isoformat()
-        
-        conn = db._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET vip_level = ?, vip_until = ? WHERE user_id = ?", 
-                       (new_vip, new_until, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    return False
-
-
-# ==================== СЛОТ-МАШИНА ====================
-
-async def play_slot(user_id: int, bet: int):
-    """Слот-машина"""
+    # Игра
     symbols = ["🍒", "🍋", "🍊", "🍉", "⭐", "💎"]
     result = [random.choice(symbols) for _ in range(3)]
     
@@ -118,261 +176,272 @@ async def play_slot(user_id: int, bet: int):
             msg = "🎉 ВЫИГРЫШ! x3! 🎉"
         
         await db.update_balance(user_id, win, f"Выигрыш в слоте")
-        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n{msg}\n💰 +{win} монет!"
-    
+        result_text = f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n{msg}\n💰 +{win} NCoins!"
+        
     elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
         win = bet // 2
         await db.update_balance(user_id, win, f"Выигрыш в слоте")
-        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n🎉 Выигрыш! +{win} монет!"
-    
+        result_text = f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n🎉 Выигрыш! +{win} NCoins!"
     else:
         await db.update_balance(user_id, -bet, f"Проигрыш в слоте")
-        return -bet, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n😔 Проигрыш! -{bet} монет."
-
-
-@router.message(Command("slot"))
-async def cmd_slot(message: types.Message):
-    """Слот-машина"""
-    user_id = message.from_user.id
-    bet = parse_amount(message.text)
+        result_text = f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n😔 Проигрыш! -{bet} NCoins"
     
-    if bet == 0:
-        await message.answer(
-            "🎰 *Слот-машина*\n\n"
-            "Использование: `/slot 100`\n"
-            f"Минимальная ставка: {SLOT_COST} монет\n\n"
-            "✨ *Выигрыши:*\n"
-            "├ 💎💎💎 → x10\n"
-            "├ ⭐⭐⭐ → x5\n"
-            "└ 🍒🍒🍒 → x3",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if bet < SLOT_COST:
-        await message.answer(f"❌ Минимальная ставка: {SLOT_COST} монет")
-        return
-    
-    user = await db.get_user(user_id)
-    if not user:
-        await message.answer("❌ Используйте /start для регистрации")
-        return
-    
-    if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
-        return
-    
-    win, response = await play_slot(user_id, bet)
-    
-    # Обновляем статистику и VIP
+    # Обновляем статистику
     if win > 0:
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        
-        upgraded = await update_vip_by_wins(user_id)
-        if upgraded:
-            response += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
-    elif win < 0:
+    elif bet > 0:
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
     
-    await message.answer(response, parse_mode=ParseMode.MARKDOWN)
+    new_balance = user["balance"] + (win if win else -bet)
+    
+    await callback.message.edit_text(
+        f"{result_text}\n\n💰 Новый баланс: {new_balance} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=slot_keyboard()
+    )
+    await callback.answer()
 
 
 # ==================== РУЛЕТКА ====================
 
-@router.message(Command("roulette"))
-async def cmd_roulette(message: types.Message):
-    """Рулетка"""
-    user_id = message.from_user.id
+@router.callback_query(lambda c: c.data == "game_roulette")
+async def roulette_menu(callback: types.CallbackQuery):
+    """Меню рулетки с выбором цвета и ставки"""
+    await callback.message.edit_text(
+        "🎡 *РУЛЕТКА* 🎡\n\n"
+        "Выберите цвет и ставку:\n\n"
+        "🔴 КРАСНОЕ — выигрыш x2\n"
+        "⚫ ЧЁРНОЕ — выигрыш x2\n\n"
+        f"💰 Ваш баланс: {await get_balance(callback.from_user.id)} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=roulette_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("roulette_"))
+async def play_roulette(callback: types.CallbackQuery):
+    """Игра в рулетку"""
+    user_id = callback.from_user.id
+    parts = callback.data.split("_")
+    color = parts[1]  # red или black
+    bet = int(parts[2])
     
-    bet = parse_amount(message.text)
-    color = parse_color(message.text)
-    
-    if bet == 0 or not color:
-        await message.answer(
-            "🎡 *Рулетка*\n\n"
-            "Использование: `/roulette 100 красный`\n"
-            f"Минимальная ставка: {ROULETTE_MIN} монет\n\n"
-            "Цвета: красный, черный\n"
-            "💰 Выигрыш: x2 от ставки",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    # Проверки
     if bet < ROULETTE_MIN:
-        await message.answer(f"❌ Минимальная ставка: {ROULETTE_MIN} монет")
+        await callback.answer(f"❌ Минимальная ставка: {ROULETTE_MIN} NCoins", show_alert=True)
         return
     
     user = await db.get_user(user_id)
     if not user:
-        await message.answer("❌ Используйте /start для регистрации")
+        await callback.answer("❌ Используйте /start", show_alert=True)
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
+        await callback.answer(f"❌ Не хватает NCoins! Баланс: {user['balance']}", show_alert=True)
         return
     
+    # Игра
     result_color = random.choice(["red", "black"])
     color_names = {"red": "🔴 КРАСНОЕ", "black": "⚫ ЧЁРНОЕ"}
+    color_emoji = {"red": "🔴", "black": "⚫"}
     
     if color == result_color:
         win = bet * 2
         await db.update_balance(user_id, win, f"Выигрыш в рулетке")
+        result_text = f"🎡 *РУЛЕТКА*\n\nВыпало: {color_names[result_color]}\n\n🎉 ВЫ ВЫИГРАЛИ! +{win} NCoins!"
         
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        
-        upgraded = await update_vip_by_wins(user_id)
-        response = f"🎡 *Рулетка*\n\nВыпало: {color_names[result_color]}\n🎉 ВЫ ВЫИГРАЛИ! +{win} монет!"
-        if upgraded:
-            response += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
     else:
         await db.update_balance(user_id, -bet, f"Проигрыш в рулетке")
+        result_text = f"🎡 *РУЛЕТКА*\n\nВыпало: {color_names[result_color]}\n\n😔 Вы проиграли {bet} NCoins"
         
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        
-        response = f"🎡 *Рулетка*\n\nВыпало: {color_names[result_color]}\n😔 Вы проиграли {bet} монет"
     
-    await message.answer(response, parse_mode=ParseMode.MARKDOWN)
+    new_balance = user["balance"] + (win if color == result_color else -bet)
+    
+    await callback.message.edit_text(
+        f"{result_text}\n\n💰 Новый баланс: {new_balance} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=roulette_keyboard()
+    )
+    await callback.answer()
 
 
 # ==================== КАМЕНЬ-НОЖНИЦЫ-БУМАГА ====================
 
-async def play_rps(user_choice: str, bot_choice: str, bet: int):
+@router.callback_query(lambda c: c.data == "game_rps")
+async def rps_menu(callback: types.CallbackQuery):
+    """Меню КНБ с выбором"""
+    await callback.message.edit_text(
+        "✂️ *КАМЕНЬ-НОЖНИЦЫ-БУМАГА* ✂️\n\n"
+        "Выберите свой ход:\n\n"
+        "🗿 КАМЕНЬ → побеждает ножницы\n"
+        "✂️ НОЖНИЦЫ → побеждают бумагу\n"
+        "📄 БУМАГА → побеждает камень\n\n"
+        f"💰 Ставка: 50 NCoins\n"
+        f"💰 Ваш баланс: {await get_balance(callback.from_user.id)} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=rps_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("rps_"))
+async def play_rps(callback: types.CallbackQuery):
     """Игра в КНБ"""
-    rules = {
-        ("rock", "scissors"): ("win", "🗿 камень разбивает ✂️ ножницы!"),
-        ("scissors", "paper"): ("win", "✂️ ножницы режут 📄 бумагу!"),
-        ("paper", "rock"): ("win", "📄 бумага оборачивает 🗿 камень!"),
-        ("scissors", "rock"): ("lose", "🗿 камень разбивает ✂️ ножницы!"),
-        ("paper", "scissors"): ("lose", "✂️ ножницы режут 📄 бумагу!"),
-        ("rock", "paper"): ("lose", "📄 бумага оборачивает 🗿 камень!"),
-    }
-    
-    if user_choice == bot_choice:
-        return 0, f"🤝 Ничья! Оба выбрали {choice_to_emoji(user_choice)}"
-    
-    result, msg = rules.get((user_choice, bot_choice), ("lose", ""))
-    if result == "win":
-        return bet, f"✅ Победа! {msg}\n💰 Вы выиграли {bet} монет!"
-    return -bet, f"❌ Поражение! {msg}\n😔 Вы проиграли {bet} монет."
-
-
-@router.message(Command("rps"))
-async def cmd_rps(message: types.Message):
-    """Камень-ножницы-бумага"""
-    user_id = message.from_user.id
-    choice = parse_rps_choice(message.text)
-    
-    if not choice:
-        await message.answer(
-            "✂️ *Камень-ножницы-бумага*\n\n"
-            "Использование: `/rps камень`\n"
-            "Варианты: камень, ножницы, бумага\n\n"
-            "💰 Ставка: 50 монет",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    user_id = callback.from_user.id
+    choice = callback.data.split("_")[1]  # rock, scissors, paper
     bet = 50
-    user = await db.get_user(user_id)
     
+    choice_names = {"rock": "🗿 КАМЕНЬ", "scissors": "✂️ НОЖНИЦЫ", "paper": "📄 БУМАГА"}
+    
+    user = await db.get_user(user_id)
     if not user:
-        await message.answer("❌ Используйте /start для регистрации")
+        await callback.answer("❌ Используйте /start", show_alert=True)
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Нужно {bet} монет")
+        await callback.answer(f"❌ Не хватает NCoins! Нужно {bet}", show_alert=True)
         return
     
     bot_choice = random.choice(["rock", "scissors", "paper"])
-    choice_names = {"rock": "🗿 камень", "scissors": "✂️ ножницы", "paper": "📄 бумага"}
     
-    result, msg = await play_rps(choice, bot_choice, bet)
-    
-    await db.update_balance(user_id, result, f"Игра КНБ")
-    
-    if result > 0:
+    # Определяем победителя
+    if choice == bot_choice:
+        result = 0
+        msg = "🤝 НИЧЬЯ!"
+    elif (choice == "rock" and bot_choice == "scissors") or \
+         (choice == "scissors" and bot_choice == "paper") or \
+         (choice == "paper" and bot_choice == "rock"):
+        result = bet
+        msg = f"✅ ПОБЕДА! +{bet} NCoins!"
+        
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
+    else:
+        result = -bet
+        msg = f"❌ ПОРАЖЕНИЕ! -{bet} NCoins"
         
-        upgraded = await update_vip_by_wins(user_id)
-        if upgraded:
-            msg += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
-    elif result < 0:
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
     
-    await message.answer(
-        f"✂️ *Камень-ножницы-бумага*\n\n"
+    await db.update_balance(user_id, result, f"Игра КНБ")
+    new_balance = user["balance"] + result
+    
+    await callback.message.edit_text(
+        f"✂️ *КАМЕНЬ-НОЖНИЦЫ-БУМАГА* ✂️\n\n"
         f"Вы: {choice_names[choice]}\n"
         f"Бот: {choice_names[bot_choice]}\n\n"
-        f"{msg}",
-        parse_mode=ParseMode.MARKDOWN
+        f"{msg}\n\n"
+        f"💰 Новый баланс: {new_balance} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=rps_keyboard()
     )
+    await callback.answer()
 
 
-# ==================== ДУЭЛЬ С ДРУГИМ ИГРОКОМ ====================
+# ==================== ДУЭЛЬ ====================
 
+# Хранилище запросов дуэлей
 duel_requests = {}
 
 
-@router.message(Command("duel"))
-async def cmd_duel(message: types.Message):
-    """Дуэль с другим игроком"""
-    args = message.text.split()
+@router.callback_query(lambda c: c.data == "game_duel")
+async def duel_menu(callback: types.CallbackQuery):
+    """Меню дуэли с выбором ставки"""
+    await callback.message.edit_text(
+        "⚔️ *ДУЭЛЬ* ⚔️\n\n"
+        "Выберите ставку:\n\n"
+        "После выбора ставки, бот попросит указать @username противника\n\n"
+        f"💰 Ваш баланс: {await get_balance(callback.from_user.id)} NCoins",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=duel_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("duel_"))
+async def duel_choose_bet(callback: types.CallbackQuery):
+    """Выбор ставки для дуэли"""
+    user_id = callback.from_user.id
+    bet_str = callback.data.split("_")[1]
     
-    if len(args) < 3:
-        await message.answer(
-            "⚔️ *Дуэль*\n\n"
-            "Использование: `/duel @username 100`\n"
-            f"Минимальная ставка: {DUEL_MIN} монет\n\n"
-            "Противник должен принять дуэль командой /accept",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    username = args[1].replace('@', '')
-    try:
-        bet = int(args[2])
-    except ValueError:
-        await message.answer("❌ Сумма должна быть числом!")
-        return
+    if bet_str == "max":
+        user = await db.get_user(user_id)
+        if not user:
+            await callback.answer("❌ Используйте /start", show_alert=True)
+            return
+        bet = user["balance"]
+        if bet > 10000:
+            bet = 10000
+    else:
+        bet = int(bet_str)
     
     if bet < DUEL_MIN:
-        await message.answer(f"❌ Минимальная ставка: {DUEL_MIN} монет")
+        await callback.answer(f"❌ Минимальная ставка: {DUEL_MIN} NCoins", show_alert=True)
         return
     
-    user_id = message.from_user.id
     user = await db.get_user(user_id)
-    
     if not user:
-        await message.answer("❌ Используйте /start для регистрации")
+        await callback.answer("❌ Используйте /start", show_alert=True)
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
+        await callback.answer(f"❌ Не хватает NCoins! Баланс: {user['balance']}", show_alert=True)
         return
+    
+    # Сохраняем ставку в состоянии
+    duel_requests[user_id] = {"bet": bet}
+    
+    await callback.message.edit_text(
+        f"⚔️ *ДУЭЛЬ* ⚔️\n\n"
+        f"💰 Ставка: {bet} NCoins\n\n"
+        f"📝 Напишите @username противника в ответном сообщении.\n\n"
+        f"❌ Для отмены отправьте /cancel",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.message(Command("duel"))
+async def cmd_duel_start(message: types.Message):
+    """Запуск дуэли по команде"""
+    await duel_menu(message)
+
+
+@router.message(lambda message: message.from_user.id in duel_requests and message.text and message.text.startswith('@'))
+async def duel_process(message: types.Message):
+    """Обработка вызова на дуэль"""
+    user_id = message.from_user.id
+    username = message.text.replace('@', '').strip()
+    
+    if user_id not in duel_requests:
+        return
+    
+    bet = duel_requests[user_id]["bet"]
     
     # Находим противника
     conn = db._get_connection()
@@ -382,7 +451,7 @@ async def cmd_duel(message: types.Message):
     conn.close()
     
     if not row:
-        await message.answer(f"❌ Пользователь @{username} не найден")
+        await message.answer(f"❌ Пользователь @{username} не найден в базе!")
         return
     
     target_id = row[0]
@@ -392,7 +461,18 @@ async def cmd_duel(message: types.Message):
         await message.answer("❌ Нельзя вызвать на дуэль самого себя!")
         return
     
-    # Сохраняем запрос на дуэль
+    user = await db.get_user(user_id)
+    target = await db.get_user(target_id)
+    
+    if not user or not target:
+        await message.answer("❌ Ошибка!")
+        return
+    
+    if target["balance"] < bet:
+        await message.answer(f"❌ У @{username} недостаточно NCoins для дуэли!")
+        return
+    
+    # Сохраняем запрос
     duel_requests[target_id] = {
         "from_id": user_id,
         "from_name": message.from_user.first_name,
@@ -401,18 +481,21 @@ async def cmd_duel(message: types.Message):
     }
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принять дуэль", callback_data=f"accept_duel_{target_id}"),
-         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_duel_{target_id}")]
+        [InlineKeyboardButton(text="✅ ПРИНЯТЬ ДУЭЛЬ", callback_data=f"accept_duel_{target_id}"),
+         InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"reject_duel_{target_id}")]
     ])
     
     await message.answer(
-        f"⚔️ *Дуэль!*\n\n"
+        f"⚔️ *ДУЭЛЬ!*\n\n"
         f"@{username}, вас вызвал на дуэль {message.from_user.first_name}\n"
-        f"💰 Ставка: {bet} монет\n\n"
-        f"Нажмите кнопку ниже, чтобы принять вызов.",
+        f"💰 Ставка: {bet} NCoins\n\n"
+        f"Нажмите кнопку, чтобы принять вызов!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
+    
+    # Удаляем состояние вызывающего
+    del duel_requests[user_id]
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("accept_duel_"))
@@ -422,61 +505,44 @@ async def accept_duel(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
     if user_id != target_id:
-        await callback.answer("❌ Это не вам адресован вызов!", show_alert=True)
+        await callback.answer("❌ Это не вам!", show_alert=True)
         return
     
     if target_id not in duel_requests:
-        await callback.answer("❌ Вызов устарел", show_alert=True)
+        await callback.answer("❌ Вызов устарел!", show_alert=True)
         return
     
     request = duel_requests[target_id]
     from_id = request["from_id"]
-    bet = request["bet"]
     from_name = request["from_name"]
+    bet = request["bet"]
     
-    # Проверяем балансы
     user = await db.get_user(user_id)
     from_user = await db.get_user(from_id)
     
     if not user or not from_user:
-        await callback.message.edit_text("❌ Ошибка: пользователь не найден")
-        await callback.answer()
+        await callback.answer("❌ Ошибка!", show_alert=True)
         return
     
     if user["balance"] < bet:
-        await callback.message.edit_text(f"❌ У вас недостаточно средств! Нужно {bet} монет")
-        await callback.answer()
+        await callback.answer(f"❌ У вас недостаточно NCoins! Нужно {bet}", show_alert=True)
         return
     
     if from_user["balance"] < bet:
-        await callback.message.edit_text(f"❌ У {from_name} недостаточно средств! Дуэль отменена")
-        await callback.answer()
+        await callback.answer(f"❌ У {from_name} недостаточно NCoins!", show_alert=True)
         return
     
     # Списываем ставки
     await db.update_balance(user_id, -bet, f"Дуэль с {from_name} (ставка)")
     await db.update_balance(from_id, -bet, f"Дуэль с {callback.from_user.first_name} (ставка)")
     
-    # Играем в КНБ
-    choices = ["rock", "scissors", "paper"]
-    user_choice = random.choice(choices)
-    bot_choice = random.choice(choices)
+    # Случайный победитель
+    winner_id = random.choice([user_id, from_id])
     
-    rules = {
-        ("rock", "scissors"): "user",
-        ("scissors", "paper"): "user",
-        ("paper", "rock"): "user",
-        ("scissors", "rock"): "bot",
-        ("paper", "scissors"): "bot",
-        ("rock", "paper"): "bot",
-    }
-    
-    winner = rules.get((user_choice, bot_choice), "draw")
-    
-    if winner == "user":
+    if winner_id == user_id:
         win_amount = bet * 2
         await db.update_balance(user_id, win_amount, f"Выигрыш в дуэли с {from_name}")
-        result_text = f"🎉 Победил {callback.from_user.first_name}! +{win_amount} монет!"
+        result_text = f"🎉 ПОБЕДИЛ {callback.from_user.first_name}! +{win_amount} NCoins!"
         
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -484,15 +550,10 @@ async def accept_duel(callback: types.CallbackQuery):
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (from_id,))
         conn.commit()
         conn.close()
-        
-        upgraded = await update_vip_by_wins(user_id)
-        if upgraded:
-            result_text += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
-        
-    elif winner == "bot":
+    else:
         win_amount = bet * 2
         await db.update_balance(from_id, win_amount, f"Выигрыш в дуэли с {callback.from_user.first_name}")
-        result_text = f"🎉 Победил {from_name}! +{win_amount} монет!"
+        result_text = f"🎉 ПОБЕДИЛ {from_name}! +{win_amount} NCoins!"
         
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -500,25 +561,11 @@ async def accept_duel(callback: types.CallbackQuery):
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        
-        upgraded = await update_vip_by_wins(from_id)
-        if upgraded:
-            result_text += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Победитель получил новый VIP уровень! 🎉"
-        
-    else:
-        await db.update_balance(user_id, bet, "Ничья в дуэли (возврат)")
-        await db.update_balance(from_id, bet, "Ничья в дуэли (возврат)")
-        result_text = "🤝 Ничья! Ставки возвращены."
     
-    # Удаляем запрос
     del duel_requests[target_id]
     
     await callback.message.edit_text(
-        f"⚔️ *Результат дуэли*\n\n"
-        f"Участники:\n"
-        f"├ {from_name} → {choice_to_emoji(bot_choice)}\n"
-        f"└ {callback.from_user.first_name} → {choice_to_emoji(user_choice)}\n\n"
-        f"{result_text}",
+        f"⚔️ *РЕЗУЛЬТАТ ДУЭЛИ* ⚔️\n\n{result_text}",
         parse_mode=ParseMode.MARKDOWN
     )
     await callback.answer()
@@ -536,102 +583,24 @@ async def reject_duel(callback: types.CallbackQuery):
     
     if target_id in duel_requests:
         request = duel_requests[target_id]
-        from_name = request["from_name"]
         del duel_requests[target_id]
         
         await callback.message.edit_text(f"❌ {callback.from_user.first_name} отклонил вызов на дуэль!")
         
-        await callback.bot.send_message(
-            request["from_id"],
-            f"❌ {callback.from_user.first_name} отклонил ваш вызов на дуэль!"
-        )
+        try:
+            await callback.bot.send_message(
+                request["from_id"],
+                f"❌ {callback.from_user.first_name} отклонил ваш вызов на дуэль!"
+            )
+        except:
+            pass
     
     await callback.answer()
 
 
-# ==================== КНОПКИ ИГР ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-@router.callback_query(lambda c: c.data == "games")
-async def games_menu(callback: types.CallbackQuery):
-    """Меню игр"""
-    await callback.message.edit_text(
-        "🎮 *Игры NEXUS Bot*\n\n"
-        "Выберите игру:\n\n"
-        "🎰 *Слот* — /slot 100\n"
-        "🎡 *Рулетка* — /roulette 100 красный\n"
-        "✂️ *КНБ* — /rps камень\n"
-        "⚔️ *Дуэль* — /duel @user 100\n\n"
-        f"💰 Минимальные ставки:\n"
-        f"Слот: {SLOT_COST}, Рулетка: {ROULETTE_MIN}, Дуэль: {DUEL_MIN}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_games_keyboard()
-    )
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "game_slot")
-async def game_slot_info(callback: types.CallbackQuery):
-    """Информация о слоте"""
-    await callback.message.edit_text(
-        "🎰 *Слот-машина*\n\n"
-        "Команда: `/slot 100`\n"
-        f"Минимальная ставка: {SLOT_COST} монет\n\n"
-        "✨ *Выигрыши:*\n"
-        "├ 💎💎💎 → x10 от ставки\n"
-        "├ ⭐⭐⭐ → x5 от ставки\n"
-        "├ 🍒🍒🍒 → x3 от ставки\n"
-        "└ 🍒🍒🍊 → x0.5 от ставки\n\n"
-        "Пример: `/slot 100` — сделать ставку 100 монет",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_games_keyboard()
-    )
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "game_roulette")
-async def game_roulette_info(callback: types.CallbackQuery):
-    """Информация о рулетке"""
-    await callback.message.edit_text(
-        "🎡 *Рулетка*\n\n"
-        "Команда: `/roulette 100 красный`\n"
-        f"Минимальная ставка: {ROULETTE_MIN} монет\n\n"
-        "Цвета: красный, черный\n"
-        "💰 Выигрыш: x2 от ставки\n\n"
-        "Пример: `/roulette 100 красный`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_games_keyboard()
-    )
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "game_rps")
-async def game_rps_info(callback: types.CallbackQuery):
-    """Информация о КНБ"""
-    await callback.message.edit_text(
-        "✂️ *Камень-ножницы-бумага*\n\n"
-        "Команда: `/rps камень`\n"
-        "💰 Ставка: 50 монет\n\n"
-        "Варианты: камень, ножницы, бумага\n\n"
-        "Пример: `/rps камень`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_games_keyboard()
-    )
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "game_duel")
-async def game_duel_info(callback: types.CallbackQuery):
-    """Информация о дуэли"""
-    await callback.message.edit_text(
-        "⚔️ *Дуэль*\n\n"
-        "Команда: `/duel @username 100`\n"
-        f"Минимальная ставка: {DUEL_MIN} монет\n\n"
-        "1. Вы вызываете игрока на дуэль\n"
-        "2. Противник принимает вызов\n"
-        "3. Бот случайно определяет победителя\n"
-        "4. Победитель забирает обе ставки\n\n"
-        "Пример: `/duel @user 100`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_games_keyboard()
-    )
-    await callback.answer()
+async def get_balance(user_id: int) -> int:
+    """Получить баланс пользователя"""
+    user = await db.get_user(user_id)
+    return user["balance"] if user else 0
