@@ -2,13 +2,14 @@
 import asyncio
 import logging
 import os
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from config import BOT_TOKEN
 from database import db
+from utils.auto_delete import track_and_delete
 
 load_dotenv()
 
@@ -45,18 +46,34 @@ dp.include_routers(
     referral_router,
 )
 
+
+# Middleware для автоудаления сообщений
+@dp.message()
+async def auto_delete_middleware(message: types.Message):
+    """Автоматическое удаление сообщений (кроме команд)"""
+    # Пропускаем команды, которые не нужно удалять
+    if message.text and message.text.startswith('/'):
+        return
+    
+    # Для остальных сообщений удаляем через 30 секунд
+    asyncio.create_task(track_and_delete(bot, message.chat.id, message.from_user.id, message.message_id, 30))
+
+
 async def on_startup():
     await db.init()
     logger.info("✅ NEXUS Bot v5.0 запущен на Amvera!")
+
 
 async def on_shutdown():
     await db.close()
     logger.info("👋 Бот остановлен")
 
+
 async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     await dp.start_polling(bot, skip_updates=True)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
