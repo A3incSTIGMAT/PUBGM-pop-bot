@@ -6,7 +6,7 @@ load_dotenv()
 # ==================== ОБЯЗАТЕЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is required! Add it to environment variables.")
+    raise ValueError("BOT_TOKEN is required!")
 
 # ==================== АДМИНИСТРИРОВАНИЕ ====================
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
@@ -14,7 +14,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 # ==================== ПУТИ ДЛЯ AMVERA ====================
 DATA_DIR = "/data"
 DATABASE_PATH = os.getenv("DATABASE_PATH", f"{DATA_DIR}/nexus.db")
-DB_PATH = DATABASE_PATH  # Для совместимости
+DB_PATH = DATABASE_PATH
 LOG_FILE = os.getenv("LOG_FILE", f"{DATA_DIR}/nexus.log")
 
 # ==================== ЭКОНОМИКА ====================
@@ -34,7 +34,8 @@ MAX_WARN_COUNT = int(os.getenv("MAX_WARN_COUNT", "3"))
 VIP_PRICE = int(os.getenv("VIP_PRICE", "5000"))
 VIP_DURATION_DAYS = int(os.getenv("VIP_DURATION_DAYS", "30"))
 
-# ==================== AI (OpenRouter) ====================
+# ==================== AI (OpenRouter / OpenAI) ====================
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # ← ДОБАВИТЬ ЭТУ СТРОКУ
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 AI_ENABLED = os.getenv("AI_ENABLED", "False").lower() == "true"
 
@@ -44,14 +45,14 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # ==================== БЕЗОПАСНОСТЬ ====================
 SECRET_KEY = os.getenv("SECRET_KEY", "default-secret-key-change-me")
 
-# ==================== ОЗОН БАНК (опционально) ====================
+# ==================== ОЗОН БАНК ====================
 OZON_BANK_API_KEY = os.getenv("OZON_BANK_API_KEY", "")
 OZON_BANK_NAME = os.getenv("OZON_BANK_NAME", "Озон Банк")
 OZON_RECEIVER = os.getenv("OZON_RECEIVER", "")
 OZON_CARD_LAST4 = os.getenv("OZON_CARD_LAST4", "")
 OZON_SBP_QR_URL = os.getenv("OZON_SBP_QR_URL", "")
 
-# ==================== СОЦИАЛЬНЫЕ СЕТИ (опционально) ====================
+# ==================== СОЦИАЛЬНЫЕ СЕТИ ====================
 TWITCH_URL = os.getenv("TWITCH_URL", "")
 INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
