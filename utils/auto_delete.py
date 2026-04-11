@@ -48,3 +48,9 @@ async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, bot
 async def delete_bot_message_after(bot: Bot, chat_id: int, message_id: int, delay: int = 10):
     """Просто удалить сообщение бота через delay секунд (без отслеживания предыдущих)"""
     asyncio.create_task(delete_message(bot, chat_id, message_id, delay))
+
+
+# ============ АЛИАСЫ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ ============
+# Чтобы избежать ошибок импорта, добавляем старые названия функций
+track_and_delete = track_and_delete_bot_message
+delete_after = delete_bot_message_after
