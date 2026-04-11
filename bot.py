@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from config import BOT_TOKEN
-from database import db  # ← импортируем db, а не init_db
+from database import db
 
 load_dotenv()
 
@@ -25,22 +25,29 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 # Импорт роутеров
-from handlers import start, profile, economy, games, shop, vip, tag, ai_assistant
+from handlers.start import router as start_router
+from handlers.profile import router as profile_router
+from handlers.economy import router as economy_router
+from handlers.games import router as games_router
+from handlers.tag import router as tag_router
+from handlers.ai_assistant import router as ai_assistant_router
+from handlers.vip import router as vip_router
+from handlers.referral import router as referral_router
 
 dp.include_routers(
-    start.router,
-    profile.router,
-    economy.router,
-    games.router,
-    shop.router,
-    vip.router,
-    tag.router,
-    ai_assistant.router,
+    start_router,
+    profile_router,
+    economy_router,
+    games_router,
+    tag_router,
+    ai_assistant_router,
+    vip_router,
+    referral_router,
 )
 
 async def on_startup():
-    await db.init()  # ← вызываем db.init(), а не init_db()
-    logger.info("✅ NEXUS Bot v5.0 запущен!")
+    await db.init()
+    logger.info("✅ NEXUS Bot v5.0 запущен на Amvera!")
 
 async def on_shutdown():
     await db.close()
