@@ -34,14 +34,14 @@ def parse_color(text: str) -> str:
     return None
 
 
-def parse_rps(text: str) -> str:
+def parse_rps_choice(text: str) -> str:
     """Извлечь выбор для КНБ"""
     text = text.lower()
-    if 'камень' in text or 'rock' in text or '🗿' in text:
+    if any(word in text for word in ['камень', 'rock', '🗿']):
         return 'rock'
-    if 'ножницы' in text or 'scissors' in text or '✂️' in text:
+    if any(word in text for word in ['ножницы', 'scissors', '✂️']):
         return 'scissors'
-    if 'бумага' in text or 'paper' in text or '📄' in text:
+    if any(word in text for word in ['бумага', 'paper', '📄']):
         return 'paper'
     return None
 
@@ -59,9 +59,44 @@ def get_games_keyboard():
          InlineKeyboardButton(text="🎡 Рулетка", callback_data="game_roulette")],
         [InlineKeyboardButton(text="⚔️ Дуэль", callback_data="game_duel"),
          InlineKeyboardButton(text="✂️ КНБ", callback_data="game_rps")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main_menu")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     return keyboard
+
+
+# ==================== ОБНОВЛЕНИЕ VIP ПРИ ПОБЕДАХ ====================
+
+async def update_vip_by_wins(user_id: int) -> bool:
+    """Обновляет VIP статус пользователя на основе побед"""
+    user = await db.get_user(user_id)
+    if not user:
+        return False
+    
+    wins = user.get("wins", 0)
+    current_vip = user.get("vip_level", 0)
+    
+    # Определяем новый уровень VIP
+    new_vip = 0
+    if wins >= 100:
+        new_vip = 3
+    elif wins >= 50:
+        new_vip = 2
+    elif wins >= 10:
+        new_vip = 1
+    
+    # Обновляем если изменилось
+    if new_vip > current_vip:
+        from datetime import datetime, timedelta
+        new_until = (datetime.now() + timedelta(days=30)).isoformat()
+        
+        conn = db._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET vip_level = ?, vip_until = ? WHERE user_id = ?", 
+                       (new_vip, new_until, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    return False
 
 
 # ==================== СЛОТ-МАШИНА ====================
@@ -74,25 +109,25 @@ async def play_slot(user_id: int, bet: int):
     if result[0] == result[1] == result[2]:
         if result[0] == "💎":
             win = bet * 10
-            msg = f"✨ ДЖЕКПОТ! x10! ✨"
+            msg = "✨ ДЖЕКПОТ! x10! ✨"
         elif result[0] == "⭐":
             win = bet * 5
-            msg = f"✨ СУПЕР ВЫИГРЫШ! x5! ✨"
+            msg = "✨ СУПЕР ВЫИГРЫШ! x5! ✨"
         else:
             win = bet * 3
-            msg = f"🎉 ВЫИГРЫШ! x3! 🎉"
+            msg = "🎉 ВЫИГРЫШ! x3! 🎉"
         
-        await db.update_balance(user_id, win, f"Выигрыш в слоте: {result}")
-        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n{msg}\n💰 Вы выиграли {win} монет!"
+        await db.update_balance(user_id, win, f"Выигрыш в слоте")
+        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n{msg}\n💰 +{win} монет!"
     
     elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
         win = bet // 2
-        await db.update_balance(user_id, win, f"Выигрыш в слоте: {result}")
-        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n🎉 Вы выиграли {win} монет!"
+        await db.update_balance(user_id, win, f"Выигрыш в слоте")
+        return win, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n🎉 Выигрыш! +{win} монет!"
     
     else:
-        await db.update_balance(user_id, -bet, f"Проигрыш в слоте: {result}")
-        return -bet, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n😔 Вы проиграли {bet} монет."
+        await db.update_balance(user_id, -bet, f"Проигрыш в слоте")
+        return -bet, f"🎰 {result[0]} | {result[1]} | {result[2]} 🎰\n\n😔 Проигрыш! -{bet} монет."
 
 
 @router.message(Command("slot"))
@@ -105,10 +140,11 @@ async def cmd_slot(message: types.Message):
         await message.answer(
             "🎰 *Слот-машина*\n\n"
             "Использование: `/slot 100`\n"
-            "Минимальная ставка: 50 монет\n\n"
-            "✨ Три 💎 дают x10 выигрыш!\n"
-            "⭐ Три ⭐ дают x5 выигрыш!\n"
-            "🍒 Три одинаковых дают x3!",
+            f"Минимальная ставка: {SLOT_COST} монет\n\n"
+            "✨ *Выигрыши:*\n"
+            "├ 💎💎💎 → x10\n"
+            "├ ⭐⭐⭐ → x5\n"
+            "└ 🍒🍒🍒 → x3",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -123,19 +159,22 @@ async def cmd_slot(message: types.Message):
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Ваш баланс: {user['balance']} монет")
+        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
         return
     
-    win, result_text = await play_slot(user_id, bet)
+    win, response = await play_slot(user_id, bet)
     
-    # Обновляем статистику
+    # Обновляем статистику и VIP
     if win > 0:
-        await db.update_balance(user_id, 0, "")  # Просто для триггера
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
+        
+        upgraded = await update_vip_by_wins(user_id)
+        if upgraded:
+            response += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
     elif win < 0:
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -143,7 +182,7 @@ async def cmd_slot(message: types.Message):
         conn.commit()
         conn.close()
     
-    await message.answer(result_text)
+    await message.answer(response, parse_mode=ParseMode.MARKDOWN)
 
 
 # ==================== РУЛЕТКА ====================
@@ -160,7 +199,8 @@ async def cmd_roulette(message: types.Message):
         await message.answer(
             "🎡 *Рулетка*\n\n"
             "Использование: `/roulette 100 красный`\n"
-            "Цвета: красный, черный\n\n"
+            f"Минимальная ставка: {ROULETTE_MIN} монет\n\n"
+            "Цвета: красный, черный\n"
             "💰 Выигрыш: x2 от ставки",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -176,7 +216,7 @@ async def cmd_roulette(message: types.Message):
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Ваш баланс: {user['balance']} монет")
+        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
         return
     
     result_color = random.choice(["red", "black"])
@@ -184,7 +224,7 @@ async def cmd_roulette(message: types.Message):
     
     if color == result_color:
         win = bet * 2
-        await db.update_balance(user_id, win, f"Выигрыш в рулетке: {color}")
+        await db.update_balance(user_id, win, f"Выигрыш в рулетке")
         
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -192,14 +232,12 @@ async def cmd_roulette(message: types.Message):
         conn.commit()
         conn.close()
         
-        await message.answer(
-            f"🎡 *Рулетка*\n\n"
-            f"Выпало: {color_names[result_color]}\n"
-            f"🎉 ВЫ ВЫИГРАЛИ! +{win} монет!",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        upgraded = await update_vip_by_wins(user_id)
+        response = f"🎡 *Рулетка*\n\nВыпало: {color_names[result_color]}\n🎉 ВЫ ВЫИГРАЛИ! +{win} монет!"
+        if upgraded:
+            response += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
     else:
-        await db.update_balance(user_id, -bet, f"Проигрыш в рулетке: {color}")
+        await db.update_balance(user_id, -bet, f"Проигрыш в рулетке")
         
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -207,12 +245,9 @@ async def cmd_roulette(message: types.Message):
         conn.commit()
         conn.close()
         
-        await message.answer(
-            f"🎡 *Рулетка*\n\n"
-            f"Выпало: {color_names[result_color]}\n"
-            f"😔 Вы проиграли {bet} монет.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        response = f"🎡 *Рулетка*\n\nВыпало: {color_names[result_color]}\n😔 Вы проиграли {bet} монет"
+    
+    await message.answer(response, parse_mode=ParseMode.MARKDOWN)
 
 
 # ==================== КАМЕНЬ-НОЖНИЦЫ-БУМАГА ====================
@@ -241,7 +276,7 @@ async def play_rps(user_choice: str, bot_choice: str, bet: int):
 async def cmd_rps(message: types.Message):
     """Камень-ножницы-бумага"""
     user_id = message.from_user.id
-    choice = parse_rps(message.text)
+    choice = parse_rps_choice(message.text)
     
     if not choice:
         await message.answer(
@@ -265,9 +300,11 @@ async def cmd_rps(message: types.Message):
         return
     
     bot_choice = random.choice(["rock", "scissors", "paper"])
+    choice_names = {"rock": "🗿 камень", "scissors": "✂️ ножницы", "paper": "📄 бумага"}
+    
     result, msg = await play_rps(choice, bot_choice, bet)
     
-    await db.update_balance(user_id, result, f"Игра КНБ: {choice} vs {bot_choice}")
+    await db.update_balance(user_id, result, f"Игра КНБ")
     
     if result > 0:
         conn = db._get_connection()
@@ -275,6 +312,10 @@ async def cmd_rps(message: types.Message):
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
+        
+        upgraded = await update_vip_by_wins(user_id)
+        if upgraded:
+            msg += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
     elif result < 0:
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -284,14 +325,17 @@ async def cmd_rps(message: types.Message):
     
     await message.answer(
         f"✂️ *Камень-ножницы-бумага*\n\n"
-        f"Вы: {choice_to_emoji(choice)}\n"
-        f"Бот: {choice_to_emoji(bot_choice)}\n\n"
+        f"Вы: {choice_names[choice]}\n"
+        f"Бот: {choice_names[bot_choice]}\n\n"
         f"{msg}",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
 # ==================== ДУЭЛЬ С ДРУГИМ ИГРОКОМ ====================
+
+duel_requests = {}
+
 
 @router.message(Command("duel"))
 async def cmd_duel(message: types.Message):
@@ -327,7 +371,7 @@ async def cmd_duel(message: types.Message):
         return
     
     if user["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Ваш баланс: {user['balance']} монет")
+        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} монет")
         return
     
     # Находим противника
@@ -338,7 +382,7 @@ async def cmd_duel(message: types.Message):
     conn.close()
     
     if not row:
-        await message.answer(f"❌ Пользователь @{username} не найден в базе")
+        await message.answer(f"❌ Пользователь @{username} не найден")
         return
     
     target_id = row[0]
@@ -349,10 +393,7 @@ async def cmd_duel(message: types.Message):
         return
     
     # Сохраняем запрос на дуэль
-    if not hasattr(cmd_duel, 'duel_requests'):
-        cmd_duel.duel_requests = {}
-    
-    cmd_duel.duel_requests[target_id] = {
+    duel_requests[target_id] = {
         "from_id": user_id,
         "from_name": message.from_user.first_name,
         "bet": bet,
@@ -384,19 +425,14 @@ async def accept_duel(callback: types.CallbackQuery):
         await callback.answer("❌ Это не вам адресован вызов!", show_alert=True)
         return
     
-    if not hasattr(cmd_duel, 'duel_requests'):
+    if target_id not in duel_requests:
         await callback.answer("❌ Вызов устарел", show_alert=True)
         return
     
-    request = cmd_duel.duel_requests.get(user_id)
-    if not request:
-        await callback.answer("❌ Вызов устарел", show_alert=True)
-        return
-    
+    request = duel_requests[target_id]
     from_id = request["from_id"]
     bet = request["bet"]
     from_name = request["from_name"]
-    chat_id = request["chat_id"]
     
     # Проверяем балансы
     user = await db.get_user(user_id)
@@ -442,13 +478,16 @@ async def accept_duel(callback: types.CallbackQuery):
         await db.update_balance(user_id, win_amount, f"Выигрыш в дуэли с {from_name}")
         result_text = f"🎉 Победил {callback.from_user.first_name}! +{win_amount} монет!"
         
-        # Обновляем статистику
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         cursor.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (from_id,))
         conn.commit()
         conn.close()
+        
+        upgraded = await update_vip_by_wins(user_id)
+        if upgraded:
+            result_text += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Вы получили новый VIP уровень! 🎉"
         
     elif winner == "bot":
         win_amount = bet * 2
@@ -462,13 +501,17 @@ async def accept_duel(callback: types.CallbackQuery):
         conn.commit()
         conn.close()
         
+        upgraded = await update_vip_by_wins(from_id)
+        if upgraded:
+            result_text += "\n\n🎉 *ПОЗДРАВЛЯЮ!* Победитель получил новый VIP уровень! 🎉"
+        
     else:
         await db.update_balance(user_id, bet, "Ничья в дуэли (возврат)")
         await db.update_balance(from_id, bet, "Ничья в дуэли (возврат)")
         result_text = "🤝 Ничья! Ставки возвращены."
     
     # Удаляем запрос
-    del cmd_duel.duel_requests[user_id]
+    del duel_requests[target_id]
     
     await callback.message.edit_text(
         f"⚔️ *Результат дуэли*\n\n"
@@ -488,22 +531,20 @@ async def reject_duel(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
     if user_id != target_id:
-        await callback.answer("❌ Это не вам адресован вызов!", show_alert=True)
+        await callback.answer("❌ Это не вам!", show_alert=True)
         return
     
-    if hasattr(cmd_duel, 'duel_requests'):
-        if user_id in cmd_duel.duel_requests:
-            request = cmd_duel.duel_requests[user_id]
-            from_name = request["from_name"]
-            del cmd_duel.duel_requests[user_id]
-            
-            await callback.message.edit_text(f"❌ {callback.from_user.first_name} отклонил вызов на дуэль!")
-            
-            # Уведомляем вызвавшего
-            await callback.bot.send_message(
-                request["from_id"],
-                f"❌ {callback.from_user.first_name} отклонил ваш вызов на дуэль!"
-            )
+    if target_id in duel_requests:
+        request = duel_requests[target_id]
+        from_name = request["from_name"]
+        del duel_requests[target_id]
+        
+        await callback.message.edit_text(f"❌ {callback.from_user.first_name} отклонил вызов на дуэль!")
+        
+        await callback.bot.send_message(
+            request["from_id"],
+            f"❌ {callback.from_user.first_name} отклонил ваш вызов на дуэль!"
+        )
     
     await callback.answer()
 
@@ -520,7 +561,7 @@ async def games_menu(callback: types.CallbackQuery):
         "🎡 *Рулетка* — /roulette 100 красный\n"
         "✂️ *КНБ* — /rps камень\n"
         "⚔️ *Дуэль* — /duel @user 100\n\n"
-        "💰 Минимальные ставки:\n"
+        f"💰 Минимальные ставки:\n"
         f"Слот: {SLOT_COST}, Рулетка: {ROULETTE_MIN}, Дуэль: {DUEL_MIN}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_games_keyboard()
