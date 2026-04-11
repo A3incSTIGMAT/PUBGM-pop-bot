@@ -19,13 +19,13 @@ async def cmd_profile(message: types.Message):
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Моя анкета", callback_data="view_profile"),
-         InlineKeyboardButton(text="📝 Заполнить анкету", callback_data="fill_profile")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="👤 МОЯ АНКЕТА", callback_data="view_profile"),
+         InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ АНКЕТУ", callback_data="fill_profile")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
     
     profile_text = f"""
-👤 *Профиль пользователя*
+👤 *ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ*
 
 ━━━━━━━━━━━━━━━━━━━━━
 📛 Имя: {user.get('first_name', 'Не указано')}
@@ -35,9 +35,9 @@ async def cmd_profile(message: types.Message):
 
 💰 Баланс: {user.get('balance', 0)} NCoins
 
-⭐ VIP статус: {'✅ Активирован' if user.get('vip_level', 0) > 0 else '❌ Нет'}
+⭐ VIP статус: {'✅ АКТИВИРОВАН' if user.get('vip_level', 0) > 0 else '❌ НЕТ'}
 
-🏆 Статистика:
+🏆 СТАТИСТИКА:
 ├ Побед: {user.get('wins', 0)}
 ├ Поражений: {user.get('losses', 0)}
 └ Всего игр: {user.get('wins', 0) + user.get('losses', 0)}
@@ -51,53 +51,45 @@ async def cmd_profile(message: types.Message):
 
 @router.callback_query(lambda c: c.data == "profile")
 async def profile_callback(callback: types.CallbackQuery):
-    await cmd_profile(callback.message)
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "view_profile")
-async def view_profile(callback: types.CallbackQuery):
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT full_name, age, city, timezone, about FROM user_profiles WHERE user_id = ?", 
-                   (callback.from_user.id,))
-    row = cursor.fetchone()
-    conn.close()
+    """Обработчик кнопки ПРОФИЛЬ из меню"""
+    user_id = callback.from_user.id
+    user = await db.get_user(user_id)
     
-    if not row:
+    if not user:
         await callback.message.edit_text(
-            "❌ Анкета не найдена!\n\nИспользуйте /setprofile для создания",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="profile")]
-            ])
+            "❌ Вы не зарегистрированы!\n\nНажмите /start для регистрации",
+            reply_markup=main_menu()
         )
         await callback.answer()
         return
     
-    await callback.message.edit_text(
-        f"👤 *Ваша анкета*\n\n"
-        f"📛 Имя: {row[0]}\n"
-        f"📅 Возраст: {row[1]}\n"
-        f"🏙️ Город: {row[2]}\n"
-        f"🕐 Часовой пояс: {row[3]}\n"
-        f"📝 О себе: {row[4]}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="profile")]
-        ])
-    )
-    await callback.answer()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 МОЯ АНКЕТА", callback_data="view_profile"),
+         InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ АНКЕТУ", callback_data="fill_profile")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+    
+    profile_text = f"""
+👤 *ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ*
 
+━━━━━━━━━━━━━━━━━━━━━
+📛 Имя: {user.get('first_name', 'Не указано')}
+🆔 ID: {user_id}
+📅 Регистрация: {user.get('register_date', 'Неизвестно')[:10]}
+━━━━━━━━━━━━━━━━━━━━━
 
-@router.callback_query(lambda c: c.data == "fill_profile")
-async def fill_profile(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "📝 *Создание анкеты*\n\n"
-        "Используйте команду `/setprofile` в чате.\n\n"
-        "Бот задаст 5 вопросов для создания анкеты.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="profile")]
-        ])
-    )
+💰 Баланс: {user.get('balance', 0)} NCoins
+
+⭐ VIP статус: {'✅ АКТИВИРОВАН' if user.get('vip_level', 0) > 0 else '❌ НЕТ'}
+
+🏆 СТАТИСТИКА:
+├ Побед: {user.get('wins', 0)}
+├ Поражений: {user.get('losses', 0)}
+└ Всего игр: {user.get('wins', 0) + user.get('losses', 0)}
+
+🔥 Стрик: {user.get('daily_streak', 0)} дней
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    await callback.message.edit_text(profile_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     await callback.answer()
