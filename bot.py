@@ -8,10 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from config import BOT_TOKEN
-from database import db
-
-# Правильные импорты из auto_delete
-from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
+from database import db  # импортируем db, а не init_db
 
 load_dotenv()
 
@@ -51,7 +48,8 @@ dp.include_routers(
 logger.info("✅ Все роутеры загружены")
 
 async def on_startup():
-    init_db()
+    # Используем db.init() вместо init_db()
+    await db.init()
     logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
 
 async def on_shutdown():
