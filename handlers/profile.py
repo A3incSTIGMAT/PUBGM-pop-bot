@@ -9,7 +9,7 @@ from utils.keyboards import main_menu
 
 router = Router()
 
-# Хранилище состояний для анкеты
+# Хранилище состояний для анкеты (ЭКСПОРТИРУЕТСЯ для других модулей)
 profile_states = {}
 
 
@@ -143,6 +143,11 @@ async def view_profile(callback: types.CallbackQuery):
 async def fill_profile(callback: types.CallbackQuery):
     """Начать заполнение анкеты"""
     user_id = callback.from_user.id
+    
+    # Очищаем предыдущее состояние, если было
+    if user_id in profile_states:
+        del profile_states[user_id]
+    
     profile_states[user_id] = {'step': 1}
     
     await callback.message.edit_text(
