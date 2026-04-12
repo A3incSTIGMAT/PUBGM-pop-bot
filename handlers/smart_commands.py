@@ -19,6 +19,9 @@ router = Router()
 # Хранилище запросов дуэлей
 duel_requests = {}
 
+# Хранилище состояний анкеты (из profile.py)
+profile_states = {}
+
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -62,7 +65,7 @@ def extract_username(text: str) -> str:
 async def smart_parser(message: types.Message):
     """Умный парсер — обрабатывает ВСЕ сообщения без /"""
     
-    # Игнорируем команды с /
+    # Игнорируем команды с / (они обрабатываются отдельными хендлерами)
     if message.text and message.text.startswith('/'):
         return
     
@@ -74,6 +77,11 @@ async def smart_parser(message: types.Message):
     text = message.text.strip().lower() if message.text else ""
     
     if not text:
+        return
+    
+    # ПРОВЕРКА: если пользователь заполняет анкету — НЕ обрабатываем другие команды
+    if user_id in profile_states:
+        # Не обрабатываем игры и другие команды, пока заполняется анкета
         return
     
     # Проверяем регистрацию
