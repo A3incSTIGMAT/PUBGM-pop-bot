@@ -150,7 +150,8 @@ async def fill_profile(callback: types.CallbackQuery):
     
     profile_states[user_id] = {'step': 1}
     
-    await callback.message.edit_text(
+    # ОТПРАВЛЯЕМ НОВОЕ СООБЩЕНИЕ, а не редактируем старое
+    await callback.message.answer(
         "📝 *СОЗДАНИЕ АНКЕТЫ*\n\n"
         "*Шаг 1 из 5:* Введите ваше имя\n\n"
         "Пример: `Александр`\n\n"
@@ -169,12 +170,22 @@ async def cancel_profile(message: types.Message):
     await message.answer("❌ Заполнение анкеты отменено.")
 
 
-@router.message(lambda message: message.from_user.id in profile_states)
+# ВАЖНО: этот обработчик должен быть выше других, чтобы перехватывать сообщения
+@router.message()
 async def process_profile_step(message: types.Message):
-    """Обработка шагов анкеты"""
+    """Обработка шагов анкеты (ловим ВСЕ сообщения)"""
     user_id = message.from_user.id
+    
+    # Игнорируем команды
+    if message.text and message.text.startswith('/'):
+        return
+    
+    # Проверяем, есть ли пользователь в процессе заполнения анкеты
+    if user_id not in profile_states:
+        return
+    
     state = profile_states[user_id]
-    step = state['step']
+    step = state.get('step', 1)
     
     if step == 1:
         state['full_name'] = message.text
