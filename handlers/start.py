@@ -77,19 +77,19 @@ async def cmd_start(message: types.Message):
 *🎁 ВАМ НАЧИСЛЕНО: {START_BALANCE} МОНЕТ!*
 """
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Начать использовать", callback_data="back_to_menu")],
-            [InlineKeyboardButton(text="🔗 Моя реферальная ссылка", callback_data="my_ref")]
+            [InlineKeyboardButton(text="🚀 НАЧАТЬ ИСПОЛЬЗОВАТЬ", callback_data="back_to_menu")],
+            [InlineKeyboardButton(text="🔗 МОЯ РЕФЕРАЛЬНАЯ ССЫЛКА", callback_data="my_ref")]
         ])
         
         msg = await message.answer(presentation_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=60)
     else:
         msg = await message.answer(
-            f"👋 <b>С возвращением, {first_name}!</b>\n\n"
-            f"💰 Ваш баланс: {user['balance']} монет\n"
-            f"⭐ VIP статус: {'Да' if user['vip_level'] > 0 else 'Нет'}\n\n"
-            f"Выберите действие в меню 👇",
-            parse_mode=ParseMode.HTML,
+            f"👋 *С возвращением, {first_name}!*\n\n"
+            f"💰 Ваш баланс: {user['balance']} NCoins\n"
+            f"⭐ VIP статус: {'✅ АКТИВИРОВАН' if user['vip_level'] > 0 else '❌ НЕТ'}\n\n"
+            f"👇 Выберите действие в меню:",
+            parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_menu()
         )
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=30)
@@ -101,7 +101,7 @@ async def cmd_help(message: types.Message):
     chat_id = message.chat.id
     
     help_text = """
-🤖 *NEXUS Chat Manager — ПОМОЩЬ*
+🤖 *NEXUS CHAT MANAGER — ПОМОЩЬ*
 
 ━━━━━━━━━━━━━━━━━━━━━
 
@@ -115,31 +115,31 @@ async def cmd_help(message: types.Message):
 
 *📋 ОСНОВНЫЕ КОМАНДЫ:*
 
-*💰 Экономика*
+*💰 ЭКОНОМИКА*
 /balance — баланс
 /daily — бонус дня
 /transfer @user 100 — перевод
 
-*🎮 Игры*
+*🎮 ИГРЫ*
 /slot 100 — слот
 /roulette 100 красный — рулетка
 /rps камень — КНБ
 /duel @user 100 — дуэль
 
-*👤 Профиль*
+*👤 ПРОФИЛЬ*
 /profile — профиль
 /vip — VIP статус
 
-*📢 Оповещения*
+*📢 ОПОВЕЩЕНИЯ*
 /all — общий сбор
 /tag @user — упомянуть
 /tagrole админы — написать админам
 
-*🔗 Реферальная система*
+*🔗 РЕФЕРАЛЬНАЯ СИСТЕМА*
 /my_ref — получить реферальную ссылку
-/enable_ref — включить (только владелец чата)
+/ref_panel — управление (только владелец чата)
 
-*🔒 Прочее*
+*🔒 ПРОЧЕЕ*
 /privacy — политика конфиденциальности
 /delete_my_data — удалить мои данные
 
@@ -153,48 +153,49 @@ async def cmd_help(message: types.Message):
 
 @router.message(Command("privacy"))
 async def cmd_privacy(message: types.Message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
+    """Политика конфиденциальности (без внешних ссылок)"""
     privacy_text = """
-🔒 *Политика конфиденциальности NEXUS Chat Manager*
+🔒 *ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ NEXUS CHAT MANAGER*
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-*Какие данные собираются:*
+*📌 КАКИЕ ДАННЫЕ СОБИРАЮТСЯ:*
+
 ├ Telegram ID
 ├ Имя пользователя
 ├ Баланс монет
 ├ Статистика игр
 └ Данные анкеты (если заполнены)
 
-*Как используются:*
+*📌 КАК ИСПОЛЬЗУЮТСЯ:*
+
 ├ Для работы игр и экономики
 ├ Для сохранения прогресса
 └ Для упоминаний в общем сборе
 
-*Хранение:*
+*📌 ХРАНЕНИЕ:*
+
 ├ Данные хранятся в зашифрованной БД
 ├ Не передаются третьим лицам
 └ Удаляются по команде /delete_my_data
 
-*Контакты:*
+*📌 КОНТАКТЫ:*
+
 └ @A3incSTIGMAT
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-📄 Полная версия: 
-https://github.com/A3incSTIGMAT/NEXUS-bot/blob/main/PRIVACY.md
+✅ *ВСЕ ДАННЫЕ ХРАНЯТСЯ ТОЛЬКО В БОТЕ*
 """
-    msg = await message.answer(privacy_text, parse_mode=ParseMode.MARKDOWN)
-    await delete_bot_message_after(message.bot, chat_id, msg.message_id, delay=30)
+    await message.answer(privacy_text, parse_mode=ParseMode.MARKDOWN)
 
 
 @router.message(Command("delete_my_data"))
 async def cmd_delete_my_data(message: types.Message):
+    """Удаление всех данных пользователя"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, удалить", callback_data="confirm_delete"),
-         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_delete")]
+        [InlineKeyboardButton(text="✅ ДА, УДАЛИТЬ", callback_data="confirm_delete"),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_delete")]
     ])
     
     await message.answer(
@@ -216,7 +217,7 @@ async def cmd_about(message: types.Message):
     chat_id = message.chat.id
     
     about_text = """
-🤖 *NEXUS Chat Manager v5.0*
+🤖 *NEXUS CHAT MANAGER v5.0*
 
 ━━━━━━━━━━━━━━━━━━━━━
 
@@ -252,7 +253,7 @@ NEXUS Chat Manager — это многофункциональный бот дл
 async def back_to_menu_callback(callback: types.CallbackQuery):
     """Возврат в главное меню"""
     await callback.message.edit_text(
-        "🏠 *Главное меню NEXUS Chat Manager*\n\nВыберите действие:",
+        "🏠 *ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER*\n\n👇 Выберите действие:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu()
     )
@@ -293,7 +294,7 @@ async def confirm_delete(callback: types.CallbackQuery):
     conn.close()
     
     await callback.message.edit_text(
-        "✅ *Ваши данные удалены!*\n\n"
+        "✅ *ВАШИ ДАННЫЕ УДАЛЕНЫ!*\n\n"
         "Вы можете начать заново с /start",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -308,27 +309,62 @@ async def cancel_delete(callback: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "privacy")
 async def privacy_callback(callback: types.CallbackQuery):
+    """Политика конфиденциальности из меню"""
     privacy_text = """
-🔒 *Политика конфиденциальности*
+🔒 *ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ*
 
-*Собираемые данные:*
+*📌 Собираемые данные:*
 • Telegram ID
 • Имя пользователя
 • Баланс монет
 • Статистика игр
 
-*Использование:*
+*📌 Использование:*
 • Работа игр и экономики
 • Сохранение прогресса
 • Упоминания в чате
 
-*Удаление данных:*
+*📌 Удаление данных:*
 /delete_my_data
 
-*Контакты:*
+*📌 Контакты:*
 @A3incSTIGMAT
 
-📄 https://github.com/A3incSTIGMAT/NEXUS-bot/blob/main/PRIVACY.md
+━━━━━━━━━━━━━━━━━━━━━
+✅ Данные не передаются третьим лицам
 """
     await callback.message.edit_text(privacy_text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "help")
+async def help_callback(callback: types.CallbackQuery):
+    """Помощь из меню"""
+    help_text = """
+🤖 *NEXUS CHAT MANAGER — ПОМОЩЬ*
+
+*💰 ЭКОНОМИКА*
+/balance — баланс
+/daily — бонус дня
+/transfer @user 100 — перевод
+
+*🎮 ИГРЫ*
+/slot 100 — слот
+/roulette 100 красный — рулетка
+/rps камень — КНБ
+/duel @user 100 — дуэль
+
+*📢 ОПОВЕЩЕНИЯ*
+/all — общий сбор
+/tag @user — упомянуть
+
+*🔗 РЕФЕРАЛКА*
+/my_ref — моя ссылка
+/ref_panel — управление (владелец)
+
+*🔒 ПРОЧЕЕ*
+/privacy — политика
+/delete_my_data — удалить данные
+"""
+    await callback.message.edit_text(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
     await callback.answer()
