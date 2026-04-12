@@ -1,10 +1,17 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
+from datetime import datetime
+import sqlite3
+
 from database import db
 from utils.keyboards import back_button
 
 router = Router()
+
+# Импортируем profile_states для проверки заполнения анкеты
+from handlers.profile import profile_states
+
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message):
@@ -15,36 +22,53 @@ async def cmd_balance(message: Message):
     balance = user["balance"]
     await message.answer(f"💰 Баланс: *{balance} NCoin*", parse_mode="Markdown")
 
+
 @router.message(Command("daily"))
 async def cmd_daily(message: Message):
-    user = await db.get_user(message.from_user.id)
+    user_id = message.from_user.id
+    
+    # Проверяем, не заполняет ли пользователь анкету
+    if user_id in profile_states:
+        await message.answer("❌ Сначала завершите заполнение анкеты командой /cancel_profile")
+        return
+    
+    user = await db.get_user(user_id)
     if not user:
         await message.answer("❌ Сначала используйте /start")
         return
     
-    # Проверка на ежедневный бонус
-    from datetime import datetime
     today = datetime.now().date().isoformat()
     
     if user.get("last_daily") == today:
-        await message.answer("⏰ Вы уже получали бонус сегодня!")
+        await message.answer("⏰ Вы уже получали бонус сегодня! Возвращайтесь завтра.")
         return
     
     # Начисляем бонус
-    await db.update_balance(message.from_user.id, 100, "Ежедневный бонус")
+    await db.update_balance(user_id, 100, "Ежедневный бонус")
     
     # Обновляем дату последнего бонуса
-    import sqlite3
     conn = sqlite3.connect(db.db_path)
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET last_daily = ? WHERE user_id = ?", (today, message.from_user.id))
+    cursor.execute("UPDATE users SET last_daily = ? WHERE user_id = ?", (today, user_id))
     conn.commit()
     conn.close()
     
-    await message.answer("🎁 +100 NCoin! Завтра будет новый бонус.")
+    # Получаем новый баланс
+    updated_user = await db.get_user(user_id)
+    new_balance = updated_user["balance"] if updated_user else 0
+    
+    await message.answer(f"🎁 +100 NCoin! Завтра будет новый бонус.\n\n💰 Новый баланс: {new_balance} NCoin")
+
 
 @router.message(Command("transfer"))
 async def cmd_transfer(message: Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, не заполняет ли пользователь анкету
+    if user_id in profile_states:
+        await message.answer("❌ Сначала завершите заполнение анкеты командой /cancel_profile")
+        return
+    
     args = message.text.split()
     if len(args) < 3:
         await message.answer("❌ Использование: /transfer @username 100")
@@ -62,7 +86,7 @@ async def cmd_transfer(message: Message):
         return
     
     # Получаем отправителя
-    sender = await db.get_user(message.from_user.id)
+    sender = await db.get_user(user_id)
     if not sender:
         await message.answer("❌ Сначала используйте /start")
         return
@@ -72,7 +96,6 @@ async def cmd_transfer(message: Message):
         return
     
     # Ищем получателя по username
-    import sqlite3
     conn = sqlite3.connect(db.db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE username = ?", (to_user,))
@@ -85,20 +108,33 @@ async def cmd_transfer(message: Message):
     
     target_id = row[0]
     
-    if target_id == message.from_user.id:
+    if target_id == user_id:
         await message.answer("❌ Нельзя перевести монеты самому себе")
         return
     
     # Выполняем перевод
-    await db.update_balance(message.from_user.id, -amount, f"Перевод пользователю @{to_user}")
+    await db.update_balance(user_id, -amount, f"Перевод пользователю @{to_user}")
     await db.update_balance(target_id, amount, f"Перевод от @{message.from_user.username or message.from_user.first_name}")
     
-    await message.answer(f"✅ Переведено {amount} NCoin пользователю @{to_user}!")
+    # Получаем новый баланс
+    updated_sender = await db.get_user(user_id)
+    new_balance = updated_sender["balance"] if updated_sender else 0
+    
+    await message.answer(f"✅ Переведено {amount} NCoin пользователю @{to_user}!\n\n💰 Ваш новый баланс: {new_balance} NCoin")
+
 
 @router.callback_query(F.data == "economy")
 async def economy_menu(callback: CallbackQuery):
-    user = await db.get_user(callback.from_user.id)
+    user_id = callback.from_user.id
+    
+    # Проверяем, не заполняет ли пользователь анкету
+    if user_id in profile_states:
+        await callback.answer("❌ Сначала завершите заполнение анкеты", show_alert=True)
+        return
+    
+    user = await db.get_user(user_id)
     balance = user["balance"] if user else 0
+    
     await callback.message.edit_text(
         f"💰 *Экономика*\n\nВаш баланс: {balance} NCoin\n\n"
         f"📌 Доступные команды:\n"
