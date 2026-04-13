@@ -4,7 +4,7 @@
 
 import asyncio
 import logging
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -22,11 +22,12 @@ logger = logging.getLogger(__name__)
 
 def _escape_html(text: str | None) -> str:
     """Безопасное экранирование для ParseMode.HTML"""
-    if not text: return ""
+    if not text:
+        return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-async def is_admin_in_chat(bot: types.Bot, user_id: int, chat_id: int) -> bool:
+async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
     """Проверяет, является ли пользователь администратором чата"""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -256,13 +257,20 @@ async def admin_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "my_ref")
 async def my_ref_callback(callback: types.CallbackQuery):
-    from handlers.referral import generate_referral_text, create_ref_keyboard
+    from handlers.referral import my_referral_link
     
-    # Вызываем логику напрямую, без FakeMessage
-    text = generate_referral_text(callback.from_user)
-    kb = create_ref_keyboard()
+    class FakeMessage:
+        def __init__(self, from_user, chat, bot):
+            self.from_user = from_user
+            self.chat = chat
+            self.bot = bot
+            self.text = "/my_ref"
+        
+        async def answer(self, text, parse_mode=None, reply_markup=None):
+            await callback.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     
-    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    fake_msg = FakeMessage(callback.from_user, callback.message.chat, callback.bot)
+    await my_referral_link(fake_msg)
     await callback.answer()
 
 
@@ -279,6 +287,7 @@ async def confirm_delete(callback: types.CallbackQuery):
             cursor.execute("DELETE FROM user_profiles WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM transactions WHERE from_id = ? OR to_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM user_tag_subscriptions WHERE user_id = ?", (user_id,))
+            # Если есть таблица referrals
             cursor.execute("DELETE FROM referrals WHERE inviter_id = ? OR invitee_id = ?", (user_id, user_id))
             conn.commit()
         except Exception as e:
@@ -286,7 +295,7 @@ async def confirm_delete(callback: types.CallbackQuery):
             raise e
         finally:
             conn.close()
-            
+    
     try:
         await asyncio.to_thread(_delete_user_data)
         await callback.message.edit_text(
@@ -353,4 +362,3 @@ async def help_callback(callback: types.CallbackQuery):
         reply_markup=back_button()
     )
     await callback.answer()
-
