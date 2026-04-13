@@ -2,23 +2,25 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню (с админ-кнопкой для администраторов)"""
-    keyboard = [
+    """Главное меню (с опциональной кнопкой админа)"""
+    kb = [
         [InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile"),
          InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance")],
         [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
          InlineKeyboardButton(text="⭐ VIP", callback_data="vip")],
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
-         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
-        [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
-         InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
+         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")]
     ]
     
-    # Добавляем админ-панель только для администраторов
     if is_admin:
-        keyboard.append([InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="admin_menu")])
+        kb.append([InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="admin_menu")])
     
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    kb.append([
+        InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
+        InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -26,6 +28,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👑 УПРАВЛЕНИЕ ТЭГАМИ", callback_data="tagadmin_menu")],
         [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data="stats_chat")],
+        [InlineKeyboardButton(text="⚙️ НАСТРОЙКИ БОТА", callback_data="bot_settings")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
@@ -52,7 +55,7 @@ def games_menu() -> InlineKeyboardMarkup:
 
 
 def back_button() -> InlineKeyboardMarkup:
-    """Кнопка возврата"""
+    """Кнопка возврата в главное меню"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
