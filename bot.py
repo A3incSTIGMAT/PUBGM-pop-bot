@@ -35,11 +35,6 @@ from handlers.ai_assistant import router as ai_assistant_router
 from handlers.referral import router as referral_router
 from handlers.smart_commands import router as smart_commands_router
 
-# Новые модули умного тэга
-from handlers.tag_user import router as tag_user_router
-from handlers.tag_admin import router as tag_admin_router
-from handlers.tag_trigger import router as tag_trigger_router
-
 # ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
 dp.include_routers(
     start_router,
@@ -51,21 +46,13 @@ dp.include_routers(
     ai_assistant_router,
     referral_router,
     smart_commands_router,
-    tag_user_router,
-    tag_admin_router,
-    tag_trigger_router,
 )
 
 logger.info("✅ Все роутеры загружены")
 
+# ==================== ЗАПУСК И ОСТАНОВКА ====================
 async def on_startup():
     await db.init()
-    # Инициализация категорий тегов
-    try:
-        from utils.tag_categories import init_categories
-        await init_categories()
-    except:
-        pass
     logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
 
 async def on_shutdown():
