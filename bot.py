@@ -25,27 +25,47 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 # ==================== ИМПОРТЫ РОУТЕРОВ ====================
+# Основные модули
 from handlers.start import router as start_router
 from handlers.profile import router as profile_router
 from handlers.economy import router as economy_router
 from handlers.games import router as games_router
 from handlers.vip import router as vip_router
-from handlers.tag import router as tag_router
 from handlers.ai_assistant import router as ai_assistant_router
+
+# Тэги и умный парсер
+from handlers.tag import router as tag_router
+from handlers.smart_commands import router as smart_commands_router
+
+# Реферальная система
 from handlers.referral import router as referral_router
-from handlers.smart_commands import router as smart_commands_router  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+
+# НОВЫЕ МОДУЛИ УМНОГО ТЭГА
+from handlers.tag_user import router as tag_user_router
+from handlers.tag_admin import router as tag_admin_router
+from handlers.tag_trigger import router as tag_trigger_router
 
 # ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
 dp.include_routers(
+    # Основные
     start_router,
     profile_router,
     economy_router,
     games_router,
     vip_router,
-    tag_router,
     ai_assistant_router,
+    
+    # Тэги и умный парсер
+    tag_router,
+    smart_commands_router,
+    
+    # Рефералка
     referral_router,
-    smart_commands_router,  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+    
+    # НОВЫЕ МОДУЛИ УМНОГО ТЭГА
+    tag_user_router,
+    tag_admin_router,
+    tag_trigger_router,
 )
 
 logger.info("✅ Все роутеры загружены")
