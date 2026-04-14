@@ -1,85 +1,159 @@
 #!/usr/bin/env python3
+"""
+NEXUS Chat Manager v5.0 — Точка входа
+Запуск на платформе Amvera
+"""
+
 import asyncio
 import logging
 import os
+import sys
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from config import BOT_TOKEN
-from database import db
-
+# Загрузка переменных окружения ДО импорта config
 load_dotenv()
 
-os.makedirs("/data", exist_ok=True)
-
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        # Для продакшена добавить FileHandler:
+        # logging.FileHandler("/data/bot.log", encoding="utf-8")
+    ]
+)
 logger = logging.getLogger(__name__)
 
+# Проверка токена
+from config import BOT_TOKEN
 if not BOT_TOKEN:
-    logger.error("BOT_TOKEN not set!")
-    exit(1)
+    logger.error("❌ BOT_TOKEN not set in environment!")
+    sys.exit(1)
 
+# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 # ==================== ИМПОРТЫ РОУТЕРОВ ====================
+# Все импорты в одном месте для читаемости и отладки
 from handlers.start import router as start_router
 from handlers.profile import router as profile_router
 from handlers.economy import router as economy_router
 from handlers.games import router as games_router
 from handlers.vip import router as vip_router
-from handlers.tag import router as tag_router
+from handlers.tag import router as tag_router  # Legacy тег-модуль
 from handlers.ai_assistant import router as ai_assistant_router
 from handlers.referral import router as referral_router
 from handlers.smart_commands import router as smart_commands_router
 
-# ========== НОВЫЕ МОДУЛИ УМНОГО ТЭГА ==========
+# Новые модули умного тегирования
 from handlers.tag_admin import router as tag_admin_router
 from handlers.tag_user import router as tag_user_router
 from handlers.tag_trigger import router as tag_trigger_router
 
-# ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
+# ==================== РЕГИСТРАЦИЯ РОУТЕРОВ ====================
+# Порядок важен: более специфичные роутеры должны быть раньше
 dp.include_routers(
+    # Системные
     start_router,
+    smart_commands_router,  # Обработка текстовых команд типа "Нексус, ..."
+    
+    # Функциональные
     profile_router,
     economy_router,
     games_router,
     vip_router,
-    tag_router,
     ai_assistant_router,
     referral_router,
-    smart_commands_router,
-    tag_admin_router,
-    tag_user_router,
-    tag_trigger_router,
+    
+    # Тегирование (новая система)
+    tag_admin_router,      # /tagadmin
+    tag_user_router,       # /mytags
+    tag_trigger_router,    # /tagcat
+    
+    # Legacy тег-модуль (должен быть последним, чтобы не перехватывать команды)
+    tag_router,
 )
 
-logger.info("✅ Все роутеры загружены")
+logger.info("✅ Все роутеры успешно загружены")
 
-# ==================== ЗАПУСК И ОСТАНОВКА ====================
+
+# ==================== ЖИЗНЕННЫЙ ЦИКЛ БОТА ====================
+
 async def on_startup():
-    await db.init()
+    """Инициализация при запуске"""
+    logger.info("🚀 Запуск NEXUS Bot v5.0...")
     
-    # Инициализация категорий тегов
+    # 1. Инициализация БД
+    try:
+        # Проверка: если db.init() синхронный — обернуть в to_thread
+        if asyncio.iscoroutinefunction(db.init):
+            await db.init()
+        else:
+            import asyncio
+            await asyncio.to_thread(db.init)
+        logger.info("✅ База данных инициализирована")
+    except Exception as e:
+        logger.critical(f"❌ Ошибка инициализации БД: {e}", exc_info=True)
+        sys.exit(1)
+    
+    # 2. Инициализация категорий тегов
     try:
         from handlers.tag_categories import init_categories
         await init_categories()
         logger.info("✅ Категории тегов инициализированы")
+    except ImportError:
+        logger.warning("⚠️ Модуль tag_categories не найден, пропускаем")
     except Exception as e:
-        logger.warning(f"Ошибка инициализации категорий: {e}")
+        logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
+    
+    # 3. Проверка окружения
+    data_dir = os.getenv("DATA_DIR", "/data")
+    os.makedirs(data_dir, exist_ok=True)
+    logger.info(f"📁 Data directory: {data_dir}")
     
     logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
 
+
 async def on_shutdown():
-    await db.close()
+    """Очистка при остановке"""
+    logger.info("🛑 Остановка бота...")
+    
+    try:
+        if asyncio.iscoroutinefunction(db.close):
+            await db.close()
+        else:
+            import asyncio
+            await asyncio.to_thread(db.close)
+        logger.info("✅ База данных закрыта")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при закрытии БД: {e}")
+    
+    await bot.session.close()
     logger.info("👋 NEXUS Bot v5.0 остановлен")
+
+
+# ==================== ТОЧКА ВХОДА ====================
 
 async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
+    
+    # Запуск поллинга
+    logger.info("📡 Запуск long-polling...")
     await dp.start_polling(bot, skip_updates=True)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Прервано пользователем")
+    except Exception as e:
+        logger.critical(f"💥 Критическая ошибка: {e}", exc_info=True)
+        sys.exit(1)
+
