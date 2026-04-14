@@ -1,10 +1,24 @@
-.git
-.gitignore
-venv
-__pycache__
+# Виртуальные окружения
+venv/
+env/
+.venv/
 *.pyc
-.DS_Store
-.env
-.env.local
+__pycache__/
+
+# Git и среда разработки
+.git/
+.gitignore
 *.md
-.gitattributes
+.DS_Store
+
+# Локальные конфиги (не секретные)
+*.env.local
+.idea/
+.vscode/
+
+# Тесты и документация (если не нужны в продакшене)
+tests/
+docs/
+
+# ✅ ВАЖНО: НЕ добавляйте handlers/, *.py, config.py!
+
