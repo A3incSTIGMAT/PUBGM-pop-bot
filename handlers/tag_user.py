@@ -76,6 +76,7 @@ async def toggle_user_subscription_callback(callback: types.CallbackQuery):
     
     status = "включена" if value else "отключена"
     await callback.answer(f"✅ Подписка {status}")
-    
+
+
     # Обновляем меню
     await cmd_mytags(callback.message)
