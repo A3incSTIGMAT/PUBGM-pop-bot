@@ -76,6 +76,8 @@ async def cmd_start(message: types.Message):
             "├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
             "├ 🤖 <b>AI помощник</b> — отвечаю на вопросы\n"
             "├ 🔗 <b>Рефералка</b> — приглашай друзей, получай NCoins\n"
+            "├ 🏆 <b>Ранги</b> — повышай уровень, получай бонусы\n"
+            "├ 💕 <b>Отношения</b> — создавай семьи и группы\n"
             "└ ❤️ <b>Поддержка</b> — помочь развитию проекта\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<b>🗣️ КАК КО МНЕ ОБРАЩАТЬСЯ:</b>\n\n"
@@ -89,6 +91,7 @@ async def cmd_start(message: types.Message):
             "├ <code>/balance</code> — проверить баланс\n"
             "├ <code>/all</code> — оповестить всех\n"
             "├ <code>/my_ref</code> — получить реферальную ссылку\n"
+            "├ <code>/rank</code> — проверить свой ранг\n"
             "├ <code>/donate</code> — поддержать разработчика\n"
             "└ <code>/feedback</code> — обратная связь\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -139,7 +142,8 @@ async def cmd_help(message: types.Message):
         "<code>/duel @user 100</code> — дуэль\n\n"
         "<b>👤 ПРОФИЛЬ</b>\n"
         "<code>/profile</code> — профиль\n"
-        "<code>/vip</code> — VIP статус\n\n"
+        "<code>/vip</code> — VIP статус\n"
+        "<code>/rank</code> — мой ранг\n\n"
         "<b>📢 ОПОВЕЩЕНИЯ И ТЭГИ</b>\n"
         "<code>/all</code> — общий сбор (админы)\n"
         "<code>/tag @user</code> — упомянуть пользователя\n"
@@ -147,7 +151,21 @@ async def cmd_help(message: types.Message):
         "<code>/mytags</code> — мои подписки на теги\n"
         "<code>/tagcat pubg текст</code> — вызов тега по категории\n\n"
         "<b>🔗 РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n"
-        "<code>/my_ref</code> — получить реферальную ссылку\n\n"
+        "<code>/my_ref</code> — получить реферальную ссылку\n"
+        "<code>/ref_stats</code> — статистика рефералки\n\n"
+        "<b>💕 ОТНОШЕНИЯ</b>\n"
+        "<code>/propose @user тип</code> — предложить отношения\n"
+        "<code>/my_relationships</code> — мои отношения\n\n"
+        "<b>👥 ГРУППЫ</b>\n"
+        "<code>/create_group название</code> — создать группу\n"
+        "<code>/join_group название</code> — вступить в группу\n"
+        "<code>/my_groups</code> — мои группы\n\n"
+        "<b>✨ РП КОМАНДЫ</b>\n"
+        "<code>/hug @user</code> — обнять\n"
+        "<code>/kiss @user</code> — поцеловать\n"
+        "<code>/pat @user</code> — погладить\n"
+        "<code>/add_rp команда действие</code> — добавить свою РП команду\n"
+        "<code>/my_rp</code> — мои РП команды\n\n"
         "<b>❤️ ПОДДЕРЖКА</b>\n"
         "<code>/donate</code> — поддержать разработчика\n\n"
         "<b>💬 ОБРАТНАЯ СВЯЗЬ</b>\n"
@@ -172,10 +190,13 @@ async def cmd_privacy(message: types.Message):
         "├ Имя пользователя\n"
         "├ Баланс монет\n"
         "├ Статистика игр\n"
+        "├ Ранг и XP\n"
+        "├ Отношения и группы\n"
         "└ Данные анкеты (если заполнены)\n\n"
         "<b>📌 КАК ИСПОЛЬЗУЮТСЯ:</b>\n\n"
         "├ Для работы игр и экономики\n"
         "├ Для сохранения прогресса\n"
+        "├ Для рейтинга и рангов\n"
         "└ Для упоминаний в общем сборе\n\n"
         "<b>📌 ХРАНЕНИЕ:</b>\n\n"
         "├ Данные хранятся в зашифрованной БД\n"
@@ -201,7 +222,9 @@ async def cmd_delete_my_data(message: types.Message):
         "Вы уверены? Будут удалены:\n"
         "├ Баланс монет\n"
         "├ Статистика игр\n"
+        "├ Ранг и XP\n"
         "├ Анкета\n"
+        "├ Отношения и группы\n"
         "└ История транзакций\n\n"
         "❗ Это действие <b>НЕЛЬЗЯ</b> отменить!",
         parse_mode=ParseMode.HTML,
@@ -306,7 +329,6 @@ async def cmd_feedback(message: types.Message):
     
     feedback_text = args[1]
     
-    # Отправляем разработчику (в ADMIN_IDS)
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             try:
@@ -366,19 +388,7 @@ async def admin_menu_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "my_ref")
 async def my_ref_callback(callback: types.CallbackQuery):
     from handlers.referral import my_referral_link
-    
-    class FakeMessage:
-        def __init__(self, from_user, chat, bot):
-            self.from_user = from_user
-            self.chat = chat
-            self.bot = bot
-            self.text = "/my_ref"
-        
-        async def answer(self, text, parse_mode=None, reply_markup=None):
-            await callback.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-    
-    fake_msg = FakeMessage(callback.from_user, callback.message.chat, callback.bot)
-    await my_referral_link(fake_msg)
+    await my_referral_link(callback.message)
     await callback.answer()
 
 
@@ -396,6 +406,9 @@ async def confirm_delete(callback: types.CallbackQuery):
             cursor.execute("DELETE FROM transactions WHERE from_id = ? OR to_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM user_tag_subscriptions WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM referrals WHERE inviter_id = ? OR invitee_id = ?", (user_id, user_id))
+            cursor.execute("DELETE FROM user_ranks WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM relationships WHERE user1_id = ? OR user2_id = ?", (user_id, user_id))
+            cursor.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -429,7 +442,8 @@ async def privacy_callback(callback: types.CallbackQuery):
         "• Telegram ID\n"
         "• Имя пользователя\n"
         "• Баланс монет\n"
-        "• Статистика игр\n\n"
+        "• Статистика игр\n"
+        "• Ранг и XP\n\n"
         "📌 <b>Использование:</b>\n"
         "• Работа игр и экономики\n"
         "• Сохранение прогресса\n"
@@ -465,6 +479,10 @@ async def help_callback(callback: types.CallbackQuery):
         "<code>/tagcat pubg текст</code> — вызов тега\n\n"
         "<b>🔗 РЕФЕРАЛКА</b>\n"
         "<code>/my_ref</code> — моя ссылка\n\n"
+        "<b>🏆 РАНГИ</b>\n"
+        "<code>/rank</code> — мой ранг\n"
+        "<code>/top_ranked</code> — топ по рангу\n"
+        "<code>/top_donors</code> — топ донатеров\n\n"
         "<b>❤️ ПОДДЕРЖКА</b>\n"
         "<code>/donate</code> — поддержать проект\n\n"
         "<b>💬 ОБРАТНАЯ СВЯЗЬ</b>\n"
@@ -480,13 +498,55 @@ async def help_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "donate")
 async def donate_callback(callback: types.CallbackQuery):
-    """Кнопка поддержки из меню"""
     await cmd_donate(callback.message)
     await callback.answer()
 
 
 @router.callback_query(F.data == "feedback_menu")
 async def feedback_menu_callback(callback: types.CallbackQuery):
-    """Кнопка обратной связи из меню"""
     await cmd_feedback(callback.message)
+    await callback.answer()
+
+
+# ==================== НОВЫЕ ОБРАБОТЧИКИ ====================
+
+@router.callback_query(F.data == "rank_menu")
+async def rank_menu_callback(callback: types.CallbackQuery):
+    from handlers.ranks import cmd_rank
+    await cmd_rank(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "private_games")
+async def private_games_callback(callback: types.CallbackQuery):
+    from handlers.games_private import cmd_private_games
+    await cmd_private_games(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "top_chats")
+async def top_chats_callback(callback: types.CallbackQuery):
+    from handlers.rating import cmd_top_chats
+    await cmd_top_chats(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "relationships_menu")
+async def relationships_menu_callback(callback: types.CallbackQuery):
+    from handlers.rp_commands import cmd_my_relationships
+    await cmd_my_relationships(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "groups_menu")
+async def groups_menu_callback(callback: types.CallbackQuery):
+    from handlers.rp_commands import cmd_my_groups
+    await cmd_my_groups(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rp_menu")
+async def rp_menu_callback(callback: types.CallbackQuery):
+    from handlers.rp_commands import cmd_my_rp
+    await cmd_my_rp(callback.message)
     await callback.answer()
