@@ -1,5 +1,5 @@
 """
-Модуль навигации, старта, помощи и управления данными
+Модуль навигации, старта, помощи, управления данными и доната
 """
 
 import asyncio
@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db
-from config import START_BALANCE
+from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
 from utils.keyboards import main_menu, back_button, admin_menu
 
@@ -66,7 +66,7 @@ async def cmd_start(message: types.Message):
         await db.create_user(user_id, username, first_name, START_BALANCE)
         
         presentation_text = (
-            "🤖 <b>ВЕЛКОМ TO NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
+            "🤖 <b>ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
             f"✨ <b>Привет, {_escape_html(first_name)}!</b>\n\n"
             "Я — <b>NEXUS Chat Manager</b> — твой личный помощник в управлении чатом!\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -75,7 +75,8 @@ async def cmd_start(message: types.Message):
             "├ 💰 <b>Экономика</b> — баланс, переводы\n"
             "├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
             "├ 🤖 <b>AI помощник</b> — отвечаю на вопросы\n"
-            "└ 🔗 <b>Рефералка</b> — приглашай друзей, получай NCoins\n\n"
+            "├ 🔗 <b>Рефералка</b> — приглашай друзей, получай NCoins\n"
+            "└ ❤️ <b>Поддержка</b> — помочь развитию проекта\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<b>🗣️ КАК КО МНЕ ОБРАЩАТЬСЯ:</b>\n\n"
             "📝 <i>Текстовые команды:</i>\n"
@@ -87,7 +88,8 @@ async def cmd_start(message: types.Message):
             "├ <code>/slot 100</code> — сыграть в слот\n"
             "├ <code>/balance</code> — проверить баланс\n"
             "├ <code>/all</code> — оповестить всех\n"
-            "└ <code>/my_ref</code> — получить реферальную ссылку\n\n"
+            "├ <code>/my_ref</code> — получить реферальную ссылку\n"
+            "└ <code>/donate</code> — поддержать разработчика\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} МОНЕТ!</b>"
         )
@@ -113,13 +115,16 @@ async def cmd_start(message: types.Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
+    chat_id = message.chat.id
+    
     help_text = (
         "🤖 <b>NEXUS CHAT MANAGER — ПОМОЩЬ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>🗣️ КАК ОБРАЩАТЬСЯ:</b>\n\n"
         "📝 <i>Примеры текстовых команд:</i>\n"
         "• <code>Нексус, оповести всех</code>\n"
-        "• <code>Nexus, общий сбор</code>\n\n"
+        "• <code>Nexus, общий сбор</code>\n"
+        "• <code>Нексус, найди сквад в PUBG</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>📋 ОСНОВНЫЕ КОМАНДЫ:</b>\n\n"
         "<b>💰 ЭКОНОМИКА</b>\n"
@@ -134,11 +139,16 @@ async def cmd_help(message: types.Message):
         "<b>👤 ПРОФИЛЬ</b>\n"
         "<code>/profile</code> — профиль\n"
         "<code>/vip</code> — VIP статус\n\n"
-        "<b>📢 ОПОВЕЩЕНИЯ</b>\n"
-        "<code>/all</code> — общий сбор\n"
-        "<code>/tag @user</code> — упомянуть\n\n"
+        "<b>📢 ОПОВЕЩЕНИЯ И ТЭГИ</b>\n"
+        "<code>/all</code> — общий сбор (админы)\n"
+        "<code>/tag @user</code> — упомянуть пользователя\n"
+        "<code>/tagrole админы</code> — написать админам\n"
+        "<code>/mytags</code> — мои подписки на теги\n"
+        "<code>/tagcat pubg текст</code> — вызов тега по категории\n\n"
         "<b>🔗 РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n"
         "<code>/my_ref</code> — получить реферальную ссылку\n\n"
+        "<b>❤️ ПОДДЕРЖКА</b>\n"
+        "<code>/donate</code> — поддержать разработчика\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика конфиденциальности\n"
         "<code>/delete_my_data</code> — удалить мои данные\n\n"
@@ -198,6 +208,8 @@ async def cmd_delete_my_data(message: types.Message):
 
 @router.message(Command("about"))
 async def cmd_about(message: types.Message):
+    chat_id = message.chat.id
+    
     about_text = (
         "🤖 <b>NEXUS CHAT MANAGER v5.0</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -219,6 +231,58 @@ async def cmd_about(message: types.Message):
     )
     msg = await message.answer(about_text, parse_mode=ParseMode.HTML)
     await delete_bot_message_after(message.bot, message.chat.id, msg.message_id, delay=30)
+
+
+@router.message(Command("donate"))
+async def cmd_donate(message: types.Message):
+    """Поддержка разработчика — добровольный донат"""
+    donate_text = f"""
+❤️ <b>ПОДДЕРЖКА РАЗРАБОТЧИКА</b> ❤️
+
+Спасибо, что хотите поддержать проект NEXUS Chat Manager!
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>📌 НА ЧТО ИДУТ СРЕДСТВА:</b>
+
+├ 🤖 Содержание серверов
+├ 🎮 Разработка новых игр
+├ ✨ Улучшение качества работы
+├ 🐛 Исправление багов
+└ 💡 Реализация новых функций
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>💳 РЕКВИЗИТЫ ДЛЯ ПОДДЕРЖКИ:</b>
+
+🏦 Банк: {DONATE_BANK}
+👤 Получатель: {DONATE_RECEIVER}
+
+📱 <b>СБП (быстро и без комиссии):</b>
+<code>{DONATE_URL}</code>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>⚠️ ВАЖНО:</b>
+
+• Это <b>ДОБРОВОЛЬНОЕ</b> пожертвование
+• Оно не является платой за товары или услуги
+• Вы не получаете за него игровые преимущества
+• Все средства идут на развитие бота
+
+━━━━━━━━━━━━━━━━━━━━━
+
+💝 <b>Спасибо за поддержку NEXUS!</b>
+
+Ваша помощь делает бота лучше!
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 ПЕРЕЙТИ К ОПЛАТЕ", url=DONATE_URL)],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+    
+    await message.answer(donate_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 # ==================== ОБРАБОТЧИКИ КНОПОК ====================
@@ -349,15 +413,27 @@ async def help_callback(callback: types.CallbackQuery):
         "<code>/roulette 100 красный</code> — рулетка\n"
         "<code>/rps камень</code> — КНБ\n"
         "<code>/duel @user 100</code> — дуэль\n\n"
-        "<b>📢 ОПОВЕЩЕНИЯ</b>\n"
-        "<code>/all</code> — общий сбор\n"
-        "<code>/tag @user</code> — упомянуть\n\n"
+        "<b>📢 ОПОВЕЩЕНИЯ И ТЭГИ</b>\n"
+        "<code>/all</code> — общий сбор (админы)\n"
+        "<code>/tag @user</code> — упомянуть\n"
+        "<code>/tagrole админы</code> — админам\n"
+        "<code>/mytags</code> — мои подписки\n"
+        "<code>/tagcat pubg текст</code> — вызов тега\n\n"
         "<b>🔗 РЕФЕРАЛКА</b>\n"
         "<code>/my_ref</code> — моя ссылка\n\n"
+        "<b>❤️ ПОДДЕРЖКА</b>\n"
+        "<code>/donate</code> — поддержать проект\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика\n"
         "<code>/delete_my_data</code> — удалить данные",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "donate")
+async def donate_callback(callback: types.CallbackQuery):
+    """Кнопка поддержки из меню"""
+    await cmd_donate(callback.message)
     await callback.answer()
