@@ -12,7 +12,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import db
 from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK, ADMIN_IDS
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
-from utils.keyboards import main_menu, back_button, admin_menu
+from utils.keyboards import (
+    main_menu, back_button, games_category_menu, profile_category_menu,
+    finance_category_menu, social_category_menu, notifications_category_menu,
+    settings_category_menu, admin_panel_menu
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -351,7 +355,7 @@ async def cmd_feedback(message: types.Message):
     )
 
 
-# ==================== ОБРАБОТЧИКИ КНОПОК ====================
+# ==================== ОБРАБОТЧИКИ КНОПОК ГЛАВНОГО МЕНЮ ====================
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(callback: types.CallbackQuery):
@@ -360,15 +364,83 @@ async def back_to_menu_callback(callback: types.CallbackQuery):
     is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id) if callback.message.chat.type in ['group', 'supergroup'] else False
     
     await callback.message.edit_text(
-        "🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER</b>\n\n👇 Выберите действие:",
+        "🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER</b>\n\n👇 Выберите категорию:",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(is_admin=is_admin)
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin_menu")
-async def admin_menu_callback(callback: types.CallbackQuery):
+# ==================== ОБРАБОТЧИКИ КАТЕГОРИЙ МЕНЮ ====================
+
+@router.callback_query(F.data == "games_category")
+async def games_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🎮 *ИГРЫ NEXUS*\n\n"
+        "Выберите игру:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=games_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile_category")
+async def profile_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "👤 *ПРОФИЛЬ*\n\n"
+        "Выберите действие:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=profile_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "finance_category")
+async def finance_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "💰 *ФИНАНСЫ*\n\n"
+        "Управление балансом и реферальной системой:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=finance_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "social_category")
+async def social_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "👥 *СОЦИАЛКА*\n\n"
+        "Отношения, группы и РП команды:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=social_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "notifications_category")
+async def notifications_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "📢 *ОПОВЕЩЕНИЯ*\n\n"
+        "Управление уведомлениями и тегами:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=notifications_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_category")
+async def settings_category_callback(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "⚙️ *НАСТРОЙКИ*\n\n"
+        "Политика, обратная связь и помощь:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=settings_category_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel")
+async def admin_panel_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
@@ -377,13 +449,60 @@ async def admin_menu_callback(callback: types.CallbackQuery):
         return
     
     await callback.message.edit_text(
-        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        "Выберите действие:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
+        "👑 *АДМИН-ПАНЕЛЬ*\n\n"
+        "Управление ботом и чатом:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=admin_panel_menu()
     )
     await callback.answer()
 
+
+# ==================== ОБРАБОТЧИКИ ПОДМЕНЮ ====================
+
+@router.callback_query(F.data == "my_stats")
+async def my_stats_callback(callback: types.CallbackQuery):
+    """Личная статистика пользователя"""
+    user_id = callback.from_user.id
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Используйте /start", show_alert=True)
+        return
+    
+    # Получаем статистику игр
+    conn = db._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_game_stats WHERE user_id = ?", (user_id,))
+    game_stats = cursor.fetchone()
+    conn.close()
+    
+    text = f"""
+📊 *ВАША СТАТИСТИКА*
+
+━━━━━━━━━━━━━━━━━━━━━
+
+👤 Имя: {user.get('first_name', 'Не указано')}
+💰 Баланс: {user.get('balance', 0)} NCoins
+🏆 Побед: {user.get('wins', 0)} | Поражений: {user.get('losses', 0)}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+*ИГРЫ:*
+🎰 Слот: {game_stats[4] if game_stats else 0} игр
+🎡 Рулетка: {game_stats[5] if game_stats else 0} игр
+✂️ КНБ: {game_stats[6] if game_stats else 0} игр
+⚔️ Дуэль: {game_stats[7] if game_stats else 0} игр
+
+━━━━━━━━━━━━━━━━━━━━━
+
+💡 *Совет:* Играйте больше, чтобы повысить ранг!
+"""
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+    await callback.answer()
+
+
+# ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ====================
 
 @router.callback_query(F.data == "my_ref")
 async def my_ref_callback(callback: types.CallbackQuery):
@@ -405,10 +524,13 @@ async def confirm_delete(callback: types.CallbackQuery):
             cursor.execute("DELETE FROM user_profiles WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM transactions WHERE from_id = ? OR to_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM user_tag_subscriptions WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM referrals WHERE inviter_id = ? OR invitee_id = ?", (user_id, user_id))
+            cursor.execute("DELETE FROM ref_links WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM ref_invites WHERE inviter_id = ? OR invited_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM user_ranks WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM user_game_stats WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM relationships WHERE user1_id = ? OR user2_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM custom_rp WHERE user_id = ?", (user_id,))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -460,7 +582,7 @@ async def privacy_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: types.CallbackQuery):
-    await callback.message.edit_text(
+    help_text = (
         "🤖 <b>NEXUS CHAT MANAGER — ПОМОЩЬ</b>\n\n"
         "<b>💰 ЭКОНОМИКА</b>\n"
         "<code>/balance</code> — баланс\n"
@@ -493,6 +615,7 @@ async def help_callback(callback: types.CallbackQuery):
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
+    await callback.message.edit_text(help_text, parse_mode=ParseMode.HTML, reply_markup=back_button())
     await callback.answer()
 
 
@@ -507,8 +630,6 @@ async def feedback_menu_callback(callback: types.CallbackQuery):
     await cmd_feedback(callback.message)
     await callback.answer()
 
-
-# ==================== НОВЫЕ ОБРАБОТЧИКИ ====================
 
 @router.callback_query(F.data == "rank_menu")
 async def rank_menu_callback(callback: types.CallbackQuery):
@@ -549,4 +670,18 @@ async def groups_menu_callback(callback: types.CallbackQuery):
 async def rp_menu_callback(callback: types.CallbackQuery):
     from handlers.rp_commands import cmd_my_rp
     await cmd_my_rp(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_tags_menu")
+async def my_tags_menu_callback(callback: types.CallbackQuery):
+    from handlers.tag_user import cmd_mytags
+    await cmd_mytags(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "start_all")
+async def start_all_callback(callback: types.CallbackQuery):
+    from handlers.tag import cmd_all
+    await cmd_all(callback.message)
     await callback.answer()
