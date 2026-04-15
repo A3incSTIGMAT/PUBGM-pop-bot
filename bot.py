@@ -19,7 +19,7 @@ load_dotenv()
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
         # Для продакшена добавить FileHandler:
@@ -33,6 +33,9 @@ from config import BOT_TOKEN
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN not set in environment!")
     sys.exit(1)
+
+# Создание директории для данных Amvera
+os.makedirs("/data", exist_ok=True)
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -90,11 +93,9 @@ async def on_startup():
     
     # 1. Инициализация БД
     try:
-        # Проверка: если db.init() синхронный — обернуть в to_thread
         if asyncio.iscoroutinefunction(db.init):
             await db.init()
         else:
-            import asyncio
             await asyncio.to_thread(db.init)
         logger.info("✅ База данных инициализирована")
     except Exception as e:
@@ -127,7 +128,6 @@ async def on_shutdown():
         if asyncio.iscoroutinefunction(db.close):
             await db.close()
         else:
-            import asyncio
             await asyncio.to_thread(db.close)
         logger.info("✅ База данных закрыта")
     except Exception as e:
@@ -156,4 +156,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 Критическая ошибка: {e}", exc_info=True)
         sys.exit(1)
-
