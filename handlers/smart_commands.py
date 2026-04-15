@@ -1,6 +1,6 @@
 """
 Умный парсер команд NEXUS Bot
-Понимает: игры, экономику, тэги, РП команды
+Понимает: игры, экономику, тэги, РП команды, умные теги
 """
 
 import re
@@ -21,6 +21,20 @@ duel_requests = {}
 
 # Хранилище состояний анкеты (из profile.py)
 profile_states = {}
+
+# Словарь соответствия фраз -> slug категорий для умных тегов
+TAG_KEYWORDS = {
+    'pubg': ['пубг', 'pubg', 'пабг', 'королевская битва', 'сквад', 'ранкед', 'игроков в пубг'],
+    'cs2': ['кс2', 'cs2', 'counter-strike', 'катка', 'матчмейкинг', 'игроков в кс'],
+    'dota': ['дота', 'dota', 'дота 2', 'пати', 'катка', 'игроков в доту'],
+    'mafia': ['мафия', 'mafia', 'партия', 'сбор', 'игроков в мафию'],
+    'video_call': ['звонок', 'созвон', 'видеозвонок', 'скайп', 'discord', 'позвонить'],
+    'important': ['важный вопрос', 'помогите', 'нужна помощь', 'вопрос', 'совет', 'подскажите'],
+    'giveaway': ['розыгрыш', 'giveaway', 'конкурс', 'ивент', 'приз', 'конкурс'],
+    'offtopic': ['флуд', 'оффтоп', 'offtopic', 'болталка', 'поболтать'],
+    'tech': ['техническое', 'баг', 'ошибка', 'bug', 'сломалась', 'не работает'],
+    'urgent': ['срочно', 'urgent', 'помощь админам', 'внимание админы', 'срочная помощь'],
+}
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -65,7 +79,7 @@ def extract_username(text: str) -> str:
 async def smart_parser(message: types.Message):
     """Умный парсер — обрабатывает ВСЕ сообщения без /"""
     
-    # Игнорируем команды с / (они обрабатываются отдельными хендлерами)
+    # Игнорируем команды с /
     if message.text and message.text.startswith('/'):
         return
     
@@ -79,9 +93,8 @@ async def smart_parser(message: types.Message):
     if not text:
         return
     
-    # ПРОВЕРКА: если пользователь заполняет анкету — НЕ обрабатываем другие команды
+    # Проверка: если пользователь заполняет анкету — НЕ обрабатываем другие команды
     if user_id in profile_states:
-        # Не обрабатываем игры и другие команды, пока заполняется анкета
         return
     
     # Проверяем регистрацию
@@ -89,6 +102,34 @@ async def smart_parser(message: types.Message):
     if not user:
         await message.answer("👋 Используйте /start для регистрации")
         return
+    
+    # ==================== УМНЫЕ ТЕГИ (КАТЕГОРИИ) ====================
+    # Проверяем наличие обращения к боту
+    bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
+    
+    if bot_called:
+        for slug, keywords in TAG_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in text:
+                    # Проверяем, включена ли категория в чате
+                    try:
+                        from handlers.tag_categories import get_chat_enabled_slugs
+                        chat_id = message.chat.id
+                        enabled_slugs = await get_chat_enabled_slugs(chat_id)
+                        
+                        if slug in enabled_slugs:
+                            # Извлекаем текст сообщения
+                            msg_parts = text.split(keyword, 1)
+                            msg_text = msg_parts[1].strip() if len(msg_parts) > 1 else "Внимание!"
+                            
+                            # Вызываем тег
+                            from handlers.tag_trigger import trigger_tag
+                            await trigger_tag(message, slug, msg_text)
+                            return
+                    except ImportError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Tag trigger error: {e}")
     
     # ==================== СЛОТ ====================
     if 'слот' in text or 'slot' in text:
@@ -276,7 +317,7 @@ async def smart_parser(message: types.Message):
         )
         return
     
-    # ==================== ТЭГ ВСЕХ ====================
+    # ==================== ТЭГ ВСЕХ (старый) ====================
     if 'нексус' in text or 'нэксус' in text or 'nexus' in text:
         if 'оповести всех' in text or 'общий сбор' in text or 'собери всех' in text:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
