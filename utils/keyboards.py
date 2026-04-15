@@ -12,8 +12,9 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
         [InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate"),
          InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
-        [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
-         InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
+        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu"),
+         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
+        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
     ]
     
     # Кнопка для администратора (только для владельца чата)
