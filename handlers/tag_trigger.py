@@ -1,5 +1,7 @@
 """
 Модуль вызова тега по категории
+Команда: /tagcat <slug> [текст]
+Поддержка из умного парсера
 """
 
 import logging
@@ -13,6 +15,40 @@ from handlers.tag_categories import (
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def trigger_tag(message: types.Message, category_slug: str, msg_text: str):
+    """Вызов тега из умного парсера"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if message.chat.type not in ['group', 'supergroup']:
+        return
+    
+    # Проверка существования категории
+    categories = await get_chat_enabled_categories(chat_id)
+    category = next((c for c in categories if c["slug"] == category_slug), None)
+    
+    if not category:
+        await message.answer(f"❌ Категория <code>{category_slug}</code> не найдена или отключена", parse_mode=ParseMode.HTML)
+        return
+    
+    # Сбор подписанных пользователей
+    subscribers = await collect_subscribed_users(chat_id, category_slug)
+    
+    if not subscribers:
+        await message.answer(f"😔 На категорию <b>{category['name']}</b> никто не подписан", parse_mode=ParseMode.HTML)
+        return
+    
+    mention_text = " ".join(subscribers[:30])
+    
+    await message.answer(
+        f"{category['icon']} <b>{category['name']}</b>\n\n"
+        f"👤 {message.from_user.full_name}: {msg_text}\n\n"
+        f"{mention_text}\n\n"
+        f"✅ Упомянуто: {len(subscribers)}",
+        parse_mode=ParseMode.HTML
+    )
 
 
 @router.message(Command("tagcat"))
