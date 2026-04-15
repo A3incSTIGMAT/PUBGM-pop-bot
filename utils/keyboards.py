@@ -7,11 +7,17 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile"),
          InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance")],
         [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
-         InlineKeyboardButton(text="⭐ VIP", callback_data="vip")],
+         InlineKeyboardButton(text="🎮 ЛИЧНЫЕ ИГРЫ", callback_data="private_games")],
+        [InlineKeyboardButton(text="⭐ VIP", callback_data="vip"),
+         InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
          InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
-        [InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate"),
+        [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
+         InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
+        [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
          InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
+        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
+         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
         [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu"),
          InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
         [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
@@ -113,6 +119,18 @@ def ref_menu() -> InlineKeyboardMarkup:
     """Меню реферальной системы"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="my_ref")],
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="ref_stats_chat")],
+        [InlineKeyboardButton(text="📊 ТОП ПРИГЛАСИТЕЛЕЙ", callback_data="ref_top")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+
+
+def private_games_menu() -> InlineKeyboardMarkup:
+    """Меню личных игр"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 СЛОТ", callback_data="private_slot"),
+         InlineKeyboardButton(text="🎡 РУЛЕТКА", callback_data="private_roulette")],
+        [InlineKeyboardButton(text="✂️ КНБ", callback_data="private_rps"),
+         InlineKeyboardButton(text="⚔️ ДУЭЛЬ", callback_data="private_duel")],
+        [InlineKeyboardButton(text="📊 МОЯ СТАТИСТИКА", callback_data="private_stats")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
