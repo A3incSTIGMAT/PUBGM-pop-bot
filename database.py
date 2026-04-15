@@ -18,6 +18,8 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        # ==================== ОСНОВНЫЕ ТАБЛИЦЫ ====================
+        
         # Таблица пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -72,10 +74,240 @@ class Database:
             )
         """)
         
+        # ==================== НОВЫЕ ТАБЛИЦЫ ====================
+        
+        # Таблица рангов пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_ranks (
+                user_id INTEGER PRIMARY KEY,
+                rank_level INTEGER DEFAULT 0,
+                rank_name TEXT DEFAULT '🌱 Дерево',
+                rank_xp INTEGER DEFAULT 0,
+                rank_bonus INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица донатеров
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS donors (
+                user_id INTEGER PRIMARY KEY,
+                total_donated INTEGER DEFAULT 0,
+                last_donate TIMESTAMP,
+                donor_rank TEXT DEFAULT '💎 Поддерживающий'
+            )
+        """)
+        
+        # Таблица глобального рейтинга
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS global_rating (
+                user_id INTEGER PRIMARY KEY,
+                total_xp INTEGER DEFAULT 0,
+                rating_position INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица активности чатов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_rating (
+                chat_id BIGINT PRIMARY KEY,
+                chat_title TEXT,
+                activity_points INTEGER DEFAULT 0,
+                members_count INTEGER DEFAULT 0,
+                games_played INTEGER DEFAULT 0,
+                messages_count INTEGER DEFAULT 0,
+                week_activity INTEGER DEFAULT 0,
+                month_activity INTEGER DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица наград чатов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                reward_type TEXT,
+                reward_amount INTEGER,
+                awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица личной статистики игр
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_game_stats (
+                user_id INTEGER PRIMARY KEY,
+                total_games INTEGER DEFAULT 0,
+                total_wins INTEGER DEFAULT 0,
+                total_coins INTEGER DEFAULT 0,
+                slot_played INTEGER DEFAULT 0,
+                roulette_played INTEGER DEFAULT 0,
+                rps_played INTEGER DEFAULT 0,
+                duel_played INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица отношений
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS relationships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user1_id INTEGER NOT NULL,
+                user2_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user1_id, user2_id, type)
+            )
+        """)
+        
+        # Таблица групп
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                group_name TEXT NOT NULL,
+                group_leader INTEGER NOT NULL,
+                member_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица участников групп
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                group_id INTEGER,
+                user_id INTEGER,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, user_id)
+            )
+        """)
+        
+        # Таблица кастомных РП команд
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_rp (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                action_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, command)
+            )
+        """)
+        
+        # Таблица реферальных достижений
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ref_milestones (
+                user_id INTEGER,
+                chat_id INTEGER,
+                milestone INTEGER,
+                awarded BOOLEAN DEFAULT 0,
+                awarded_at TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id, milestone)
+            )
+        """)
+        
+        # Таблица реферальных настроек чатов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ref_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled BOOLEAN DEFAULT 0,
+                ref_link TEXT,
+                bonus_amount INTEGER DEFAULT 100,
+                created_at TEXT
+            )
+        """)
+        
+        # Таблица реферальных ссылок пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ref_links (
+                user_id INTEGER,
+                chat_id INTEGER,
+                ref_code TEXT UNIQUE,
+                invited_count INTEGER DEFAULT 0,
+                earned_coins INTEGER DEFAULT 0,
+                created_at TEXT,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        
+        # Таблица реферальных приглашений
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ref_invites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inviter_id INTEGER,
+                invited_id INTEGER,
+                chat_id INTEGER,
+                invited_at TEXT
+            )
+        """)
+        
+        # Таблица тегов (глобальный каталог)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tag_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                icon_emoji TEXT DEFAULT '🔔',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица настроек категорий в чате
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_tag_settings (
+                chat_id BIGINT NOT NULL,
+                category_slug TEXT NOT NULL,
+                is_enabled BOOLEAN DEFAULT 0,
+                PRIMARY KEY (chat_id, category_slug)
+            )
+        """)
+        
+        # Таблица подписок пользователей на теги
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_tag_subscriptions (
+                user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                category_slug TEXT NOT NULL,
+                is_subscribed BOOLEAN DEFAULT 1,
+                PRIMARY KEY (user_id, chat_id, category_slug)
+            )
+        """)
+        
+        # Таблица кастомных категорий чата
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_custom_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                icon_emoji TEXT DEFAULT '📌',
+                created_by BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, slug)
+            )
+        """)
+        
+        # Таблица логов вызовов тегов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tag_usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                category_slug TEXT NOT NULL,
+                triggered_by BIGINT NOT NULL,
+                mentioned_count INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         conn.close()
         
         self._add_default_shop_items()
+        self._add_default_tag_categories()
     
     def _add_default_shop_items(self):
         conn = sqlite3.connect(self.db_path)
@@ -92,8 +324,37 @@ class Database:
             conn.commit()
         conn.close()
     
+    def _add_default_tag_categories(self):
+        """Добавление глобальных категорий тегов"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        DEFAULT_CATEGORIES = [
+            ("pubg", "🎮 PUBG Mobile", "Поиск сквада / ранкед", "🎮"),
+            ("cs2", "🎮 CS2", "Поиск напарников", "🎮"),
+            ("dota", "🎮 Dota 2", "Собрать пати", "🎮"),
+            ("mafia", "🎭 Мафия", "Сбор на партию", "🎭"),
+            ("video_call", "📞 Видео-звонок", "Созвон в группе", "📞"),
+            ("important", "❓ Важный вопрос", "Нужен совет / помощь", "❓"),
+            ("giveaway", "🎁 Розыгрыш", "Конкурсы и ивенты", "🎁"),
+            ("offtopic", "💬 Флудилка", "Оффтоп и общение", "💬"),
+            ("tech", "🔧 Техническое", "Баги, предложения", "🔧"),
+            ("urgent", "🆘 Срочно", "Помощь админам", "🆘"),
+        ]
+        
+        for slug, name, desc, icon in DEFAULT_CATEGORIES:
+            cursor.execute("""
+                INSERT OR IGNORE INTO tag_categories (slug, name, description, icon_emoji)
+                VALUES (?, ?, ?, ?)
+            """, (slug, name, desc, icon))
+        
+        conn.commit()
+        conn.close()
+    
+    # ========== МЕТОДЫ ДЛЯ СОВМЕСТИМОСТИ ==========
+    
     def _get_connection(self):
-        """Получить соединение с БД (для совместимости с новыми модулями)"""
+        """Получить соединение с БД"""
         return sqlite3.connect(self.db_path)
     
     async def init(self):
@@ -104,6 +365,8 @@ class Database:
     async def close(self):
         """Закрытие соединения"""
         pass
+    
+    # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
         """Получить пользователя"""
