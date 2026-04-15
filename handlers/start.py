@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db
-from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK
+from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK, ADMIN_IDS
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
 from utils.keyboards import main_menu, back_button, admin_menu
 
@@ -89,7 +89,8 @@ async def cmd_start(message: types.Message):
             "├ <code>/balance</code> — проверить баланс\n"
             "├ <code>/all</code> — оповестить всех\n"
             "├ <code>/my_ref</code> — получить реферальную ссылку\n"
-            "└ <code>/donate</code> — поддержать разработчика\n\n"
+            "├ <code>/donate</code> — поддержать разработчика\n"
+            "└ <code>/feedback</code> — обратная связь\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} МОНЕТ!</b>"
         )
@@ -149,6 +150,8 @@ async def cmd_help(message: types.Message):
         "<code>/my_ref</code> — получить реферальную ссылку\n\n"
         "<b>❤️ ПОДДЕРЖКА</b>\n"
         "<code>/donate</code> — поддержать разработчика\n\n"
+        "<b>💬 ОБРАТНАЯ СВЯЗЬ</b>\n"
+        "<code>/feedback ваше сообщение</code> — написать разработчику\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика конфиденциальности\n"
         "<code>/delete_my_data</code> — удалить мои данные\n\n"
@@ -178,8 +181,8 @@ async def cmd_privacy(message: types.Message):
         "├ Данные хранятся в зашифрованной БД\n"
         "├ Не передаются третьим лицам\n"
         "└ Удаляются по команде <code>/delete_my_data</code>\n\n"
-        "<b>📌 КОНТАКТЫ:</b>\n\n"
-        "└ @A3incSTIGMAT\n\n"
+        "<b>📌 ОБРАТНАЯ СВЯЗЬ:</b>\n\n"
+        "└ <code>/feedback ваше сообщение</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "✅ <b>ВСЕ ДАННЫЕ ХРАНЯТСЯ ТОЛЬКО В БОТЕ</b>"
     )
@@ -220,8 +223,8 @@ async def cmd_about(message: types.Message):
         "├ Aiogram 3.x\n"
         "├ SQLite\n"
         "└ Docker\n\n"
-        "<b>👨‍💻 РАЗРАБОТЧИК:</b>\n"
-        "@A3incSTIGMAT\n\n"
+        "<b>💬 ОБРАТНАЯ СВЯЗЬ:</b>\n"
+        "└ <code>/feedback ваше сообщение</code>\n\n"
         "<b>🗣️ ОБРАЩЕНИЯ:</b>\n"
         "• <i>Нексус, Нэкс, Nexus</i>\n"
         "• <i>Отметь, тэгни, упомяни, оповести</i>\n"
@@ -283,6 +286,47 @@ async def cmd_donate(message: types.Message):
     ])
     
     await message.answer(donate_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@router.message(Command("feedback"))
+async def cmd_feedback(message: types.Message):
+    """Обратная связь с разработчиком"""
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\n"
+            "Напишите: <code>/feedback ваше сообщение</code>\n\n"
+            "Пример: <code>/feedback Хотелось бы добавить новую игру</code>\n\n"
+            "Ваше сообщение будет отправлено разработчику.\n\n"
+            "📌 <i>Мы ответим вам в ближайшее время!</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    feedback_text = args[1]
+    
+    # Отправляем разработчику (в ADMIN_IDS)
+    if ADMIN_IDS:
+        for admin_id in ADMIN_IDS:
+            try:
+                await message.bot.send_message(
+                    admin_id,
+                    f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
+                    f"👤 От: {message.from_user.full_name}\n"
+                    f"🆔 ID: {message.from_user.id}\n"
+                    f"📝 Сообщение: {feedback_text}",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+    
+    await message.answer(
+        "✅ <b>Спасибо за обратную связь!</b>\n\n"
+        "Ваше сообщение отправлено разработчику.\n"
+        "Мы рассмотрим его в ближайшее время.",
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ==================== ОБРАБОТЧИКИ КНОПОК ====================
@@ -392,8 +436,8 @@ async def privacy_callback(callback: types.CallbackQuery):
         "• Упоминания в чате\n\n"
         "📌 <b>Удаление данных:</b>\n"
         "<code>/delete_my_data</code>\n\n"
-        "📌 <b>Контакты:</b>\n"
-        "@A3incSTIGMAT",
+        "📌 <b>Обратная связь:</b>\n"
+        "<code>/feedback ваше сообщение</code>",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
@@ -423,6 +467,8 @@ async def help_callback(callback: types.CallbackQuery):
         "<code>/my_ref</code> — моя ссылка\n\n"
         "<b>❤️ ПОДДЕРЖКА</b>\n"
         "<code>/donate</code> — поддержать проект\n\n"
+        "<b>💬 ОБРАТНАЯ СВЯЗЬ</b>\n"
+        "<code>/feedback</code> — написать разработчику\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика\n"
         "<code>/delete_my_data</code> — удалить данные",
@@ -436,4 +482,11 @@ async def help_callback(callback: types.CallbackQuery):
 async def donate_callback(callback: types.CallbackQuery):
     """Кнопка поддержки из меню"""
     await cmd_donate(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "feedback_menu")
+async def feedback_menu_callback(callback: types.CallbackQuery):
+    """Кнопка обратной связи из меню"""
+    await cmd_feedback(callback.message)
     await callback.answer()
