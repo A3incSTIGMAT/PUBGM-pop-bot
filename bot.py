@@ -13,10 +13,8 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения ДО импорта config
 load_dotenv()
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -26,19 +24,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Проверка токена
 from config import BOT_TOKEN
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN not set in environment!")
+    logger.error("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
-# ========== ИМПОРТ БАЗЫ ДАННЫХ ==========
 from database import db
 
-# Создание директории для данных Amvera
 os.makedirs("/data", exist_ok=True)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -52,13 +46,15 @@ from handlers.tag import router as tag_router
 from handlers.ai_assistant import router as ai_assistant_router
 from handlers.referral import router as referral_router
 from handlers.smart_commands import router as smart_commands_router
-
-# Новые модули умного тегирования
 from handlers.tag_admin import router as tag_admin_router
 from handlers.tag_user import router as tag_user_router
 from handlers.tag_trigger import router as tag_trigger_router
+from handlers.ranks import router as ranks_router
+from handlers.rating import router as rating_router
+from handlers.games_private import router as games_private_router
+from handlers.rp_commands import router as rp_commands_router
 
-# ==================== РЕГИСТРАЦИЯ РОУТЕРОВ ====================
+# ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
 dp.include_routers(
     start_router,
     smart_commands_router,
@@ -71,6 +67,10 @@ dp.include_routers(
     tag_admin_router,
     tag_user_router,
     tag_trigger_router,
+    ranks_router,
+    rating_router,
+    games_private_router,
+    rp_commands_router,
     tag_router,
 )
 
@@ -85,10 +85,7 @@ async def on_startup():
     
     # 1. Инициализация БД
     try:
-        if asyncio.iscoroutinefunction(db.init):
-            await db.init()
-        else:
-            await asyncio.to_thread(db.init)
+        await db.init()
         logger.info("✅ База данных инициализирована")
     except Exception as e:
         logger.critical(f"❌ Ошибка инициализации БД: {e}")
@@ -104,10 +101,37 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
     
-    # 3. Проверка окружения
-    data_dir = os.getenv("DATA_DIR", "/data")
-    os.makedirs(data_dir, exist_ok=True)
-    logger.info(f"📁 Data directory: {data_dir}")
+    # 3. Инициализация рангов
+    try:
+        from handlers.ranks import init_ranks
+        await init_ranks()
+        logger.info("✅ Система рангов инициализирована")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации рангов: {e}")
+    
+    # 4. Инициализация рейтинга чатов
+    try:
+        from handlers.rating import init_rating_tables
+        await init_rating_tables()
+        logger.info("✅ Рейтинг чатов инициализирован")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации рейтинга: {e}")
+    
+    # 5. Инициализация личных игр
+    try:
+        from handlers.games_private import init_private_games
+        await init_private_games()
+        logger.info("✅ Личные игры инициализированы")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации личных игр: {e}")
+    
+    # 6. Инициализация РП команд
+    try:
+        from handlers.rp_commands import init_rp_tables
+        await init_rp_tables()
+        logger.info("✅ РП команды инициализированы")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации РП команд: {e}")
     
     logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
 
@@ -115,12 +139,8 @@ async def on_startup():
 async def on_shutdown():
     """Очистка при остановке"""
     logger.info("🛑 Остановка бота...")
-    
     try:
-        if asyncio.iscoroutinefunction(db.close):
-            await db.close()
-        else:
-            await asyncio.to_thread(db.close)
+        await db.close()
         logger.info("✅ База данных закрыта")
     except Exception as e:
         logger.error(f"❌ Ошибка при закрытии БД: {e}")
