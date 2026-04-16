@@ -114,7 +114,7 @@ async def cmd_start(message: types.Message):
             f"👋 <b>С возвращением, {_escape_html(first_name)}!</b>\n\n"
             f"💰 Ваш баланс: <b>{user['balance']}</b> NCoins\n"
             f"⭐ VIP статус: {'✅ АКТИВИРОВАН' if user.get('vip_level', 0) > 0 else '❌ НЕТ'}\n\n"
-            f"👇 Выберите действие в меню:",
+            "👇 Выберите действие в меню:",
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu(is_admin=is_admin)
         )
