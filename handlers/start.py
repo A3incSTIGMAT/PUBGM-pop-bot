@@ -8,6 +8,8 @@ from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database import db
 from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK, ADMIN_IDS
@@ -21,8 +23,11 @@ from utils.keyboards import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Временное хранилище для ожидающих обратной связи
-waiting_feedback = set()
+
+# ==================== FSM ДЛЯ ОБРАТНОЙ СВЯЗИ ====================
+
+class FeedbackState(StatesGroup):
+    waiting_for_message = State()
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -32,6 +37,16 @@ def _escape_html(text: str | None) -> str:
     if not text:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _escape_markdown(text: str | None) -> str:
+    """Экранирование специальных символов для MarkdownV2"""
+    if not text:
+        return ""
+    chars = "_*[]()~`>#+-=|{}.!"
+    for char in chars:
+        text = text.replace(char, f"\\{char}")
+    return text
 
 
 async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
@@ -319,18 +334,25 @@ async def cmd_donate(message: types.Message):
 
 
 @router.message(Command("feedback"))
-async def cmd_feedback(message: types.Message):
+async def cmd_feedback(message: types.Message, state: FSMContext):
     """Обратная связь с разработчиком (альтернативный способ)"""
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
-        await message.answer(
+        # Запускаем FSM для ввода сообщения
+        await state.set_state(FeedbackState.waiting_for_message)
+        
+        msg = await message.answer(
             "💬 *ОБРАТНАЯ СВЯЗЬ*\n\n"
-            "Напишите: `/feedback ваше сообщение`\n\n"
-            "Пример: `/feedback Хотелось бы добавить новую игру`\n\n"
-            "Или нажмите кнопку 'Обратная связь' в меню.",
+            "Напишите ваше сообщение в ответ на это сообщение.\n\n"
+            "📌 *Что можно написать:*\n"
+            "• Предложение по улучшению\n"
+            "• Сообщение об ошибке\n"
+            "• Вопрос по работе бота\n\n"
+            "❌ Для отмены отправьте /cancel",
             parse_mode=ParseMode.MARKDOWN
         )
+        await state.update_data(prompt_msg_id=msg.message_id)
         return
     
     feedback_text = args[1]
@@ -343,19 +365,20 @@ async def cmd_feedback(message: types.Message):
         )
         return
     
+    # Отправляем админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             try:
                 await message.bot.send_message(
                     admin_id,
                     f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
-                    f"👤 От: {message.from_user.full_name}\n"
-                    f"🆔 ID: {message.from_user.id}\n"
-                    f"📝 Сообщение: {feedback_text}",
+                    f"👤 От: {_escape_html(message.from_user.full_name)}\n"
+                    f"🆔 ID: <code>{message.from_user.id}</code>\n"
+                    f"📝 Сообщение:\n{_escape_html(feedback_text)}",
                     parse_mode=ParseMode.HTML
                 )
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to send feedback to admin {admin_id}: {e}")
     
     await message.answer(
         "✅ *Спасибо за обратную связь!*\n\n"
@@ -485,76 +508,117 @@ async def my_stats_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Используйте /start", show_alert=True)
         return
     
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM user_game_stats WHERE user_id = ?", (user_id,))
-    game_stats = cursor.fetchone()
-    conn.close()
+    # Безопасное получение статистики
+    conn = await db._get_connection_async()
+    cursor = await conn.execute(
+        """SELECT slots_played, roulette_played, rps_played, duel_played 
+           FROM user_game_stats WHERE user_id = ?""",
+        (user_id,)
+    )
+    row = await cursor.fetchone()
+    await conn.close()
+    
+    slots = row[0] if row else 0
+    roulette = row[1] if row else 0
+    rps = row[2] if row else 0
+    duel = row[3] if row else 0
+    
+    first_name = user.get('first_name', 'Не указано')
+    balance = user.get('balance', 0)
+    wins = user.get('wins', 0)
+    losses = user.get('losses', 0)
     
     text = f"""
 📊 *ВАША СТАТИСТИКА*
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-👤 Имя: {user.get('first_name', 'Не указано')}
-💰 Баланс: {user.get('balance', 0)} NCoins
-🏆 Побед: {user.get('wins', 0)} | Поражений: {user.get('losses', 0)}
+👤 Имя: {_escape_markdown(first_name)}
+💰 Баланс: {balance} NCoins
+🏆 Побед: {wins} \\| Поражений: {losses}
 
 ━━━━━━━━━━━━━━━━━━━━━
 
 *ИГРЫ:*
-🎰 Слот: {game_stats[4] if game_stats else 0} игр
-🎡 Рулетка: {game_stats[5] if game_stats else 0} игр
-✂️ КНБ: {game_stats[6] if game_stats else 0} игр
-⚔️ Дуэль: {game_stats[7] if game_stats else 0} игр
+🎰 Слот: {slots} игр
+🎡 Рулетка: {roulette} игр
+✂️ КНБ: {rps} игр
+⚔️ Дуэль: {duel} игр
 
 ━━━━━━━━━━━━━━━━━━━━━
 
 💡 *Совет:* Играйте больше, чтобы повысить ранг!
 """
     
-    await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+    await callback.message.edit_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=back_button()
+    )
     await callback.answer()
 
 
-# ==================== ОБРАТНАЯ СВЯЗЬ ЧЕРЕЗ КНОПКУ ====================
+# ==================== ОБРАТНАЯ СВЯЗЬ ЧЕРЕЗ КНОПКУ (FSM) ====================
 
 @router.callback_query(F.data == "feedback_menu")
-async def feedback_menu_callback(callback: types.CallbackQuery):
-    """Кнопка обратной связи — запрашивает текст сообщения"""
-    user_id = callback.from_user.id
-    waiting_feedback.add(user_id)
+async def feedback_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Кнопка обратной связи — запрашивает текст сообщения через FSM"""
+    await state.set_state(FeedbackState.waiting_for_message)
     
-    await callback.message.answer(
+    msg = await callback.message.answer(
         "💬 *ОБРАТНАЯ СВЯЗЬ*\n\n"
         "Напишите ваше сообщение в ответ на это сообщение.\n\n"
         "📌 *Что можно написать:*\n"
         "• Предложение по улучшению\n"
         "• Сообщение об ошибке\n"
         "• Вопрос по работе бота\n\n"
-        "❌ Для отмены отправьте /cancel_feedback",
+        "❌ Для отмены отправьте /cancel",
         parse_mode=ParseMode.MARKDOWN
     )
+    await state.update_data(prompt_msg_id=msg.message_id)
     await callback.answer()
 
 
-@router.message(Command("cancel_feedback"))
-async def cancel_feedback(message: types.Message):
+@router.message(Command("cancel"))
+async def cancel_feedback_command(message: types.Message, state: FSMContext):
     """Отмена отправки обратной связи"""
-    user_id = message.from_user.id
-    if user_id in waiting_feedback:
-        waiting_feedback.remove(user_id)
-    await message.answer("❌ Отправка обратной связи отменена.")
+    current_state = await state.get_state()
+    
+    if current_state == FeedbackState.waiting_for_message:
+        data = await state.get_data()
+        
+        # Пытаемся удалить сообщение-запрос
+        if prompt_id := data.get('prompt_msg_id'):
+            try:
+                await message.bot.delete_message(message.chat.id, prompt_id)
+            except:
+                pass
+        
+        await state.clear()
+        await message.answer("❌ Отправка обратной связи отменена.")
+    else:
+        await message.answer("ℹ️ Нет активной операции для отмены.")
 
 
-@router.message(lambda message: message.from_user.id in waiting_feedback)
-async def process_feedback_message(message: types.Message):
-    """Обработка текста обратной связи"""
-    user_id = message.from_user.id
+@router.message(FeedbackState.waiting_for_message)
+async def process_feedback_message(message: types.Message, state: FSMContext):
+    """Обработка текста обратной связи (FSM)"""
+    data = await state.get_data()
+    
+    # Удаляем сообщение-запрос
+    if prompt_id := data.get('prompt_msg_id'):
+        try:
+            await message.bot.delete_message(message.chat.id, prompt_id)
+        except Exception as e:
+            logger.debug(f"Could not delete prompt message: {e}")
+    
     feedback_text = message.text.strip()
     
-    if user_id in waiting_feedback:
-        waiting_feedback.remove(user_id)
+    # Проверка на команду отмены
+    if feedback_text == '/cancel':
+        await state.clear()
+        await message.answer("❌ Отправка обратной связи отменена.")
+        return
     
     if len(feedback_text) < 5:
         await message.answer(
@@ -563,21 +627,23 @@ async def process_feedback_message(message: types.Message):
             "Нажмите 'Обратная связь' в меню, чтобы попробовать ещё раз.",
             parse_mode=ParseMode.MARKDOWN
         )
+        await state.clear()
         return
     
+    # Отправляем админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             try:
                 await message.bot.send_message(
                     admin_id,
                     f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
-                    f"👤 От: {message.from_user.full_name}\n"
-                    f"🆔 ID: {message.from_user.id}\n"
-                    f"📝 Сообщение: {feedback_text}",
+                    f"👤 От: {_escape_html(message.from_user.full_name)}\n"
+                    f"🆔 ID: <code>{message.from_user.id}</code>\n"
+                    f"💬 Сообщение:\n{_escape_html(feedback_text)}",
                     parse_mode=ParseMode.HTML
                 )
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to send feedback to admin {admin_id}: {e}")
     
     await message.answer(
         "✅ *Спасибо за обратную связь!*\n\n"
@@ -585,6 +651,7 @@ async def process_feedback_message(message: types.Message):
         "Мы рассмотрим его в ближайшее время.",
         parse_mode=ParseMode.MARKDOWN
     )
+    await state.clear()
 
 
 # ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ====================
@@ -752,8 +819,21 @@ async def rp_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "my_tags_menu")
 async def my_tags_menu_callback(callback: types.CallbackQuery):
+    """Обработчик кнопки 'Мои теги' - ИСПРАВЛЕНО"""
     from handlers.tag_user import cmd_mytags
-    await cmd_mytags(callback.message)
+    
+    # Создаем фейковое сообщение с правильными параметрами
+    # cmd_mytags ожидает Message, используем callback.message
+    try:
+        await cmd_mytags(callback.message)
+    except Exception as e:
+        logger.error(f"Error in my_tags_menu: {e}")
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки тегов</b>\n\n"
+            "Попробуйте позже или используйте команду <code>/mytags</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_button()
+        )
     await callback.answer()
 
 
