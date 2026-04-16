@@ -2,7 +2,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню — разбито на категории"""
+    """Главное меню — разбито на категории, админ-кнопка только для админов"""
     
     # КАТЕГОРИЯ 1: ОСНОВНОЕ
     row1 = [
