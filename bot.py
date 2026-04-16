@@ -45,7 +45,6 @@ from handlers.vip import router as vip_router
 from handlers.tag import router as tag_router
 from handlers.ai_assistant import router as ai_assistant_router
 from handlers.referral import router as referral_router
-from handlers.smart_commands import router as smart_commands_router
 from handlers.tag_admin import router as tag_admin_router
 from handlers.tag_user import router as tag_user_router
 from handlers.tag_trigger import router as tag_trigger_router
@@ -53,15 +52,17 @@ from handlers.ranks import router as ranks_router
 from handlers.rating import router as rating_router
 from handlers.games_private import router as games_private_router
 from handlers.rp_commands import router as rp_commands_router
+from handlers.smart_commands import router as smart_commands_router
 
 # ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
+# ВАЖНО: smart_commands_router должен быть ПОСЛЕДНИМ!
 dp.include_routers(
     start_router,
-    smart_commands_router,
     profile_router,
     economy_router,
     games_router,
     vip_router,
+    tag_router,
     ai_assistant_router,
     referral_router,
     tag_admin_router,
@@ -71,7 +72,7 @@ dp.include_routers(
     rating_router,
     games_private_router,
     rp_commands_router,
-    tag_router,
+    smart_commands_router,  # ← ПОСЛЕДНИЙ!
 )
 
 logger.info("✅ Все роутеры успешно загружены")
