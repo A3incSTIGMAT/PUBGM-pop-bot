@@ -469,7 +469,6 @@ async def my_stats_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Используйте /start", show_alert=True)
         return
     
-    # Получаем статистику игр
     conn = db._get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM user_game_stats WHERE user_id = ?", (user_id,))
