@@ -26,86 +26,100 @@ async def cmd_mytags(message: types.Message):
         await message.answer("❌ Команда работает только в группах!")
         return
     
-    categories = await get_chat_enabled_categories(chat_id)
-    if not categories:
-        await message.answer("📭 В этом чате нет активных категорий тегов")
-        return
+    # Отправляем сообщение "Загрузка..."
+    loading_msg = await message.answer("🔄 Загрузка категорий...")
     
-    subs = await get_user_subscriptions(user_id, chat_id)
-    
-    keyboard = []
-    for cat in categories:
-        is_on = subs.get(cat["slug"], True)
-        # ✅ Добавляем эмодзи для наглядности
-        status_emoji = "✅" if is_on else "❌"
-        status_text = "ВКЛ" if is_on else "ВЫКЛ"
+    try:
+        categories = await get_chat_enabled_categories(chat_id)
         
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{cat['icon']} {cat['name']} [{status_text}]",
-                callback_data=f"tagsub_{chat_id}_{cat['slug']}_{1 if not is_on else 0}"
+        if not categories:
+            await loading_msg.edit_text(
+                "📭 В этом чате нет активных категорий тегов.\n\n"
+                "Попросите администратора настроить их через /tagadmin"
             )
-        ])
-    
-    keyboard.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")])
-    
-    await message.answer(
-        f"🏷️ *МОИ ТЕГИ*\n\nЧат: {message.chat.title}\n\n"
-        "✅ ВКЛ — вы получаете уведомления\n"
-        "❌ ВЫКЛ — уведомления отключены\n\n"
-        "👇 Нажмите на категорию, чтобы изменить статус:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
+            return
+        
+        subs = await get_user_subscriptions(user_id, chat_id)
+        
+        keyboard = []
+        for cat in categories:
+            is_on = subs.get(cat["slug"], True)
+            status_text = "✅ ВКЛ" if is_on else "❌ ВЫКЛ"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{cat['icon']} {cat['name']} [{status_text}]",
+                    callback_data=f"tagsub_{chat_id}_{cat['slug']}_{1 if not is_on else 0}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")])
+        
+        await loading_msg.edit_text(
+            f"🏷️ *МОИ ТЕГИ*\n\nЧат: {message.chat.title}\n\n"
+            "✅ ВКЛ — вы получаете уведомления\n"
+            "❌ ВЫКЛ — уведомления отключены\n\n"
+            "👇 Нажмите на категорию, чтобы изменить статус:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in mytags: {e}")
+        await loading_msg.edit_text(
+            "❌ Ошибка загрузки категорий.\n\n"
+            "Пожалуйста, попробуйте позже или сообщите администратору."
+        )
 
 
 @router.callback_query(F.data.startswith("tagsub_"))
 async def toggle_user_subscription_callback(callback: types.CallbackQuery):
     """Переключение подписки пользователя с визуальным обновлением"""
-    parts = callback.data.split("_")
-    chat_id = int(parts[1])
-    category_slug = parts[2]
-    new_state = bool(int(parts[3]))  # True = включить, False = выключить
-    
-    # Меняем подписку
-    await toggle_user_subscription(callback.from_user.id, chat_id, category_slug, new_state)
-    
-    # Получаем обновлённые данные
-    categories = await get_chat_enabled_categories(chat_id)
-    subs = await get_user_subscriptions(callback.from_user.id, chat_id)
-    
-    # Перестраиваем клавиатуру с новыми статусами
-    keyboard = []
-    for cat in categories:
-        is_on = subs.get(cat["slug"], True)
-        status_emoji = "✅" if is_on else "❌"
-        status_text = "ВКЛ" if is_on else "ВЫКЛ"
+    try:
+        parts = callback.data.split("_")
+        chat_id = int(parts[1])
+        category_slug = parts[2]
+        new_state = bool(int(parts[3]))
         
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{cat['icon']} {cat['name']} [{status_text}]",
-                callback_data=f"tagsub_{chat_id}_{cat['slug']}_{1 if not is_on else 0}"
-            )
-        ])
-    
-    keyboard.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")])
-    
-    # Находим название категории для ответа
-    cat_name = next((c["name"] for c in categories if c["slug"] == category_slug), category_slug)
-    status_text = "включены" if new_state else "отключены"
-    
-    # Обновляем сообщение и показываем уведомление
-    await callback.message.edit_text(
-        f"🏷️ *МОИ ТЕГИ*\n\nЧат: {callback.message.chat.title}\n\n"
-        "✅ ВКЛ — вы получаете уведомления\n"
-        "❌ ВЫКЛ — уведомления отключены\n\n"
-        "👇 Нажмите на категорию, чтобы изменить статус:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
-    
-    # Показываем всплывающее уведомление
-    await callback.answer(f"✅ {cat_name}: уведомления {status_text}!")
+        # Меняем подписку
+        await toggle_user_subscription(callback.from_user.id, chat_id, category_slug, new_state)
+        
+        # Получаем обновлённые данные
+        categories = await get_chat_enabled_categories(chat_id)
+        subs = await get_user_subscriptions(callback.from_user.id, chat_id)
+        
+        # Перестраиваем клавиатуру
+        keyboard = []
+        for cat in categories:
+            is_on = subs.get(cat["slug"], True)
+            status_text = "✅ ВКЛ" if is_on else "❌ ВЫКЛ"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{cat['icon']} {cat['name']} [{status_text}]",
+                    callback_data=f"tagsub_{chat_id}_{cat['slug']}_{1 if not is_on else 0}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")])
+        
+        cat_name = next((c["name"] for c in categories if c["slug"] == category_slug), category_slug)
+        status_text = "включены" if new_state else "отключены"
+        
+        await callback.message.edit_text(
+            f"🏷️ *МОИ ТЕГИ*\n\nЧат: {callback.message.chat.title}\n\n"
+            "✅ ВКЛ — вы получаете уведомления\n"
+            "❌ ВЫКЛ — уведомления отключены\n\n"
+            "👇 Нажмите на категорию, чтобы изменить статус:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+        await callback.answer(f"✅ {cat_name}: уведомления {status_text}!")
+        
+    except Exception as e:
+        logger.error(f"Error in tagsub callback: {e}")
+        await callback.answer("❌ Ошибка при изменении подписки", show_alert=True)
 
 
 @router.callback_query(F.data == "my_tags_menu")
