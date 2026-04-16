@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import re
+import sqlite3
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -13,27 +13,40 @@ from utils.keyboards import back_button
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ⚠️ В продакшене замените на aiogram.fsm
+# ⚠️ Импорт состояний анкеты
 try:
     from handlers.profile import profile_states
 except ImportError:
     profile_states = {}
 
-# Хелпер для безопасного выполнения sync-запросов
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def get_daily_bonus_amount(user_id: int, base_bonus: int = 100) -> int:
+    """Получить ежедневный бонус с учётом VIP"""
+    user = await db.get_user(user_id)
+    if not user or user.get("vip_level", 0) == 0:
+        return base_bonus
+    
+    vip_bonus = user.get("vip_level", 0) * 50
+    return base_bonus + vip_bonus
+
+
 async def _exec_sync(query: str, params: tuple = ()):
+    """Выполнить синхронный SQL-запрос в отдельном потоке"""
     def _run():
-        import sqlite3
         conn = sqlite3.connect(db.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")  # Ускоряет concurrent-записи
         try:
-            cur = conn.cursor()
-            cur.execute(query, params)
+            cursor = conn.cursor()
+            cursor.execute(query, params)
             conn.commit()
-            return cur.fetchall() if cur.description else cur.rowcount
+            return cursor.fetchall() if cursor.description else cursor.rowcount
         finally:
             conn.close()
     return await asyncio.to_thread(_run)
 
+
+# ==================== КОМАНДА /balance ====================
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message):
@@ -42,10 +55,30 @@ async def cmd_balance(message: Message):
         await message.answer("❌ Сначала используйте /start")
         return
     await message.answer(
-        f"💰 Баланс: <b>{user['balance']} NCoin</b>",
+        f"💰 Баланс: <b>{user['balance']} NCoin</b>\n\n"
+        f"📊 Побед: {user['wins']} | Поражений: {user['losses']}",
         parse_mode=ParseMode.HTML
     )
 
+
+@router.callback_query(F.data == "balance")
+async def balance_callback(callback: CallbackQuery):
+    """Обработчик кнопки БАЛАНС из меню"""
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Сначала используйте /start", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"💰 <b>Ваш баланс:</b> {user['balance']} NCoin\n\n"
+        f"📊 Побед: {user['wins']} | Поражений: {user['losses']}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_button()
+    )
+    await callback.answer()
+
+
+# ==================== КОМАНДА /daily ====================
 
 @router.message(Command("daily"))
 async def cmd_daily(message: Message):
@@ -67,19 +100,18 @@ async def cmd_daily(message: Message):
         await message.answer("⏰ Вы уже получали бонус сегодня! Возвращайтесь завтра.")
         return
     
-    # Атомарное обновление стрика и баланса в одной транзакции
     try:
+        # Расчёт стрика и бонуса
         if last_daily and (datetime.now().date() - datetime.fromisoformat(last_daily).date()).days == 1:
             new_streak = user.get("daily_streak", 0) + 1
         else:
             new_streak = 1
-            
-        bonus = 100 + (new_streak * 50)
         
-        # 1. Обновляем баланс (атомарно)
+        base_bonus = 100 + (new_streak * 50)
+        bonus = await get_daily_bonus_amount(user_id, base_bonus)
+        
+        # Обновляем баланс и стрик атомарно
         await db.update_balance(user_id, bonus, f"Ежедневный бонус (стрик: {new_streak})")
-        
-        # 2. Обновляем стрик и дату (sync, но в отдельном потоке)
         await _exec_sync(
             "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
             (new_streak, today, user_id)
@@ -88,7 +120,15 @@ async def cmd_daily(message: Message):
         updated_user = await db.get_user(user_id)
         new_balance = updated_user["balance"] if updated_user else 0
         
-        streak_emoji = "🔥🔥🔥" if new_streak >= 30 else "🔥🔥" if new_streak >= 7 else "🔥" if new_streak >= 3 else "⭐"
+        # Эмодзи для стрика
+        if new_streak >= 30:
+            streak_emoji = "🔥🔥🔥"
+        elif new_streak >= 7:
+            streak_emoji = "🔥🔥"
+        elif new_streak >= 3:
+            streak_emoji = "🔥"
+        else:
+            streak_emoji = "⭐"
         
         await message.answer(
             f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС!</b>\n\n"
@@ -103,6 +143,15 @@ async def cmd_daily(message: Message):
         await message.answer("❌ Произошла ошибка при начислении бонуса. Попробуйте позже.")
 
 
+@router.callback_query(F.data == "daily")
+async def daily_callback(callback: CallbackQuery):
+    """Обработчик кнопки ежедневного бонуса (если добавите в меню)"""
+    await cmd_daily(callback.message)
+    await callback.answer()
+
+
+# ==================== КОМАНДА /transfer ====================
+
 @router.message(Command("transfer"))
 async def cmd_transfer(message: Message):
     user_id = message.from_user.id
@@ -111,10 +160,12 @@ async def cmd_transfer(message: Message):
         await message.answer("❌ Сначала завершите заполнение анкеты командой /cancel_profile")
         return
     
-    # Надёжный парсинг аргументов
     args = message.text.strip().split()
     if len(args) != 3:
-        await message.answer("❌ Использование: <code>/transfer @username 100</code>", parse_mode=ParseMode.HTML)
+        await message.answer(
+            "❌ Использование: <code>/transfer @username 100</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
     
     target_username = args[1].lstrip("@")
@@ -137,36 +188,32 @@ async def cmd_transfer(message: Message):
         await message.answer(f"❌ Недостаточно средств! Ваш баланс: {sender['balance']} NCoin")
         return
     
-    # Атомарный перевод в транзакции
+    # Атомарный перевод
     def _perform_transfer():
-        import sqlite3
         conn = sqlite3.connect(db.db_path)
-        conn.execute("BEGIN IMMEDIATE")  # Блокировка на запись
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = conn.cursor()
-            # Ищем получателя
-            cur.execute("SELECT user_id FROM users WHERE username = ?", (target_username,))
-            row = cur.fetchone()
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE username = ?", (target_username,))
+            row = cursor.fetchone()
             if not row:
                 conn.rollback()
                 return False, "user_not_found"
-                
+            
             target_id = row[0]
             if target_id == user_id:
                 conn.rollback()
                 return False, "self_transfer"
-                
-            # Списываем у отправителя (проверка баланса в SQL защищает от гонок)
-            cur.execute(
+            
+            cursor.execute(
                 "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
                 (amount, user_id, amount)
             )
-            if cur.rowcount == 0:
+            if cursor.rowcount == 0:
                 conn.rollback()
                 return False, "insufficient_balance"
-                
-            # Зачисляем получателю
-            cur.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
+            
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
             conn.commit()
             return True, target_id
         except Exception as e:
@@ -175,7 +222,7 @@ async def cmd_transfer(message: Message):
             return False, "db_error"
         finally:
             conn.close()
-
+    
     success, result = await asyncio.to_thread(_perform_transfer)
     
     if not success:
@@ -187,9 +234,6 @@ async def cmd_transfer(message: Message):
         }
         await message.answer(messages.get(result, "❌ Ошибка перевода"))
         return
-
-    await db.update_balance(user_id, -amount, f"Перевод пользователю @{target_username}")
-    await db.update_balance(result, amount, f"Перевод от @{message.from_user.username or message.from_user.first_name}")
     
     updated_sender = await db.get_user(user_id)
     await message.answer(
@@ -200,6 +244,8 @@ async def cmd_transfer(message: Message):
         parse_mode=ParseMode.HTML
     )
 
+
+# ==================== КНОПКА ЭКОНОМИКИ ====================
 
 @router.callback_query(F.data == "economy")
 async def economy_menu(callback: CallbackQuery):
@@ -224,4 +270,3 @@ async def economy_menu(callback: CallbackQuery):
         reply_markup=back_button()
     )
     await callback.answer()
-
