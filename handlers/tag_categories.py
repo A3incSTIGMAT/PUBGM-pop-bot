@@ -1,5 +1,8 @@
+"""
+Утилиты для работы с категориями тегов
+"""
+
 import logging
-import sqlite3
 from datetime import datetime
 from database import db
 
@@ -33,6 +36,7 @@ async def init_categories():
             name TEXT NOT NULL,
             description TEXT,
             icon_emoji TEXT DEFAULT '🔔',
+            is_global BOOLEAN DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -43,6 +47,8 @@ async def init_categories():
             chat_id BIGINT NOT NULL,
             category_slug TEXT NOT NULL,
             is_enabled BOOLEAN DEFAULT 0,
+            custom_name TEXT,
+            cooldown_seconds INTEGER DEFAULT 300,
             PRIMARY KEY (chat_id, category_slug)
         )
     """)
@@ -55,6 +61,33 @@ async def init_categories():
             category_slug TEXT NOT NULL,
             is_subscribed BOOLEAN DEFAULT 1,
             PRIMARY KEY (user_id, chat_id, category_slug)
+        )
+    """)
+    
+    # Таблица кастомных категорий чата
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_custom_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id BIGINT NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            icon_emoji TEXT DEFAULT '📌',
+            created_by BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, slug)
+        )
+    """)
+    
+    # Таблица логов вызовов тегов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tag_usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id BIGINT NOT NULL,
+            category_slug TEXT NOT NULL,
+            triggered_by BIGINT NOT NULL,
+            mentioned_count INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -95,17 +128,22 @@ async def get_chat_enabled_categories(chat_id: int):
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT tc.slug, tc.name, tc.description, tc.icon_emoji
+        SELECT tc.slug, tc.name, tc.description, tc.icon_emoji,
+               COALESCE(cts.custom_name, tc.name) as display_name
         FROM tag_categories tc
-        JOIN chat_tag_settings cts ON tc.slug = cts.category_slug
-        WHERE cts.chat_id = ? AND cts.is_enabled = 1
-    """, (chat_id,))
+        LEFT JOIN chat_tag_settings cts ON tc.slug = cts.category_slug AND cts.chat_id = ?
+        WHERE cts.is_enabled = 1
+        UNION
+        SELECT slug, name, description, icon_emoji, name
+        FROM chat_custom_categories
+        WHERE chat_id = ?
+    """, (chat_id, chat_id))
     
     results = []
     for row in cursor.fetchall():
         results.append({
             "slug": row[0],
-            "name": row[1],
+            "name": row[4],
             "description": row[2],
             "icon": row[3],
         })
@@ -184,3 +222,52 @@ async def collect_subscribed_users(chat_id: int, category_slug: str):
     
     conn.close()
     return results
+
+
+async def add_custom_category(chat_id: int, name: str, created_by: int) -> str:
+    """Добавить кастомную категорию в чат"""
+    import hashlib
+    import time
+    
+    slug = f"custom_{hashlib.md5(f'{chat_id}_{time.time()}'.encode()).hexdigest()[:8]}"
+    
+    conn = db._get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO chat_custom_categories (chat_id, slug, name, created_by)
+        VALUES (?, ?, ?, ?)
+    """, (chat_id, slug, name, created_by))
+    
+    # Автоматически включаем новую категорию
+    cursor.execute("""
+        INSERT OR REPLACE INTO chat_tag_settings (chat_id, category_slug, is_enabled)
+        VALUES (?, ?, 1)
+    """, (chat_id, slug))
+    
+    conn.commit()
+    conn.close()
+    return slug
+
+
+async def delete_custom_category(chat_id: int, slug: str):
+    """Удалить кастомную категорию"""
+    conn = db._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chat_custom_categories WHERE chat_id = ? AND slug = ?", (chat_id, slug))
+    cursor.execute("DELETE FROM chat_tag_settings WHERE chat_id = ? AND category_slug = ?", (chat_id, slug))
+    cursor.execute("DELETE FROM user_tag_subscriptions WHERE chat_id = ? AND category_slug = ?", (chat_id, slug))
+    conn.commit()
+    conn.close()
+
+
+async def log_tag_usage(chat_id: int, category_slug: str, triggered_by: int, mentioned_count: int):
+    """Записать в лог вызов тега"""
+    conn = db._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO tag_usage_log (chat_id, category_slug, triggered_by, mentioned_count)
+        VALUES (?, ?, ?, ?)
+    """, (chat_id, category_slug, triggered_by, mentioned_count))
+    conn.commit()
+    conn.close()
