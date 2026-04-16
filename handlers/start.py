@@ -610,9 +610,7 @@ async def help_callback(callback: types.CallbackQuery):
         "<code>/feedback</code> — написать разработчику\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика\n"
-        "<code>/delete_my_data</code> — удалить данные",
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_button()
+        "<code>/delete_my_data</code> — удалить данные"
     )
     await callback.message.edit_text(help_text, parse_mode=ParseMode.HTML, reply_markup=back_button())
     await callback.answer()
