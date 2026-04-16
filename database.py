@@ -387,6 +387,19 @@ class Database:
         
         return await asyncio.to_thread(_sync_get)
     
+    async def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Найти пользователя по username"""
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
+        
+        return await asyncio.to_thread(_sync_get)
+    
     async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
         """Создать пользователя (АСИНХРОННО)"""
         def _sync_create():
@@ -433,8 +446,18 @@ class Database:
         
         await asyncio.to_thread(_sync_update)
     
-    async def transfer_coins(self, from_id: int, to_id: int, amount: int, reason: str = "transfer"):
-        """Перевод монет между пользователями (АТОМАРНАЯ ТРАНЗАКЦИЯ)"""
+    async def transfer_coins(self, from_id: int, to_username: str, amount: int, reason: str = "transfer") -> bool:
+        """Перевод монет между пользователями по username"""
+        # Сначала найдём получателя
+        target = await self.get_user_by_username(to_username)
+        if not target:
+            return False
+        
+        to_id = target["user_id"]
+        
+        if from_id == to_id:
+            raise ValueError("Нельзя перевести самому себе")
+        
         def _sync_transfer():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -542,11 +565,72 @@ class Database:
         
         return await asyncio.to_thread(_sync_get)
     
+    async def get_top_donors(self, limit: int = 10) -> List[Dict]:
+        """Получить топ донатеров"""
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT d.user_id, u.username, u.first_name, d.total_donated, d.donor_rank
+                FROM donors d
+                JOIN users u ON d.user_id = u.user_id
+                ORDER BY d.total_donated DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+    
+    async def update_donor_stats(self, user_id: int, amount_rub: int):
+        """Обновить статистику донатера"""
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Определяем ранг донатера
+            cursor.execute("SELECT total_donated FROM donors WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            current_total = row[0] if row else 0
+            new_total = current_total + amount_rub
+            
+            donor_rank = "💎 Поддерживающий"
+            if new_total >= 5000:
+                donor_rank = "👑 Легендарный спонсор"
+            elif new_total >= 2000:
+                donor_rank = "💫 Золотой спонсор"
+            elif new_total >= 500:
+                donor_rank = "⭐ Серебряный спонсор"
+            elif new_total >= 100:
+                donor_rank = "🔰 Бронзовый спонсор"
+            
+            cursor.execute("""
+                INSERT INTO donors (user_id, total_donated, last_donate, donor_rank)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    total_donated = total_donated + ?,
+                    last_donate = CURRENT_TIMESTAMP,
+                    donor_rank = ?
+            """, (user_id, amount_rub, donor_rank, amount_rub, donor_rank))
+            
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+    
     async def add_warn(self, user_id: int, warn_text: str):
         """Добавить предупреждение пользователю"""
         user = await self.get_user(user_id)
         if user:
             warns = user.get('warns', [])
+            if isinstance(warns, str):
+                try:
+                    warns = json.loads(warns)
+                except:
+                    warns = []
+            
             warns.append({
                 'text': warn_text,
                 'date': datetime.now().isoformat()
@@ -561,6 +645,30 @@ class Database:
                 conn.close()
             
             await asyncio.to_thread(_sync_update)
+    
+    async def get_user_warns(self, user_id: int) -> List[Dict]:
+        """Получить предупреждения пользователя"""
+        user = await self.get_user(user_id)
+        if user:
+            warns = user.get('warns', [])
+            if isinstance(warns, str):
+                try:
+                    return json.loads(warns)
+                except:
+                    return []
+            return warns
+        return []
+    
+    async def clear_warns(self, user_id: int):
+        """Очистить предупреждения пользователя"""
+        def _sync_clear():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET warns = '[]' WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_clear)
 
 
 # Глобальный экземпляр базы данных
