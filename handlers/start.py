@@ -359,14 +359,38 @@ async def cmd_feedback(message: types.Message):
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(callback: types.CallbackQuery):
+    """Возврат в главное меню с проверкой прав администратора"""
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
-    is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id) if callback.message.chat.type in ['group', 'supergroup'] else False
+    
+    # Проверяем, является ли пользователь администратором чата
+    is_admin = False
+    if callback.message.chat.type in ['group', 'supergroup']:
+        is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
     
     await callback.message.edit_text(
         "🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER</b>\n\n👇 Выберите категорию:",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(is_admin=is_admin)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel")
+async def admin_panel_callback(callback: types.CallbackQuery):
+    """Админ-панель (только для администраторов)"""
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+    
+    if not await is_admin_in_chat(callback.bot, user_id, chat_id):
+        await callback.answer("❌ Только администраторы имеют доступ!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Управление ботом и чатом:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_panel_menu()
     )
     await callback.answer()
 
@@ -435,24 +459,6 @@ async def settings_category_callback(callback: types.CallbackQuery):
         "Политика, обратная связь и помощь:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=settings_category_menu()
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin_panel")
-async def admin_panel_callback(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    
-    if not await is_admin_in_chat(callback.bot, user_id, chat_id):
-        await callback.answer("❌ Только администраторы имеют доступ!", show_alert=True)
-        return
-    
-    await callback.message.edit_text(
-        "👑 *АДМИН-ПАНЕЛЬ*\n\n"
-        "Управление ботом и чатом:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=admin_panel_menu()
     )
     await callback.answer()
 
