@@ -21,6 +21,9 @@ from utils.keyboards import (
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Временное хранилище для ожидающих обратной связи
+waiting_feedback = set()
+
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -173,7 +176,7 @@ async def cmd_help(message: types.Message):
         "<b>❤️ ПОДДЕРЖКА</b>\n"
         "<code>/donate</code> — поддержать разработчика\n\n"
         "<b>💬 ОБРАТНАЯ СВЯЗЬ</b>\n"
-        "<code>/feedback ваше сообщение</code> — написать разработчику\n\n"
+        "<code>/feedback</code> — написать разработчику\n\n"
         "<b>🔒 ПРОЧЕЕ</b>\n"
         "<code>/privacy</code> — политика конфиденциальности\n"
         "<code>/delete_my_data</code> — удалить мои данные\n\n"
@@ -317,21 +320,28 @@ async def cmd_donate(message: types.Message):
 
 @router.message(Command("feedback"))
 async def cmd_feedback(message: types.Message):
-    """Обратная связь с разработчиком"""
+    """Обратная связь с разработчиком (альтернативный способ)"""
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
         await message.answer(
-            "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\n"
-            "Напишите: <code>/feedback ваше сообщение</code>\n\n"
-            "Пример: <code>/feedback Хотелось бы добавить новую игру</code>\n\n"
-            "Ваше сообщение будет отправлено разработчику.\n\n"
-            "📌 <i>Мы ответим вам в ближайшее время!</i>",
-            parse_mode=ParseMode.HTML
+            "💬 *ОБРАТНАЯ СВЯЗЬ*\n\n"
+            "Напишите: `/feedback ваше сообщение`\n\n"
+            "Пример: `/feedback Хотелось бы добавить новую игру`\n\n"
+            "Или нажмите кнопку 'Обратная связь' в меню.",
+            parse_mode=ParseMode.MARKDOWN
         )
         return
     
     feedback_text = args[1]
+    
+    if len(feedback_text) < 5:
+        await message.answer(
+            "❌ *Слишком короткое сообщение!*\n\n"
+            "Пожалуйста, напишите более подробно.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
     
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
@@ -348,10 +358,10 @@ async def cmd_feedback(message: types.Message):
                 pass
     
     await message.answer(
-        "✅ <b>Спасибо за обратную связь!</b>\n\n"
+        "✅ *Спасибо за обратную связь!*\n\n"
         "Ваше сообщение отправлено разработчику.\n"
         "Мы рассмотрим его в ближайшее время.",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
@@ -507,6 +517,76 @@ async def my_stats_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ==================== ОБРАТНАЯ СВЯЗЬ ЧЕРЕЗ КНОПКУ ====================
+
+@router.callback_query(F.data == "feedback_menu")
+async def feedback_menu_callback(callback: types.CallbackQuery):
+    """Кнопка обратной связи — запрашивает текст сообщения"""
+    user_id = callback.from_user.id
+    waiting_feedback.add(user_id)
+    
+    await callback.message.answer(
+        "💬 *ОБРАТНАЯ СВЯЗЬ*\n\n"
+        "Напишите ваше сообщение в ответ на это сообщение.\n\n"
+        "📌 *Что можно написать:*\n"
+        "• Предложение по улучшению\n"
+        "• Сообщение об ошибке\n"
+        "• Вопрос по работе бота\n\n"
+        "❌ Для отмены отправьте /cancel_feedback",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+
+@router.message(Command("cancel_feedback"))
+async def cancel_feedback(message: types.Message):
+    """Отмена отправки обратной связи"""
+    user_id = message.from_user.id
+    if user_id in waiting_feedback:
+        waiting_feedback.remove(user_id)
+    await message.answer("❌ Отправка обратной связи отменена.")
+
+
+@router.message(lambda message: message.from_user.id in waiting_feedback)
+async def process_feedback_message(message: types.Message):
+    """Обработка текста обратной связи"""
+    user_id = message.from_user.id
+    feedback_text = message.text.strip()
+    
+    if user_id in waiting_feedback:
+        waiting_feedback.remove(user_id)
+    
+    if len(feedback_text) < 5:
+        await message.answer(
+            "❌ *Слишком короткое сообщение!*\n\n"
+            "Пожалуйста, напишите более подробно.\n"
+            "Нажмите 'Обратная связь' в меню, чтобы попробовать ещё раз.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if ADMIN_IDS:
+        for admin_id in ADMIN_IDS:
+            try:
+                await message.bot.send_message(
+                    admin_id,
+                    f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
+                    f"👤 От: {message.from_user.full_name}\n"
+                    f"🆔 ID: {message.from_user.id}\n"
+                    f"📝 Сообщение: {feedback_text}",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+    
+    await message.answer(
+        "✅ *Спасибо за обратную связь!*\n\n"
+        "Ваше сообщение отправлено разработчику.\n"
+        "Мы рассмотрим его в ближайшее время.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
 # ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ====================
 
 @router.callback_query(F.data == "my_ref")
@@ -625,12 +705,6 @@ async def help_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "donate")
 async def donate_callback(callback: types.CallbackQuery):
     await cmd_donate(callback.message)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "feedback_menu")
-async def feedback_menu_callback(callback: types.CallbackQuery):
-    await cmd_feedback(callback.message)
     await callback.answer()
 
 
