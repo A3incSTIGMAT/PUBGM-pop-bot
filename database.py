@@ -1,10 +1,12 @@
 import sqlite3
 import os
 import json
+import asyncio
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 
 from config import DATABASE_PATH
+
 
 class Database:
     def __init__(self):
@@ -354,109 +356,212 @@ class Database:
     # ========== МЕТОДЫ ДЛЯ СОВМЕСТИМОСТИ ==========
     
     def _get_connection(self):
-        """Получить соединение с БД"""
+        """Синхронное получение соединения с БД"""
         return sqlite3.connect(self.db_path)
+    
+    async def _get_connection_async(self):
+        """Асинхронное получение соединения с БД (через thread)"""
+        return await asyncio.to_thread(self._get_connection)
     
     async def init(self):
         """Асинхронная инициализация"""
-        self._init_db()
+        await asyncio.to_thread(self._init_db)
         return self
     
     async def close(self):
-        """Закрытие соединения"""
+        """Закрытие соединения (ничего не делаем, sqlite3 сам управляет)"""
         pass
     
     # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        """Получить пользователя"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        conn.close()
+        """Получить пользователя (АСИНХРОННО)"""
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
         
-        if row:
-            return {
-                "user_id": row[0],
-                "username": row[1],
-                "first_name": row[2],
-                "balance": row[3],
-                "daily_streak": row[4],
-                "last_daily": row[5],
-                "vip_level": row[6],
-                "vip_until": row[7],
-                "wins": row[8],
-                "losses": row[9],
-                "register_date": row[10],
-                "warns": json.loads(row[11]) if row[11] else []
-            }
-        return None
+        return await asyncio.to_thread(_sync_get)
     
     async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
-        """Создать пользователя"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO users (user_id, username, first_name, balance, register_date)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, username, first_name, balance, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-    
-    async def update_balance(self, user_id: int, delta: int, reason: str = ""):
-        """Обновить баланс"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
-        conn.commit()
-        conn.close()
-        
-        if reason:
-            conn = self._get_connection()
+        """Создать пользователя (АСИНХРОННО)"""
+        def _sync_create():
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO transactions (from_id, to_id, amount, reason, date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, user_id, delta, reason, datetime.now().isoformat()))
+                INSERT OR IGNORE INTO users (user_id, username, first_name, balance, register_date, warns)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, username, first_name, balance, datetime.now().isoformat(), '[]'))
             conn.commit()
             conn.close()
+        
+        await asyncio.to_thread(_sync_create)
+    
+    async def user_exists(self, user_id: int) -> bool:
+        """Проверить существование пользователя"""
+        user = await self.get_user(user_id)
+        return user is not None
+    
+    async def update_balance(self, user_id: int, delta: int, reason: str = ""):
+        """Обновить баланс (АТОМАРНАЯ ТРАНЗАКЦИЯ)"""
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # Обновляем баланс
+                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
+                
+                # Записываем транзакцию если есть причина
+                if reason:
+                    cursor.execute("""
+                        INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (user_id, user_id, abs(delta), reason, datetime.now().isoformat()))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+    
+    async def transfer_coins(self, from_id: int, to_id: int, amount: int, reason: str = "transfer"):
+        """Перевод монет между пользователями (АТОМАРНАЯ ТРАНЗАКЦИЯ)"""
+        def _sync_transfer():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # Проверяем баланс отправителя
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (from_id,))
+                row = cursor.fetchone()
+                if not row or row[0] < amount:
+                    raise ValueError("Недостаточно средств")
+                
+                # Списываем с отправителя
+                cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, from_id))
+                
+                # Зачисляем получателю
+                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, to_id))
+                
+                # Записываем транзакцию
+                cursor.execute("""
+                    INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (from_id, to_id, amount, reason, datetime.now().isoformat()))
+                
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        return await asyncio.to_thread(_sync_transfer)
     
     async def get_balance(self, user_id: int) -> int:
-        """Получить баланс"""
+        """Получить баланс пользователя"""
         user = await self.get_user(user_id)
         return user["balance"] if user else 0
     
     async def save_profile(self, user_id: int, full_name: str, age: int, city: str, timezone: str, about: str):
         """Сохранить анкету пользователя"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO user_profiles 
-            (user_id, full_name, age, city, timezone, about, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM user_profiles WHERE user_id = ?), ?), ?)
-        """, (user_id, full_name, age, city, timezone, about, user_id, datetime.now().isoformat(), datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
+        def _sync_save():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            
+            cursor.execute("SELECT created_at FROM user_profiles WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            created_at = row[0] if row else now
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO user_profiles 
+                (user_id, full_name, age, city, timezone, about, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, full_name, age, city, timezone, about, created_at, now))
+            
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_save)
     
     async def get_profile(self, user_id: int) -> Optional[Dict]:
         """Получить анкету пользователя"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        conn.close()
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
         
-        if row:
-            return {
-                "full_name": row[1],
-                "age": row[2],
-                "city": row[3],
-                "timezone": row[4],
-                "about": row[5],
-                "created_at": row[6],
-                "updated_at": row[7]
-            }
-        return None
+        return await asyncio.to_thread(_sync_get)
+    
+    async def update_daily_streak(self, user_id: int, streak: int):
+        """Обновить стрик ежедневного бонуса"""
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE users 
+                SET daily_streak = ?, last_daily = ? 
+                WHERE user_id = ?
+            """, (streak, datetime.now().isoformat(), user_id))
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+    
+    async def get_top_users(self, limit: int = 10) -> List[Dict]:
+        """Получить топ пользователей по балансу"""
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT user_id, username, first_name, balance, vip_level 
+                FROM users 
+                ORDER BY balance DESC 
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+    
+    async def add_warn(self, user_id: int, warn_text: str):
+        """Добавить предупреждение пользователю"""
+        user = await self.get_user(user_id)
+        if user:
+            warns = user.get('warns', [])
+            warns.append({
+                'text': warn_text,
+                'date': datetime.now().isoformat()
+            })
+            
+            def _sync_update():
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET warns = ? WHERE user_id = ?", 
+                             (json.dumps(warns), user_id))
+                conn.commit()
+                conn.close()
+            
+            await asyncio.to_thread(_sync_update)
 
+
+# Глобальный экземпляр базы данных
 db = Database()
