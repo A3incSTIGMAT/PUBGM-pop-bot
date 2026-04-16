@@ -91,7 +91,7 @@ async def init_categories():
         )
     """)
     
-    # Добавляем глобальные категории
+    # Добавляем глобальные категории (если их нет)
     for cat in DEFAULT_CATEGORIES:
         cursor.execute("""
             INSERT OR IGNORE INTO tag_categories (slug, name, description, icon_emoji)
@@ -123,43 +123,51 @@ async def get_all_categories():
 
 
 async def get_chat_enabled_categories(chat_id: int):
-    """Получить список включённых категорий в чате"""
+    """Получить список включённых категорий в чате (упрощённая версия без UNION)"""
     conn = db._get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
-        SELECT tc.slug, tc.name, tc.description, tc.icon_emoji,
-               COALESCE(cts.custom_name, tc.name) as display_name
-        FROM tag_categories tc
-        LEFT JOIN chat_tag_settings cts ON tc.slug = cts.category_slug AND cts.chat_id = ?
-        WHERE cts.is_enabled = 1
-        UNION
-        SELECT slug, name, description, icon_emoji, name
-        FROM chat_custom_categories
-        WHERE chat_id = ?
-    """, (chat_id, chat_id))
-    
-    results = []
-    for row in cursor.fetchall():
-        results.append({
-            "slug": row[0],
-            "name": row[4],
-            "description": row[2],
-            "icon": row[3],
-        })
-    
-    conn.close()
-    return results
+    try:
+        # Сначала получаем включённые глобальные категории
+        cursor.execute("""
+            SELECT tc.slug, tc.name, tc.description, tc.icon_emoji
+            FROM tag_categories tc
+            INNER JOIN chat_tag_settings cts ON tc.slug = cts.category_slug
+            WHERE cts.chat_id = ? AND cts.is_enabled = 1
+        """, (chat_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "slug": row[0],
+                "name": row[1],
+                "description": row[2],
+                "icon": row[3],
+            })
+        
+        # Если нет включённых категорий, возвращаем пустой список
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in get_chat_enabled_categories: {e}")
+        return []
+    finally:
+        conn.close()
 
 
 async def get_chat_enabled_slugs(chat_id: int) -> set:
     """Получить set включённых категорий в чате"""
     conn = db._get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT category_slug FROM chat_tag_settings WHERE chat_id = ? AND is_enabled = 1", (chat_id,))
-    results = {row[0] for row in cursor.fetchall()}
-    conn.close()
-    return results
+    try:
+        cursor.execute("SELECT category_slug FROM chat_tag_settings WHERE chat_id = ? AND is_enabled = 1", (chat_id,))
+        results = {row[0] for row in cursor.fetchall()}
+        return results
+    except Exception as e:
+        logger.error(f"Error in get_chat_enabled_slugs: {e}")
+        return set()
+    finally:
+        conn.close()
 
 
 async def toggle_chat_category(chat_id: int, category_slug: str, enabled: bool):
@@ -178,15 +186,20 @@ async def get_user_subscriptions(user_id: int, chat_id: int) -> dict:
     """Получить подписки пользователя в чате"""
     conn = db._get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT category_slug, is_subscribed 
-        FROM user_tag_subscriptions 
-        WHERE user_id = ? AND chat_id = ?
-    """, (user_id, chat_id))
-    
-    results = {row[0]: bool(row[1]) for row in cursor.fetchall()}
-    conn.close()
-    return results
+    try:
+        cursor.execute("""
+            SELECT category_slug, is_subscribed 
+            FROM user_tag_subscriptions 
+            WHERE user_id = ? AND chat_id = ?
+        """, (user_id, chat_id))
+        
+        results = {row[0]: bool(row[1]) for row in cursor.fetchall()}
+        return results
+    except Exception as e:
+        logger.error(f"Error in get_user_subscriptions: {e}")
+        return {}
+    finally:
+        conn.close()
 
 
 async def toggle_user_subscription(user_id: int, chat_id: int, category_slug: str, subscribe: bool):
@@ -205,23 +218,28 @@ async def collect_subscribed_users(chat_id: int, category_slug: str):
     """Собрать подписанных пользователей на категорию"""
     conn = db._get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT u.user_id, u.username, u.first_name
-        FROM user_tag_subscriptions uts
-        JOIN users u ON u.user_id = uts.user_id
-        WHERE uts.chat_id = ? AND uts.category_slug = ? AND uts.is_subscribed = 1
-    """, (chat_id, category_slug))
-    
-    results = []
-    for row in cursor.fetchall():
-        user_id, username, first_name = row
-        if username:
-            results.append(f"@{username}")
-        else:
-            results.append(f"[{first_name}](tg://user?id={user_id})")
-    
-    conn.close()
-    return results
+    try:
+        cursor.execute("""
+            SELECT u.user_id, u.username, u.first_name
+            FROM user_tag_subscriptions uts
+            JOIN users u ON u.user_id = uts.user_id
+            WHERE uts.chat_id = ? AND uts.category_slug = ? AND uts.is_subscribed = 1
+        """, (chat_id, category_slug))
+        
+        results = []
+        for row in cursor.fetchall():
+            user_id, username, first_name = row
+            if username:
+                results.append(f"@{username}")
+            else:
+                results.append(f"[{first_name}](tg://user?id={user_id})")
+        
+        return results
+    except Exception as e:
+        logger.error(f"Error in collect_subscribed_users: {e}")
+        return []
+    finally:
+        conn.close()
 
 
 async def add_custom_category(chat_id: int, name: str, created_by: int) -> str:
