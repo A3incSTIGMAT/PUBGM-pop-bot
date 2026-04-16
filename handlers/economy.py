@@ -22,7 +22,7 @@ DONATE_RATES = {
     500: 10000, # 500 руб = 10000 NCoins
 }
 
-# ⚠️ Импорт состояний анкеты
+# Импорт состояний анкеты
 try:
     from handlers.profile import profile_states
 except ImportError:
@@ -39,16 +39,6 @@ async def get_or_create_user(user_id: int, username: str = None, first_name: str
         user = await db.get_user(user_id)
         logger.info(f"Auto-registered user {user_id} in economy module")
     return user
-
-
-async def get_daily_bonus_amount(user_id: int, base_bonus: int = 100) -> int:
-    """Получить ежедневный бонус с учётом VIP"""
-    user = await db.get_user(user_id)
-    if not user or user.get("vip_level", 0) == 0:
-        return base_bonus
-    
-    vip_bonus = user.get("vip_level", 0) * 50
-    return base_bonus + vip_bonus
 
 
 # ==================== КОМАНДА /balance ====================
@@ -97,39 +87,42 @@ async def balance_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== КОМАНДА /daily ====================
+# ==================== КОМАНДА /daily (ИСПРАВЛЕНО) ====================
 
 @router.message(Command("daily"))
 async def cmd_daily(message: types.Message):
     user_id = message.from_user.id
     
-    # Авторегистрация если нужно
+    # Авторегистрация
     user = await get_or_create_user(
         user_id,
         message.from_user.username,
         message.from_user.first_name
     )
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Получаем текущую дату в формате ISO
+    today = datetime.now().date()
+    today_str = today.isoformat()
+    
+    # Получаем дату последнего бонуса
     last_daily = user.get("last_daily")
     
-    # Проверяем, можно ли получить бонус
+    # Проверяем, получал ли уже сегодня
     if last_daily:
         try:
             last_date = datetime.fromisoformat(last_daily).date()
-            if last_date == datetime.now().date():
-                # Уже получали сегодня
+            if last_date == today:
+                streak = user.get("daily_streak", 0)
                 await message.answer(
                     f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
                     f"Вы уже получали бонус сегодня.\n"
-                    f"Возвращайтесь завтра за новым бонусом!\n\n"
-                    f"🔥 Текущий стрик: <b>{user.get('daily_streak', 0)}</b> дней\n"
+                    f"🔥 Текущий стрик: <b>{streak}</b> дней\n"
                     f"⏰ Следующий бонус: <b>завтра</b>",
                     parse_mode=ParseMode.HTML
                 )
                 return
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error parsing last_daily: {e}")
     
     try:
         # Расчёт стрика
@@ -138,21 +131,21 @@ async def cmd_daily(message: types.Message):
         if last_daily:
             try:
                 last_date = datetime.fromisoformat(last_daily).date()
-                days_diff = (datetime.now().date() - last_date).days
+                yesterday = today - timedelta(days=1)
                 
-                if days_diff == 1:
-                    # Прошёл ровно 1 день - увеличиваем стрик
+                if last_date == yesterday:
+                    # Вчера получал - увеличиваем стрик
                     streak += 1
-                elif days_diff > 1:
-                    # Пропустили день - сбрасываем стрик
+                elif last_date < yesterday:
+                    # Пропустил день - сбрасываем
                     streak = 1
                 else:
-                    # Меньше дня (не должно случиться из-за проверки выше)
+                    # Будущая дата (ошибка) - сбрасываем
                     streak = 1
             except:
                 streak = 1
         else:
-            # Первый бонус
+            # Первый раз
             streak = 1
         
         # Расчёт бонуса
@@ -161,10 +154,23 @@ async def cmd_daily(message: types.Message):
         vip_bonus = vip_level * 50 if vip_level > 0 else 0
         total_bonus = base_bonus + vip_bonus
         
-        # Обновляем баланс и стрик
+        # Обновляем БД
         await db.update_balance(user_id, total_bonus, f"Ежедневный бонус (стрик: {streak})")
-        await db.update_daily_streak(user_id, streak)
         
+        # Обновляем стрик и дату
+        def _sync_update_streak():
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
+                (streak, today_str, user_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_update_streak)
+        
+        # Получаем обновлённый баланс
         updated_user = await db.get_user(user_id)
         new_balance = updated_user["balance"] if updated_user else user['balance'] + total_bonus
         
@@ -178,15 +184,14 @@ async def cmd_daily(message: types.Message):
         else:
             streak_emoji = "⭐"
         
-        # Расчёт завтрашнего бонуса
+        # Завтрашний бонус
         tomorrow_streak = streak + 1
         tomorrow_base = 100 + (tomorrow_streak * 50)
-        tomorrow_vip = vip_level * 50 if vip_level > 0 else 0
-        tomorrow_total = tomorrow_base + tomorrow_vip
+        tomorrow_total = tomorrow_base + vip_bonus
         
         text = (
-            f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС!</b>\n\n"
-            f"💰 Получено: <b>+{total_bonus} NCoin</b>\n"
+            f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
+            f"💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
         )
         
         if vip_bonus > 0:
@@ -196,15 +201,20 @@ async def cmd_daily(message: types.Message):
         text += (
             f"\n{streak_emoji} Стрик: <b>{streak}</b> дней\n"
             f"💎 Новый баланс: <b>{new_balance} NCoin</b>\n\n"
-            f"📅 Завтра бонус будет <b>{tomorrow_total} NCoin</b>!\n\n"
-            f"💡 <i>Заходите каждый день для увеличения стрика!</i>"
+            f"📅 Завтра получите: <b>{tomorrow_total} NCoin</b>!\n\n"
+            f"💡 <i>Заходите каждый день — стрик растёт, бонус увеличивается!</i>"
         )
         
         await message.answer(text, parse_mode=ParseMode.HTML)
+        logger.info(f"Daily bonus given to {user_id}: +{total_bonus}, streak={streak}")
         
     except Exception as e:
         logger.error(f"Daily bonus failed for {user_id}: {e}", exc_info=True)
-        await message.answer("❌ Произошла ошибка при начислении бонуса. Попробуйте позже.")
+        await message.answer(
+            "❌ <b>Произошла ошибка при начислении бонуса</b>\n\n"
+            "Пожалуйста, попробуйте позже или сообщите администратору.",
+            parse_mode=ParseMode.HTML
+        )
 
 
 @router.callback_query(F.data == "daily")
@@ -332,13 +342,15 @@ async def cmd_donate(message: types.Message):
 @router.callback_query(F.data == "donate_sbp")
 async def donate_sbp_callback(callback: types.CallbackQuery):
     """Показать реквизиты СБП"""
+    from config import DONATE_URL, DONATE_BANK, DONATE_RECEIVER
+    
     text = (
-        "💳 <b>РЕКВИЗИТЫ СБП (ОЗОН БАНК)</b>\n\n"
+        "💳 <b>РЕКВИЗИТЫ СБП</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🏦 Банк: <b>Озон Банк</b>\n"
-        "👤 Получатель: <b>Александр Б.</b>\n\n"
+        f"🏦 Банк: <b>{DONATE_BANK}</b>\n"
+        f"👤 Получатель: <b>{DONATE_RECEIVER}</b>\n\n"
         "📱 <b>Ссылка на оплату:</b>\n"
-        "<code>https://finance.ozon.ru/apps/sbp/ozonbankpay/...</code>\n\n"
+        f"<code>{DONATE_URL}</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>📝 ИНСТРУКЦИЯ:</b>\n\n"
         "1. Перейдите по ссылке или отсканируйте QR\n"
@@ -353,7 +365,7 @@ async def donate_sbp_callback(callback: types.CallbackQuery):
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")]
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate")]
         ])
     )
     await callback.answer()
@@ -466,20 +478,7 @@ async def confirm_donate_callback(callback: types.CallbackQuery):
     await db.update_balance(user_id, coins, f"Донат {amount_rub} ₽")
     
     # Обновляем статистику донатера
-    def _update_donor():
-        conn = db._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO donors (user_id, total_donated, last_donate)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET
-                total_donated = total_donated + ?,
-                last_donate = CURRENT_TIMESTAMP
-        """, (user_id, amount_rub, amount_rub))
-        conn.commit()
-        conn.close()
-    
-    await asyncio.to_thread(_update_donator)
+    await db.update_donor_stats(user_id, amount_rub)
     
     await callback.message.edit_caption(
         f"{callback.message.caption}\n\n✅ <b>ПОДТВЕРЖДЕНО!</b>\n"
