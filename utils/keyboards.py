@@ -2,26 +2,63 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню — кнопка VIP и доната на видном месте"""
-    keyboard = [
-        [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
-         InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
-        [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
-         InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
-        [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
-         InlineKeyboardButton(text="🎮 ЛИЧНЫЕ ИГРЫ", callback_data="private_games")],
-        [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
-         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
-        [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
-         InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
-        [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
-         InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
-        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
-         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
-        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
-         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
-        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")],
+    """Главное меню — разбито на категории"""
+    
+    # КАТЕГОРИЯ 1: ОСНОВНОЕ
+    row1 = [
+        InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
+        InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")
     ]
+    
+    # КАТЕГОРИЯ 2: ФИНАНСЫ И РАНГ
+    row2 = [
+        InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
+        InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")
+    ]
+    
+    # КАТЕГОРИЯ 3: ИГРЫ
+    row3 = [
+        InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
+        InlineKeyboardButton(text="🎮 ЛИЧНЫЕ ИГРЫ", callback_data="private_games")
+    ]
+    
+    # КАТЕГОРИЯ 4: ОПОВЕЩЕНИЯ
+    row4 = [
+        InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
+        InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")
+    ]
+    
+    # КАТЕГОРИЯ 5: СОЦИАЛКА
+    row5 = [
+        InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
+        InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")
+    ]
+    
+    # КАТЕГОРИЯ 6: РП И ТЕГИ
+    row6 = [
+        InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
+        InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")
+    ]
+    
+    # КАТЕГОРИЯ 7: ИНФО
+    row7 = [
+        InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
+        InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")
+    ]
+    
+    # КАТЕГОРИЯ 8: ПОМОЩЬ И ПОДДЕРЖКА
+    row8 = [
+        InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
+        InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")
+    ]
+    
+    # КАТЕГОРИЯ 9: ОБРАТНАЯ СВЯЗЬ
+    row9 = [
+        InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")
+    ]
+    
+    # Собираем все строки
+    keyboard = [row1, row2, row3, row4, row5, row6, row7, row8, row9]
     
     # Админ-панель (только для администраторов)
     if is_admin:
@@ -186,5 +223,5 @@ def private_games_menu() -> InlineKeyboardMarkup:
 
 
 def admin_menu() -> InlineKeyboardMarkup:
-    """Меню администратора (устаревшее, используйте admin_panel_menu)"""
+    """Меню администратора (устаревшее)"""
     return admin_panel_menu()
