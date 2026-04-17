@@ -87,7 +87,7 @@ async def balance_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== КОМАНДА /daily (ИСПРАВЛЕНО) ====================
+# ==================== КОМАНДА /daily (ПОЛНОСТЬЮ ИСПРАВЛЕНО) ====================
 
 @router.message(Command("daily"))
 async def cmd_daily(message: types.Message):
@@ -100,29 +100,19 @@ async def cmd_daily(message: types.Message):
         message.from_user.first_name
     )
     
-    # Получаем текущую дату в формате ISO
-    today = datetime.now().date()
-    today_str = today.isoformat()
-    
-    # Получаем дату последнего бонуса
+    today_str = datetime.now().strftime("%Y-%m-%d")
     last_daily = user.get("last_daily")
     
     # Проверяем, получал ли уже сегодня
-    if last_daily:
-        try:
-            last_date = datetime.fromisoformat(last_daily).date()
-            if last_date == today:
-                streak = user.get("daily_streak", 0)
-                await message.answer(
-                    f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
-                    f"Вы уже получали бонус сегодня.\n"
-                    f"🔥 Текущий стрик: <b>{streak}</b> дней\n"
-                    f"⏰ Следующий бонус: <b>завтра</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                return
-        except Exception as e:
-            logger.error(f"Error parsing last_daily: {e}")
+    if last_daily == today_str:
+        streak = user.get("daily_streak", 0)
+        await message.answer(
+            f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
+            f"🔥 Стрик: <b>{streak}</b> дней\n"
+            f"⏰ Следующий бонус: <b>завтра</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
     
     try:
         # Расчёт стрика
@@ -130,22 +120,16 @@ async def cmd_daily(message: types.Message):
         
         if last_daily:
             try:
-                last_date = datetime.fromisoformat(last_daily).date()
-                yesterday = today - timedelta(days=1)
+                last_date = datetime.strptime(last_daily, "%Y-%m-%d").date()
+                yesterday = datetime.now().date() - timedelta(days=1)
                 
                 if last_date == yesterday:
-                    # Вчера получал - увеличиваем стрик
                     streak += 1
-                elif last_date < yesterday:
-                    # Пропустил день - сбрасываем
-                    streak = 1
                 else:
-                    # Будущая дата (ошибка) - сбрасываем
                     streak = 1
             except:
                 streak = 1
         else:
-            # Первый раз
             streak = 1
         
         # Расчёт бонуса
@@ -154,25 +138,45 @@ async def cmd_daily(message: types.Message):
         vip_bonus = vip_level * 50 if vip_level > 0 else 0
         total_bonus = base_bonus + vip_bonus
         
-        # Обновляем БД
-        await db.update_balance(user_id, total_bonus, f"Ежедневный бонус (стрик: {streak})")
-        
-        # Обновляем стрик и дату
-        def _sync_update_streak():
+        # АТОМАРНОЕ ОБНОВЛЕНИЕ ВСЕГО В ОДНОЙ ТРАНЗАКЦИИ
+        def _sync_update_all():
             conn = db._get_connection()
             cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-                (streak, today_str, user_id)
-            )
-            conn.commit()
-            conn.close()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # Обновляем баланс
+                cursor.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                    (total_bonus, user_id)
+                )
+                
+                # Обновляем стрик и дату
+                cursor.execute(
+                    "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
+                    (streak, today_str, user_id)
+                )
+                
+                # Записываем транзакцию
+                cursor.execute("""
+                    INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, user_id, total_bonus, f"Ежедневный бонус (стрик: {streak})", datetime.now().isoformat()))
+                
+                conn.commit()
+                
+                # Получаем новый баланс
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                row = cursor.fetchone()
+                return row[0] if row else user['balance'] + total_bonus
+                
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
         
-        await asyncio.to_thread(_sync_update_streak)
-        
-        # Получаем обновлённый баланс
-        updated_user = await db.get_user(user_id)
-        new_balance = updated_user["balance"] if updated_user else user['balance'] + total_bonus
+        new_balance = await asyncio.to_thread(_sync_update_all)
         
         # Эмодзи для стрика
         if streak >= 30:
@@ -206,7 +210,7 @@ async def cmd_daily(message: types.Message):
         )
         
         await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"Daily bonus given to {user_id}: +{total_bonus}, streak={streak}")
+        logger.info(f"Daily bonus given to {user_id}: +{total_bonus}, streak={streak}, balance={new_balance}")
         
     except Exception as e:
         logger.error(f"Daily bonus failed for {user_id}: {e}", exc_info=True)
