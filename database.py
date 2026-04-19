@@ -670,6 +670,60 @@ class Database:
         
         await asyncio.to_thread(_sync_clear)
 
+    # ==================== НОВЫЙ МЕТОД ДЛЯ ЕЖЕДНЕВНОГО БОНУСА ====================
+    
+    async def claim_daily_bonus(self, user_id: int, bonus_amount: int, streak: int, today_str: str, reason: str = "Ежедневный бонус") -> dict:
+        """
+        Атомарное начисление ежедневного бонуса:
+        - Обновляет баланс
+        - Обновляет daily_streak и last_daily
+        - Записывает транзакцию
+        Возвращает: {'new_balance': int, 'success': bool}
+        """
+        def _sync_claim():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # 1. Проверяем и обновляем баланс
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"User {user_id} not found")
+                
+                old_balance = row[0]
+                new_balance = old_balance + bonus_amount
+                
+                cursor.execute(
+                    "UPDATE users SET balance = ? WHERE user_id = ?",
+                    (new_balance, user_id)
+                )
+                
+                # 2. Обновляем стрик и дату (строка формата YYYY-MM-DD)
+                cursor.execute(
+                    "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
+                    (streak, today_str, user_id)
+                )
+                
+                # 3. Записываем транзакцию
+                cursor.execute("""
+                    INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, user_id, bonus_amount, reason, datetime.now().isoformat()))
+                
+                conn.commit()
+                return {'new_balance': new_balance, 'success': True}
+                
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        return await asyncio.to_thread(_sync_claim)
+
 
 # Глобальный экземпляр базы данных
 db = Database()
+
