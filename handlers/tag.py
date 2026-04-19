@@ -1,5 +1,5 @@
 """
-Модуль тэга участников (чат-менеджер)
+Модуль тэга участников (чат-менеджер) - ПОЛНОСТЬЮ ИСПРАВЛЕН
 - Общий сбор (/all) — упоминает всех участников
 - Тэг пользователя (/tag)
 - Тэг администраторов (/tagrole)
@@ -21,26 +21,19 @@ logger = logging.getLogger(__name__)
 
 # Настройки
 TAG_COOLDOWN = 300  # 5 минут между общими сборами
-MAX_MENTIONS_PER_MESSAGE = 30
-MAX_MESSAGE_LENGTH = 4000
 BATCH_SIZE = 10
 BATCH_DELAY = 1.0
 
-# Хранилище кулдаунов
 _cooldown_storage = {}
 
 
 def _escape_html(text: str | None) -> str:
-    """Безопасное экранирование для ParseMode.HTML"""
     if not text:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-# ==================== ПРОВЕРКА ПРАВ ====================
-
 async def is_admin_in_chat(bot, user_id: int, chat_id: int) -> bool:
-    """Проверяет, является ли пользователь администратором чата"""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
@@ -50,7 +43,6 @@ async def is_admin_in_chat(bot, user_id: int, chat_id: int) -> bool:
 
 
 async def is_bot_admin(bot, chat_id: int) -> bool:
-    """Проверяет, является ли бот администратором чата"""
     try:
         bot_me = await bot.get_me()
         member = await bot.get_chat_member(chat_id, bot_me.id)
@@ -60,11 +52,8 @@ async def is_bot_admin(bot, chat_id: int) -> bool:
         return False
 
 
-# ==================== КОМАНДА ОБЩЕГО СБОРА ====================
-
 @router.message(Command("all"))
 async def cmd_all(message: types.Message):
-    """Общий сбор — упоминает всех участников чата"""
     user_id = message.from_user.id
     chat_id = message.chat.id
     
@@ -77,7 +66,6 @@ async def cmd_all(message: types.Message):
         await message.answer("❌ Используйте /start для регистрации")
         return
     
-    # Проверка прав администратора
     if not await is_admin_in_chat(message.bot, user_id, chat_id):
         await message.answer(
             "❌ <b>Нет прав!</b>\n\n"
@@ -93,7 +81,6 @@ async def cmd_all(message: types.Message):
         )
         return
     
-    # Проверка кулдауна
     current_time = time.time()
     cooldown_key = f"all:{chat_id}"
     
@@ -111,7 +98,7 @@ async def cmd_all(message: types.Message):
             return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}_{user_id}"),
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}"),
          InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
     ])
     
@@ -130,7 +117,6 @@ async def cmd_all(message: types.Message):
 
 @router.callback_query(F.data.startswith("confirm_all_"))
 async def confirm_all(callback: types.CallbackQuery):
-    """Подтверждение массового упоминания"""
     try:
         parts = callback.data.split("_")
         if len(parts) < 3:
@@ -138,47 +124,36 @@ async def confirm_all(callback: types.CallbackQuery):
             return
         
         chat_id = int(parts[2])
-        initiator_id = int(parts[3]) if len(parts) > 3 else callback.from_user.id
         user_id = callback.from_user.id
         
-        # Проверка безопасности
         if callback.message.chat.id != chat_id:
             await callback.answer("❌ Несоответствие чата", show_alert=True)
             return
         
-        if user_id != initiator_id:
-            await callback.answer("❌ Только инициатор может подтвердить!", show_alert=True)
-            return
-        
+        # 🔥 ИСПРАВЛЕНО: Проверяем, что нажавший — администратор
         if not await is_admin_in_chat(callback.bot, user_id, chat_id):
-            await callback.answer("❌ Вы больше не администратор!", show_alert=True)
+            await callback.answer("❌ Только администраторы могут подтвердить!", show_alert=True)
             return
         
         await callback.answer("🔄 Собираю участников...")
         
-        # Обновляем кулдаун
         _cooldown_storage[f"all:{chat_id}"] = time.time()
         
-        # Сбор участников
         members = []
         seen_ids = set()
         
-        # Администраторы
         admins = await callback.bot.get_chat_administrators(chat_id)
         for admin in admins:
-            if not admin.user.is_bot and admin.user.id != user_id and admin.user.id not in seen_ids:
+            if not admin.user.is_bot and admin.user.id not in seen_ids:
                 members.append(admin.user)
                 seen_ids.add(admin.user.id)
         
-        # Обычные участники
         try:
             member_count = 0
             async for member in callback.bot.get_chat_members(chat_id):
-                if member_count >= 200:  # Ограничение для больших чатов
+                if member_count >= 200:
                     break
-                if (not member.user.is_bot and 
-                    member.user.id != user_id and 
-                    member.user.id not in seen_ids):
+                if not member.user.is_bot and member.user.id not in seen_ids:
                     members.append(member.user)
                     seen_ids.add(member.user.id)
                 member_count += 1
@@ -186,19 +161,14 @@ async def confirm_all(callback: types.CallbackQuery):
             logger.warning(f"Could not fetch all members: {e}")
         
         if not members:
-            await callback.message.edit_text(
-                "❌ Не удалось получить список участников.",
-                parse_mode=ParseMode.HTML
-            )
+            await callback.message.edit_text("❌ Не удалось получить список участников.", parse_mode=ParseMode.HTML)
             return
         
-        # Удаляем сообщение с кнопками
         try:
             await callback.message.delete()
         except:
             pass
         
-        # Формируем упоминания
         mentions = []
         for member in members:
             if member.username:
@@ -209,7 +179,6 @@ async def confirm_all(callback: types.CallbackQuery):
         
         safe_initiator = _escape_html(callback.from_user.full_name)
         
-        # Отправляем сообщения пачками
         batch_size = BATCH_SIZE
         total_batches = (len(mentions) + batch_size - 1) // batch_size
         
@@ -240,7 +209,6 @@ async def confirm_all(callback: types.CallbackQuery):
             if batch_idx < total_batches - 1:
                 await asyncio.sleep(BATCH_DELAY)
         
-        # Итоговое сообщение
         await callback.bot.send_message(
             chat_id,
             f"✅ <b>Общий сбор завершён!</b>\n\n"
@@ -257,16 +225,12 @@ async def confirm_all(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "cancel_all")
 async def cancel_all(callback: types.CallbackQuery):
-    """Отмена массового упоминания"""
     await callback.message.edit_text("❌ Общий сбор отменён.", parse_mode=ParseMode.HTML)
     await callback.answer()
 
 
-# ==================== КОМАНДА ТЭГА ПОЛЬЗОВАТЕЛЯ ====================
-
 @router.message(Command("tag"))
 async def cmd_tag(message: types.Message):
-    """Тэгнуть конкретного пользователя"""
     if message.chat.type not in ['group', 'supergroup']:
         await message.answer("❌ Команда работает только в группах!")
         return
@@ -300,11 +264,8 @@ async def cmd_tag(message: types.Message):
     await message.answer(result, parse_mode=ParseMode.HTML)
 
 
-# ==================== КОМАНДА ТЭГА АДМИНОВ ====================
-
 @router.message(Command("tagrole"))
 async def cmd_tag_role(message: types.Message):
-    """Тэгнуть всех администраторов"""
     if message.chat.type not in ['group', 'supergroup']:
         await message.answer("❌ Команда работает только в группах!")
         return
@@ -359,11 +320,8 @@ async def cmd_tag_role(message: types.Message):
     await message.answer(result, parse_mode=ParseMode.HTML)
 
 
-# ==================== МЕНЮ ТЭГОВ ====================
-
 @router.callback_query(F.data == "tag_menu")
 async def tag_menu(callback: types.CallbackQuery):
-    """Меню тэгов"""
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
@@ -408,11 +366,9 @@ async def tag_menu(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "start_all")
 async def start_all_callback(callback: types.CallbackQuery):
-    """Запуск общего сбора из меню"""
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
-    # Проверка прав
     if not await is_admin_in_chat(callback.bot, user_id, chat_id):
         await callback.answer("❌ Только администраторы!", show_alert=True)
         return
@@ -421,7 +377,6 @@ async def start_all_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Бот не администратор!", show_alert=True)
         return
     
-    # Проверка кулдауна
     current_time = time.time()
     cooldown_key = f"all:{chat_id}"
     
@@ -432,9 +387,8 @@ async def start_all_callback(callback: types.CallbackQuery):
             await callback.answer(f"⏰ Подождите {remaining} сек", show_alert=True)
             return
     
-    # Показываем подтверждение
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}_{user_id}"),
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}"),
          InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
     ])
     
@@ -454,7 +408,6 @@ async def start_all_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "tag_admins")
 async def tag_admins_callback(callback: types.CallbackQuery):
-    """Написать администраторам из меню"""
     chat_id = callback.message.chat.id
     
     admins = []
@@ -492,7 +445,6 @@ async def tag_admins_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "tag_help")
 async def tag_help_callback(callback: types.CallbackQuery):
-    """Помощь по тэгам"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="tag_menu")]
     ])
