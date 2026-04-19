@@ -1,6 +1,7 @@
 """
-Модуль навигации, старта, помощи, управления данными и доната
+Модуль навигации, старта, помощи, управления данными
 ПОЛНОСТЬЮ ОБНОВЛЁННЫЙ — только кнопки и умные команды
+ДОНАТ ПЕРЕАДРЕСОВАН В economy.py
 """
 
 import asyncio
@@ -13,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from database import db
-from config import START_BALANCE, DONATE_URL, DONATE_RECEIVER, DONATE_BANK, ADMIN_IDS
+from config import START_BALANCE, ADMIN_IDS
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
 from utils.keyboards import (
     main_menu, back_button, games_category_menu, profile_category_menu,
@@ -181,9 +182,9 @@ async def cmd_help(message: types.Message):
         "<b>💕 СОЦИАЛКА (через меню):</b>\n"
         "├ Отношения (пары)\n"
         "├ Группы\n"
-        "└ РП команды (/hug, /kiss, /pat)\n\n"
+        "└ РП команды\n\n"
         "<b>❤️ ПОДДЕРЖКА:</b>\n"
-        "└ <code>/donate</code> — поддержать разработчика\n\n"
+        "└ Кнопка «ПОДДЕРЖАТЬ» в главном меню\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "💡 <b>Совет:</b> Всё доступно через кнопки в главном меню!\n"
         "Нажмите /start чтобы открыть меню."
@@ -195,59 +196,6 @@ async def cmd_help(message: types.Message):
     
     msg = await message.answer(help_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     await delete_bot_message_after(message.bot, message.chat.id, msg.message_id, delay=60)
-
-
-# ==================== КОМАНДА /donate ====================
-
-@router.message(Command("donate"))
-async def cmd_donate(message: types.Message):
-    donate_text = f"""
-❤️ <b>ПОДДЕРЖКА ПРОЕКТА NEXUS</b> ❤️
-
-━━━━━━━━━━━━━━━━━━━━━
-
-<b>⚠️ ВАЖНО:</b>
-Все функции бота <b>АБСОЛЮТНО БЕСПЛАТНЫ</b>!
-Донат — это исключительно добровольная поддержка.
-
-━━━━━━━━━━━━━━━━━━━━━
-
-<b>🎁 В ЗНАК БЛАГОДАРНОСТИ:</b>
-
-├ 10 ₽ → 100 NCoin
-├ 50 ₽ → 600 NCoin
-├ 100 ₽ → 1500 NCoin
-├ 200 ₽ → 3500 NCoin
-└ 500 ₽ → 10000 NCoin
-
-━━━━━━━━━━━━━━━━━━━━━
-
-<b>💳 СПОСОБЫ ПОДДЕРЖКИ:</b>
-
-🏦 Банк: {DONATE_BANK}
-👤 Получатель: {DONATE_RECEIVER}
-
-📱 <b>СБП (быстро и без комиссии):</b>
-<code>{DONATE_URL}</code>
-
-━━━━━━━━━━━━━━━━━━━━━
-
-<b>📝 КАК ПОЛУЧИТЬ NCOINS:</b>
-1. Переведите сумму из списка
-2. Отправьте скриншот командой /donate_proof 100
-3. Администратор проверит и начислит
-
-━━━━━━━━━━━━━━━━━━━━━
-
-💝 <b>Спасибо за поддержку NEXUS!</b>
-"""
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 ПЕРЕЙТИ К ОПЛАТЕ", url=DONATE_URL)],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-    ])
-    
-    await message.answer(donate_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 # ==================== КОМАНДА /privacy ====================
@@ -554,9 +502,20 @@ async def help_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ==================== ДОНАТ — ПЕРЕАДРЕСАЦИЯ В ECONOMY ====================
+
+@router.message(Command("donate"))
+async def cmd_donate_proxy(message: types.Message):
+    """Прокси на новый донат из economy.py"""
+    from handlers.economy import cmd_donate as economy_donate
+    await economy_donate(message)
+
+
 @router.callback_query(F.data == "donate")
 async def donate_callback(callback: types.CallbackQuery):
-    await cmd_donate(callback.message)
+    """Кнопка ПОДДЕРЖАТЬ — переадресация в economy.py"""
+    from handlers.economy import cmd_donate as economy_donate
+    await economy_donate(callback.message)
     await callback.answer()
 
 
