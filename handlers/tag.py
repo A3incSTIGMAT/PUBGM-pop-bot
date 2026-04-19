@@ -21,10 +21,13 @@ logger = logging.getLogger(__name__)
 
 # Настройки
 TAG_COOLDOWN = 300  # 5 минут между общими сборами
-MAX_MENTIONS_PER_MESSAGE = 30  # Максимум упоминаний в одном сообщении
-MAX_MESSAGE_LENGTH = 4000  # Лимит Telegram
-BATCH_SIZE = 10  # Размер пачки для отправки с задержкой
-BATCH_DELAY = 1.0  # Задержка между пачками (секунды)
+MAX_MENTIONS_PER_MESSAGE = 30
+MAX_MESSAGE_LENGTH = 4000
+BATCH_SIZE = 10
+BATCH_DELAY = 1.0
+
+# Хранилище кулдаунов
+_cooldown_storage = {}
 
 
 def _escape_html(text: str | None) -> str:
@@ -78,37 +81,34 @@ async def cmd_all(message: types.Message):
     if not await is_admin_in_chat(message.bot, user_id, chat_id):
         await message.answer(
             "❌ <b>Нет прав!</b>\n\n"
-            "Только администраторы чата могут использовать /all.\n\n"
-            "Обратитесь к владельцу чата.",
+            "Только администраторы чата могут использовать /all.",
             parse_mode=ParseMode.HTML
         )
         return
     
     if not await is_bot_admin(message.bot, chat_id):
         await message.answer(
-            "❌ <b>Ошибка:</b> Бот не является администратором чата!\n\n"
-            "Чтобы использовать /all, добавьте бота в чат и выдайте ему права администратора.",
+            "❌ <b>Ошибка:</b> Бот не является администратором чата!",
             parse_mode=ParseMode.HTML
         )
         return
     
-    # Проверка кулдауна (антиспам)
+    # Проверка кулдауна
     current_time = time.time()
     cooldown_key = f"all:{chat_id}"
-    if not hasattr(cmd_all, 'memory_storage'):
-        cmd_all.memory_storage = {}
     
-    if cooldown_key in cmd_all.memory_storage and current_time - cmd_all.memory_storage[cooldown_key] < TAG_COOLDOWN:
-        remaining = int(TAG_COOLDOWN - (current_time - cmd_all.memory_storage[cooldown_key]))
-        minutes = remaining // 60
-        seconds = remaining % 60
-        await message.answer(
-            f"⏰ <b>Подождите!</b>\n\n"
-            f"Следующий общий сбор можно будет сделать через <b>{minutes} мин {seconds} сек</b>.\n\n"
-            f"Это сделано для комфорта всех участников.",
-            parse_mode=ParseMode.HTML
-        )
-        return
+    if cooldown_key in _cooldown_storage:
+        last_used = _cooldown_storage[cooldown_key]
+        if current_time - last_used < TAG_COOLDOWN:
+            remaining = int(TAG_COOLDOWN - (current_time - last_used))
+            minutes = remaining // 60
+            seconds = remaining % 60
+            await message.answer(
+                f"⏰ <b>Подождите!</b>\n\n"
+                f"Следующий сбор через <b>{minutes} мин {seconds} сек</b>.",
+                parse_mode=ParseMode.HTML
+            )
+            return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}_{user_id}"),
@@ -133,21 +133,23 @@ async def confirm_all(callback: types.CallbackQuery):
     """Подтверждение массового упоминания"""
     try:
         parts = callback.data.split("_")
-        if len(parts) != 3:
+        if len(parts) < 3:
             await callback.answer("❌ Неверный формат запроса", show_alert=True)
             return
         
-        chat_id = int(parts[1])
-        initiator_id = int(parts[2])
+        chat_id = int(parts[2])
+        initiator_id = int(parts[3]) if len(parts) > 3 else callback.from_user.id
         user_id = callback.from_user.id
         
         # Проверка безопасности
         if callback.message.chat.id != chat_id:
             await callback.answer("❌ Несоответствие чата", show_alert=True)
             return
+        
         if user_id != initiator_id:
             await callback.answer("❌ Только инициатор может подтвердить!", show_alert=True)
             return
+        
         if not await is_admin_in_chat(callback.bot, user_id, chat_id):
             await callback.answer("❌ Вы больше не администратор!", show_alert=True)
             return
@@ -155,9 +157,7 @@ async def confirm_all(callback: types.CallbackQuery):
         await callback.answer("🔄 Собираю участников...")
         
         # Обновляем кулдаун
-        if not hasattr(cmd_all, 'memory_storage'):
-            cmd_all.memory_storage = {}
-        cmd_all.memory_storage[f"all:{chat_id}"] = time.time()
+        _cooldown_storage[f"all:{chat_id}"] = time.time()
         
         # Сбор участников
         members = []
@@ -172,24 +172,31 @@ async def confirm_all(callback: types.CallbackQuery):
         
         # Обычные участники
         try:
+            member_count = 0
             async for member in callback.bot.get_chat_members(chat_id):
+                if member_count >= 200:  # Ограничение для больших чатов
+                    break
                 if (not member.user.is_bot and 
                     member.user.id != user_id and 
                     member.user.id not in seen_ids):
                     members.append(member.user)
                     seen_ids.add(member.user.id)
-                    if len(members) >= MAX_MENTIONS_PER_MESSAGE:
-                        break
+                member_count += 1
         except Exception as e:
             logger.warning(f"Could not fetch all members: {e}")
         
         if not members:
             await callback.message.edit_text(
-                "❌ Не удалось получить список участников.\n\n"
-                "Убедитесь, что бот является администратором чата.",
+                "❌ Не удалось получить список участников.",
                 parse_mode=ParseMode.HTML
             )
             return
+        
+        # Удаляем сообщение с кнопками
+        try:
+            await callback.message.delete()
+        except:
+            pass
         
         # Формируем упоминания
         mentions = []
@@ -202,7 +209,7 @@ async def confirm_all(callback: types.CallbackQuery):
         
         safe_initiator = _escape_html(callback.from_user.full_name)
         
-        # Отправляем сообщения пачками с задержкой (анти-флуд)
+        # Отправляем сообщения пачками
         batch_size = BATCH_SIZE
         total_batches = (len(mentions) + batch_size - 1) // batch_size
         
@@ -225,9 +232,11 @@ async def confirm_all(callback: types.CallbackQuery):
                     f"{batch_text}\n"
                 )
             
-            await callback.bot.send_message(chat_id, response, parse_mode=ParseMode.HTML)
+            try:
+                await callback.bot.send_message(chat_id, response, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"Failed to send batch {batch_idx}: {e}")
             
-            # Задержка между пачками (кроме последней)
             if batch_idx < total_batches - 1:
                 await asyncio.sleep(BATCH_DELAY)
         
@@ -239,16 +248,10 @@ async def confirm_all(callback: types.CallbackQuery):
             parse_mode=ParseMode.HTML
         )
         
-        # Удаляем сообщение с кнопками
-        try:
-            await callback.message.delete()
-        except:
-            pass
-        
         await callback.answer("✅ Общий сбор завершён!")
         
     except Exception as e:
-        logger.error(f"confirm_all error: {e}")
+        logger.error(f"confirm_all error: {e}", exc_info=True)
         await callback.answer("❌ Ошибка при выполнении", show_alert=True)
 
 
@@ -310,8 +313,7 @@ async def cmd_tag_role(message: types.Message):
     if len(args) < 2:
         await message.answer(
             "📢 <b>Как тэгать по роли:</b>\n\n"
-            "<code>/tagrole админы текст</code> — упомянуть всех админов\n"
-            "Пример: <code>/tagrole админы Внимание, проверьте чат!</code>",
+            "<code>/tagrole админы текст</code> — упомянуть всех админов",
             parse_mode=ParseMode.HTML
         )
         return
@@ -379,8 +381,7 @@ async def tag_menu(callback: types.CallbackQuery):
             "📌 <b>Доступные команды:</b>\n"
             "• <code>/all</code> — общий сбор (1 раз в 5 минут)\n"
             "• <code>/tag @user</code> — упомянуть пользователя\n"
-            "• <code>/tagrole админы</code> — написать админам\n\n"
-            "✨ <i>Важно:</i> Общий сбор отправляется пачками с задержкой, чтобы избежать флуда.",
+            "• <code>/tagrole админы</code> — написать админам",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
@@ -397,7 +398,7 @@ async def tag_menu(callback: types.CallbackQuery):
             "• <code>/tag @user</code> — упомянуть пользователя\n"
             "• <code>/tagrole админы</code> — написать админам\n\n"
             "⚠️ <b>Общий сбор (/all)</b>\n"
-            "Доступен только для администраторов чата.",
+            "Доступен только для администраторов.",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
@@ -408,19 +409,46 @@ async def tag_menu(callback: types.CallbackQuery):
 @router.callback_query(F.data == "start_all")
 async def start_all_callback(callback: types.CallbackQuery):
     """Запуск общего сбора из меню"""
-    # Создаём фейковое сообщение
-    class FakeMessage:
-        def __init__(self, from_user, chat, bot):
-            self.from_user = from_user
-            self.chat = chat
-            self.bot = bot
-            self.text = "/all"
-        
-        async def answer(self, text, parse_mode=None, reply_markup=None):
-            await callback.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
     
-    fake_msg = FakeMessage(callback.from_user, callback.message.chat, callback.bot)
-    await cmd_all(fake_msg)
+    # Проверка прав
+    if not await is_admin_in_chat(callback.bot, user_id, chat_id):
+        await callback.answer("❌ Только администраторы!", show_alert=True)
+        return
+    
+    if not await is_bot_admin(callback.bot, chat_id):
+        await callback.answer("❌ Бот не администратор!", show_alert=True)
+        return
+    
+    # Проверка кулдауна
+    current_time = time.time()
+    cooldown_key = f"all:{chat_id}"
+    
+    if cooldown_key in _cooldown_storage:
+        last_used = _cooldown_storage[cooldown_key]
+        if current_time - last_used < TAG_COOLDOWN:
+            remaining = int(TAG_COOLDOWN - (current_time - last_used))
+            await callback.answer(f"⏰ Подождите {remaining} сек", show_alert=True)
+            return
+    
+    # Показываем подтверждение
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}_{user_id}"),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
+    ])
+    
+    safe_name = _escape_html(callback.from_user.full_name)
+    await callback.message.edit_text(
+        "📢 <b>ОБЩИЙ СБОР</b> 📢\n\n"
+        "⚠️ <b>Внимание!</b>\n"
+        "После подтверждения будет отправлено сообщение с упоминанием всех участников.\n\n"
+        f"👤 Инициатор: {safe_name}\n"
+        f"🛡️ Права: Администратор\n\n"
+        "✅ <b>Подтвердите действие:</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
     await callback.answer()
 
 
@@ -437,13 +465,11 @@ async def tag_admins_callback(callback: types.CallbackQuery):
                 admins.append(admin.user)
     except Exception as e:
         logger.error(f"Failed to get admins: {e}")
-        await callback.message.edit_text(f"❌ Ошибка: {_escape_html(str(e))}", parse_mode=ParseMode.HTML)
-        await callback.answer()
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     if not admins:
-        await callback.message.edit_text("❌ Нет администраторов в этом чате", parse_mode=ParseMode.HTML)
-        await callback.answer()
+        await callback.answer("❌ Нет администраторов", show_alert=True)
         return
     
     mentions = []
@@ -477,26 +503,8 @@ async def tag_help_callback(callback: types.CallbackQuery):
         "• <code>/tag @user текст</code> — упомянуть пользователя\n"
         "• <code>/tagrole админы текст</code> — написать администраторам\n\n"
         "<b>👑 КОМАНДЫ ДЛЯ АДМИНОВ:</b>\n"
-        "• <code>/all</code> — общий сбор (1 раз в 5 минут)\n\n"
-        "<b>✨ КАК ЭТО РАБОТАЕТ:</b>\n"
-        "• Общий сбор отправляется пачками по 10 участников\n"
-        "• Пауза между пачками — 1 секунда (чтобы избежать флуда)\n"
-        "• Все участники получают уведомления\n\n"
-        "<b>⚠️ ПРАВИЛА:</b>\n"
-        "• Не злоупотребляйте общим сбором\n"
-        "• Используйте только для важных объявлений",
+        "• <code>/all</code> — общий сбор (1 раз в 5 минут)",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery):
-    from utils.keyboards import main_menu
-    await callback.message.edit_text(
-        "🏠 <b>ГЛАВНОЕ МЕНЮ</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu()
     )
     await callback.answer()
