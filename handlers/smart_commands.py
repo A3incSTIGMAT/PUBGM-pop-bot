@@ -1,14 +1,16 @@
 """
 Умный парсер команд NEXUS Bot
 Понимает: игры, экономику, тэги, РП команды, умные теги
+Обрабатывает ТОЛЬКО текст, НЕ начинающийся с /
 """
 
 import re
 import random
 import logging
-from aiogram import Router, types
+from aiogram import Router, types, F
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 
 from database import db
 from config import SLOT_COST, ROULETTE_MIN, DUEL_MIN
@@ -73,15 +75,11 @@ def extract_username(text: str) -> str:
     return match.group(1) if match else None
 
 
-# ==================== ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ ====================
+# ==================== ОБРАБОТЧИК ТОЛЬКО ДЛЯ ТЕКСТА БЕЗ / ====================
 
-@router.message()
+@router.message(F.text, lambda message: not message.text.startswith('/'))
 async def smart_parser(message: types.Message):
-    """Умный парсер — обрабатывает ВСЕ сообщения без /"""
-    
-    # Игнорируем команды с /
-    if message.text and message.text.startswith('/'):
-        return
+    """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
     
     # Игнорируем сообщения от ботов
     if message.from_user.is_bot:
