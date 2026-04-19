@@ -1,6 +1,7 @@
 """
 Модуль экономики NEXUS Bot
 Баланс, ежедневный бонус, переводы, ДОНАТ С АВТОРАСЧЁТОМ
+ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
 """
 
 import asyncio
@@ -23,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 # ==================== НАСТРОЙКИ ДОНАТА ====================
 
-# Фиксированные суммы с бонусом
 DONATE_RATES = {
     10: 100,
     50: 600,
@@ -36,13 +36,11 @@ DONATE_RATES = {
     10000: 300000,
 }
 
-# Автоматический расчёт: 1 рубль = 10 NCoin + бонус за крупные суммы
+
 def calculate_donate_coins(amount_rub: int) -> int:
     """Автоматический расчёт NCoin за любую сумму"""
-    # Базовая ставка: 1 руб = 10 NCoin
     base_coins = amount_rub * 10
     
-    # Бонусы за крупные суммы
     if amount_rub >= 10000:
         bonus = 30000
     elif amount_rub >= 5000:
@@ -65,13 +63,11 @@ def calculate_donate_coins(amount_rub: int) -> int:
     return base_coins + bonus
 
 
-# FSM для доната
 class DonateState(StatesGroup):
     waiting_for_amount = State()
     waiting_for_proof = State()
 
 
-# Импорт состояний анкеты
 try:
     from handlers.profile import profile_states
 except ImportError:
@@ -98,9 +94,12 @@ async def cmd_balance(message: types.Message):
         message.from_user.first_name
     )
     
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(message.from_user.id)
+    
     await message.answer(
         f"💰 <b>ВАШ БАЛАНС</b>\n\n"
-        f"└ <b>{user['balance']}</b> NCoin\n\n"
+        f"└ <b>{balance}</b> NCoin\n\n"
         f"📊 <b>Статистика:</b>\n"
         f"├ Побед: {user.get('wins', 0)}\n"
         f"└ Поражений: {user.get('losses', 0)}",
@@ -110,15 +109,16 @@ async def cmd_balance(message: types.Message):
 
 @router.callback_query(F.data == "balance")
 async def balance_callback(callback: types.CallbackQuery):
-    user = await get_or_create_user(
-        callback.from_user.id,
-        callback.from_user.username,
-        callback.from_user.first_name
-    )
+    user_id = callback.from_user.id
+    await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    user = await db.get_user(user_id)
     
     text = (
         f"💰 <b>ВАШ БАЛАНС</b>\n\n"
-        f"└ <b>{user['balance']}</b> NCoin\n\n"
+        f"└ <b>{balance}</b> NCoin\n\n"
         f"📊 <b>Статистика:</b>\n"
         f"├ Побед: {user.get('wins', 0)}\n"
         f"└ Поражений: {user.get('losses', 0)}\n\n"
@@ -246,27 +246,27 @@ async def cmd_transfer(message: types.Message):
         await message.answer("❌ Минимум 10 NCoin")
         return
     
-    sender = await get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
+    user_id = message.from_user.id
+    sender = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
-    if sender["balance"] < amount:
-        await message.answer(f"❌ Недостаточно средств! Баланс: {sender['balance']} NCoin")
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    
+    if balance < amount:
+        await message.answer(f"❌ Недостаточно средств! Баланс: {balance} NCoin")
         return
     
     try:
-        success = await db.transfer_coins(message.from_user.id, target_username, amount, "transfer")
+        success = await db.transfer_coins(user_id, target_username, amount, "transfer")
         
         if not success:
             await message.answer(f"❌ @{target_username} не найден!")
             return
         
-        updated = await db.get_user(message.from_user.id)
+        new_balance = await db.get_balance(user_id)
         await message.answer(
             f"✅ Перевод {amount} NCoin для @{target_username}\n"
-            f"💰 Новый баланс: {updated['balance']} NCoin",
+            f"💰 Новый баланс: {new_balance} NCoin",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -290,11 +290,11 @@ async def cmd_donate(message: types.Message):
         "• Бонусы за крупные суммы!\n\n"
         "<b>📊 ПРИМЕРЫ:</b>\n"
         "├ 10 ₽ → 100 NCoin\n"
-        "├ 50 ₽ → 600 NCoin (+100 бонус)\n"
-        "├ 100 ₽ → 1500 NCoin (+500 бонус)\n"
-        "├ 500 ₽ → 10000 NCoin (+5000 бонус)\n"
-        "├ 1000 ₽ → 22000 NCoin (+12000 бонус)\n"
-        "└ 5000 ₽ → 130000 NCoin (+80000 бонус)\n\n"
+        "├ 50 ₽ → 600 NCoin\n"
+        "├ 100 ₽ → 1500 NCoin\n"
+        "├ 500 ₽ → 10000 NCoin\n"
+        "├ 1000 ₽ → 22000 NCoin\n"
+        "└ 5000 ₽ → 130000 NCoin\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👇 <b>Выберите действие:</b>"
     )
@@ -448,7 +448,6 @@ async def process_donate_proof(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    # Отправляем админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             try:
@@ -645,11 +644,11 @@ async def reject_donate_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "finance_category")
 async def finance_category_callback(callback: types.CallbackQuery):
-    user = await get_or_create_user(
-        callback.from_user.id,
-        callback.from_user.username,
-        callback.from_user.first_name
-    )
+    user_id = callback.from_user.id
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
     
     today = datetime.now().strftime("%Y-%m-%d")
     can_claim = user.get("last_daily") != today
@@ -657,9 +656,9 @@ async def finance_category_callback(callback: types.CallbackQuery):
     
     text = (
         f"💰 <b>ФИНАНСЫ И ЭКОНОМИКА</b>\n\n"
-        f"💎 Баланс: <b>{user['balance']} NCoin</b>\n"
-        f"⭐ VIP: <b>{user.get('vip_level', 0)}</b>\n"
-        f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n"
+        f"💎 Баланс: <b>{balance} NCoin</b>\n"
+        f"⭐ VIP: <b>{user.get('vip_level', 0) or 0}</b>\n"
+        f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n"
         f"🎁 Бонус: {daily_status}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Доступные действия:</b>\n"
