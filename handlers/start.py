@@ -1,6 +1,6 @@
 """
 Модуль навигации, старта, помощи, управления данными
-ПОЛНОСТЬЮ ОБНОВЛЁННЫЙ — только кнопки и умные команды
+ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
 ДОНАТ ПЕРЕАДРЕСОВАН В economy.py
 """
 
@@ -130,12 +130,15 @@ async def cmd_start(message: types.Message):
         )
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=60)
     else:
+        # 🔥 СВЕЖИЙ БАЛАНС
+        balance = await db.get_balance(user_id)
+        
         msg = await message.answer(
             f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
             f"👋 С возвращением, <b>{_escape_html(first_name)}</b>!\n"
-            f"💰 Баланс: <b>{user['balance']}</b> NCoin\n"
+            f"💰 Баланс: <b>{balance}</b> NCoin\n"
             f"⭐ VIP: {'✅' if user.get('vip_level', 0) > 0 else '❌'}\n"
-            f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n\n"
+            f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n\n"
             "👇 Выберите действие:",
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu(is_admin=is_admin)
@@ -261,13 +264,17 @@ async def back_to_menu_callback(callback: types.CallbackQuery):
     if callback.message.chat.type in ['group', 'supergroup']:
         is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
     
-    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    user = await db.get_user(user_id)
     
     await callback.message.edit_text(
         f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
-        f"💰 Баланс: <b>{user['balance']}</b> NCoin\n"
+        f"💰 Баланс: <b>{balance}</b> NCoin\n"
         f"⭐ VIP: {'✅' if user.get('vip_level', 0) > 0 else '❌'}\n"
-        f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n\n"
+        f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n\n"
         f"👇 Выберите категорию:",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(is_admin=is_admin)
