@@ -1,461 +1,499 @@
 """
-Модуль системы рангов и глобального рейтинга
-Данные привязаны к пользователю (user_id), а не к чату
+Модуль профиля и анкеты пользователя
+ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
 """
 
 import logging
-from aiogram import Router, types, F
+import re
+import asyncio
+from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database import db
+from config import START_BALANCE
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
-# ==================== ТАБЛИЦА РАНГОВ (32 уровня) ====================
+# ==================== FSM ДЛЯ АНКЕТЫ ====================
 
-RANKS = [
-    # Обычные участники (0-5)
-    {"level": 0, "name": "🌱 Дерево", "xp": 0, "bonus": 0},
-    {"level": 1, "name": "🍃 Лист", "xp": 50, "bonus": 0},
-    {"level": 2, "name": "🌿 Куст", "xp": 150, "bonus": 0},
-    {"level": 3, "name": "🌲 Сосна", "xp": 300, "bonus": 0},
-    {"level": 4, "name": "🌳 Дуб", "xp": 500, "bonus": 0},
-    {"level": 5, "name": "🔥 Кедр", "xp": 800, "bonus": 0},
-    
-    # VIP подписчики (6-14)
-    {"level": 6, "name": "⭐ Бронза", "xp": 1200, "bonus": 5},
-    {"level": 7, "name": "⭐⭐ Серебро", "xp": 1700, "bonus": 10},
-    {"level": 8, "name": "⭐⭐⭐ Золото", "xp": 2300, "bonus": 15},
-    {"level": 9, "name": "💎 Платина", "xp": 3000, "bonus": 20},
-    {"level": 10, "name": "💎💎 Изумруд", "xp": 4000, "bonus": 25},
-    {"level": 11, "name": "💎💎💎 Сапфир", "xp": 5200, "bonus": 30},
-    {"level": 12, "name": "🔹 Рубин", "xp": 6600, "bonus": 35},
-    {"level": 13, "name": "🔹🔹 Алмаз", "xp": 8200, "bonus": 40},
-    {"level": 14, "name": "🔹🔹🔹 Аметист", "xp": 10000, "bonus": 45},
-    
-    # Премиум подписчики (15-20)
-    {"level": 15, "name": "🪙 Топаз", "xp": 12500, "bonus": 50},
-    {"level": 16, "name": "🪙🪙 Опал", "xp": 15500, "bonus": 60},
-    {"level": 17, "name": "🪙🪙🪙 Янтарь", "xp": 19000, "bonus": 70},
-    {"level": 18, "name": "✨ Жемчуг", "xp": 23000, "bonus": 80},
-    {"level": 19, "name": "✨✨ Коралл", "xp": 28000, "bonus": 90},
-    {"level": 20, "name": "✨✨✨ Малахит", "xp": 34000, "bonus": 100},
-    
-    # Легендарные подписчики (21-26)
-    {"level": 21, "name": "🌌 Нефрит", "xp": 41000, "bonus": 120},
-    {"level": 22, "name": "🌌🌌 Оникс", "xp": 49000, "bonus": 150},
-    {"level": 23, "name": "🌌🌌🌌 Лазурит", "xp": 58000, "bonus": 180},
-    {"level": 24, "name": "👑 Танзанит", "xp": 68000, "bonus": 220},
-    {"level": 25, "name": "👑👑 Циркон", "xp": 79000, "bonus": 260},
-    {"level": 26, "name": "👑👑👑 Гранат", "xp": 91000, "bonus": 300},
-    
-    # Топ донатеры (27-32)
-    {"level": 27, "name": "🏅 Бриллиант", "xp": 105000, "bonus": 350},
-    {"level": 28, "name": "🏅🏅 Корунд", "xp": 120000, "bonus": 400},
-    {"level": 29, "name": "🏅🏅🏅 Шпинель", "xp": 136000, "bonus": 450},
-    {"level": 30, "name": "🔮 Александрит", "xp": 153000, "bonus": 500},
-    {"level": 31, "name": "🔮🔮 Хризолит", "xp": 171000, "bonus": 550},
-    {"level": 32, "name": "🔮🔮🔮 Цоизит", "xp": 190000, "bonus": 600},
-    
-    # Глобальные лидеры (33-38)
-    {"level": 33, "name": "🌍 Танзанит", "xp": 210000, "bonus": 700},
-    {"level": 34, "name": "🌍🌍 Рубин", "xp": 231000, "bonus": 800},
-    {"level": 35, "name": "🌍🌍🌍 Изумруд", "xp": 253000, "bonus": 900},
-    {"level": 36, "name": "🌎 Сапфир", "xp": 276000, "bonus": 1000},
-    {"level": 37, "name": "🌎🌎 Алмаз", "xp": 300000, "bonus": 1200},
-    {"level": 38, "name": "🌎🌎🌎 Александрит", "xp": 325000, "bonus": 1500},
-    
-    # Легенды (39)
-    {"level": 39, "name": "⭐ Чёрный Бриллиант", "xp": 351000, "bonus": 2000},
+class ProfileStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_age = State()
+    waiting_for_city = State()
+    waiting_for_timezone = State()
+    waiting_for_about = State()
+
+
+profile_states = {}
+
+
+# ==================== ФИЛЬТРЫ И ВАЛИДАЦИЯ ====================
+
+FORBIDDEN_WORDS = [
+    'хуй', 'пизда', 'ебать', 'блять', 'сука', 'нахер', 'похуй',
+    'залупа', 'жопа', 'говно', 'пидор', 'пидорас', 'гандон',
+    'fuck', 'shit', 'ass', 'bitch', 'dick', 'cunt', 'whore',
+    'ебан', 'ёбан', 'сосать', 'трахать', 'конча', 'сперм',
 ]
 
-
-# ==================== ИНИЦИАЛИЗАЦИЯ ====================
-
-async def init_ranks():
-    """Инициализация таблиц рангов"""
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    
-    # Таблица рангов пользователей
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_ranks (
-            user_id INTEGER PRIMARY KEY,
-            rank_level INTEGER DEFAULT 0,
-            rank_name TEXT DEFAULT '🌱 Дерево',
-            rank_xp INTEGER DEFAULT 0,
-            rank_bonus INTEGER DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Таблица донатеров
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS donors (
-            user_id INTEGER PRIMARY KEY,
-            total_donated INTEGER DEFAULT 0,
-            last_donate TIMESTAMP,
-            donor_rank TEXT DEFAULT '💎 Поддерживающий'
-        )
-    """)
-    
-    # Таблица глобального рейтинга
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS global_rating (
-            user_id INTEGER PRIMARY KEY,
-            total_xp INTEGER DEFAULT 0,
-            rating_position INTEGER DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ Таблицы рангов инициализированы")
+MIN_NAME_LENGTH = 2
+MAX_NAME_LENGTH = 30
+MIN_CITY_LENGTH = 2
+MAX_CITY_LENGTH = 30
+MIN_AGE = 12
+MAX_AGE = 100
+MAX_ABOUT_LENGTH = 200
 
 
-# ==================== РАБОТА С РАНГАМИ ====================
-
-async def get_user_rank(user_id: int) -> dict:
-    """Получить ранг пользователя"""
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM user_ranks WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
+def contains_forbidden_words(text: str) -> bool:
+    if not text:
+        return False
     
-    if row:
-        return {
-            "user_id": row[0],
-            "rank_level": row[1],
-            "rank_name": row[2],
-            "rank_xp": row[3],
-            "rank_bonus": row[4],
-            "updated_at": row[5]
-        }
+    text_lower = text.lower()
+    cleaned_text = re.sub(r'[^а-яa-z]', '', text_lower)
     
-    # Создаём запись по умолчанию
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_ranks (user_id, rank_level, rank_name, rank_xp, rank_bonus)
-        VALUES (?, 0, '🌱 Дерево', 0, 0)
-    """, (user_id,))
-    conn.commit()
-    conn.close()
-    
-    return {
-        "user_id": user_id,
-        "rank_level": 0,
-        "rank_name": "🌱 Дерево",
-        "rank_xp": 0,
-        "rank_bonus": 0,
-        "updated_at": None
-    }
+    for word in FORBIDDEN_WORDS:
+        if word in cleaned_text or word in text_lower:
+            return True
+    return False
 
 
-async def update_user_xp(user_id: int, xp_gain: int, source: str) -> bool:
-    """
-    Обновить XP пользователя
-    Возвращает True, если уровень повысился
-    """
-    rank_data = await get_user_rank(user_id)
-    old_level = rank_data["rank_level"]
-    new_xp = rank_data["rank_xp"] + xp_gain
+def validate_name(name: str) -> tuple[bool, str]:
+    if not name or len(name.strip()) < MIN_NAME_LENGTH:
+        return False, f"❌ Имя должно быть не короче {MIN_NAME_LENGTH} символов"
     
-    # Определяем новый уровень
-    new_level = old_level
-    new_name = rank_data["rank_name"]
-    new_bonus = rank_data["rank_bonus"]
+    if len(name) > MAX_NAME_LENGTH:
+        return False, f"❌ Имя должно быть не длиннее {MAX_NAME_LENGTH} символов"
     
-    for i, rank in enumerate(RANKS):
-        if new_xp >= rank["xp"] and i > new_level:
-            new_level = i
-            new_name = rank["name"]
-            new_bonus = rank["bonus"]
+    if not re.match(r'^[а-яА-Яa-zA-Z\s\-]+$', name):
+        return False, "❌ Имя может содержать только буквы, пробелы и дефис"
     
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE user_ranks 
-        SET rank_xp = ?, rank_level = ?, rank_name = ?, rank_bonus = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-    """, (new_xp, new_level, new_name, new_bonus, user_id))
-    conn.commit()
-    conn.close()
+    if contains_forbidden_words(name):
+        return False, "❌ Имя содержит недопустимые слова"
     
-    # Обновляем глобальный рейтинг
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO global_rating (user_id, total_xp, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-    """, (user_id, new_xp))
-    conn.commit()
-    conn.close()
-    
-    return new_level > old_level
+    return True, ""
 
 
-async def get_next_rank_info(current_xp: int, current_level: int) -> dict:
-    """Получить информацию о следующем ранге"""
-    if current_level >= len(RANKS) - 1:
-        return None
+def validate_age(age_str: str) -> tuple[bool, int | str]:
+    try:
+        age = int(age_str.strip())
+    except ValueError:
+        return False, "❌ Возраст должен быть числом"
     
-    next_rank = RANKS[current_level + 1]
-    xp_needed = next_rank["xp"] - current_xp
+    if age < MIN_AGE:
+        return False, f"❌ Минимальный возраст: {MIN_AGE} лет"
     
-    return {
-        "level": next_rank["level"],
-        "name": next_rank["name"],
-        "xp_needed": xp_needed,
-        "bonus": next_rank["bonus"]
-    }
-
-
-async def add_donate(user_id: int, amount: int):
-    """Добавить донат (для глобального рейтинга донатеров)"""
-    conn = db._get_connection()
-    cursor = conn.cursor()
+    if age > MAX_AGE:
+        return False, f"❌ Максимальный возраст: {MAX_AGE} лет"
     
-    cursor.execute("""
-        INSERT INTO donors (user_id, total_donated, last_donate)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(user_id) DO UPDATE SET
-            total_donated = total_donated + excluded.total_donated,
-            last_donate = excluded.last_donate
-    """, (user_id, amount))
+    return True, age
+
+
+def validate_city(city: str) -> tuple[bool, str]:
+    if not city or len(city.strip()) < MIN_CITY_LENGTH:
+        return False, f"❌ Название города должно быть не короче {MIN_CITY_LENGTH} символов"
     
-    # Определяем ранг донатера
-    cursor.execute("SELECT total_donated FROM donors WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    total = row[0] if row else amount
+    if len(city) > MAX_CITY_LENGTH:
+        return False, f"❌ Название города должно быть не длиннее {MAX_CITY_LENGTH} символов"
     
-    if total >= 100000:
-        donor_rank = "👑 Легендарный меценат"
-    elif total >= 50000:
-        donor_rank = "💎 Платиновый меценат"
-    elif total >= 25000:
-        donor_rank = "🥇 Золотой меценат"
-    elif total >= 10000:
-        donor_rank = "🥈 Серебряный меценат"
-    elif total >= 5000:
-        donor_rank = "🥉 Бронзовый меценат"
-    elif total >= 1000:
-        donor_rank = "💎 Поддерживающий"
-    else:
-        donor_rank = "💝 Добрый человек"
+    if not re.match(r'^[а-яА-Яa-zA-Z\s\-\.]+$', city):
+        return False, "❌ Город может содержать только буквы, пробелы, точку и дефис"
     
-    cursor.execute("UPDATE donors SET donor_rank = ? WHERE user_id = ?", (donor_rank, user_id))
-    conn.commit()
-    conn.close()
-
-
-async def get_top_donors(limit: int = 10) -> list:
-    """Получить топ донатеров"""
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT d.user_id, u.username, u.first_name, d.total_donated, d.donor_rank
-        FROM donors d
-        JOIN users u ON u.user_id = d.user_id
-        ORDER BY d.total_donated DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cursor.fetchall()
-    conn.close()
+    if contains_forbidden_words(city):
+        return False, "❌ Название города содержит недопустимые слова"
     
-    return [
-        {
-            "user_id": row[0],
-            "username": row[1],
-            "name": row[2],
-            "total": row[3],
-            "rank": row[4]
-        }
-        for row in rows
-    ]
+    return True, ""
 
 
-async def get_top_ranked(limit: int = 10) -> list:
-    """Получить топ по рангу"""
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT r.user_id, u.username, u.first_name, r.rank_level, r.rank_name, r.rank_xp
-        FROM user_ranks r
-        JOIN users u ON u.user_id = r.user_id
-        ORDER BY r.rank_xp DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cursor.fetchall()
-    conn.close()
+def validate_timezone(tz: str) -> tuple[bool, str]:
+    if not tz:
+        return False, "❌ Укажите часовой пояс"
     
-    return [
-        {
-            "user_id": row[0],
-            "username": row[1],
-            "name": row[2],
-            "level": row[3],
-            "rank": row[4],
-            "xp": row[5]
-        }
-        for row in rows
-    ]
+    if not re.match(r'^(UTC|GMT)[+-]\d{1,2}(:\d{2})?$', tz.upper()):
+        return False, "❌ Формат: UTC+3, GMT-5, UTC+5:30"
+    
+    return True, tz.upper()
 
 
-# ==================== КОМАНДЫ ====================
+def validate_about(about: str) -> tuple[bool, str]:
+    if not about or len(about.strip()) < 5:
+        return False, "❌ Расскажите о себе подробнее (минимум 5 символов)"
+    
+    if len(about) > MAX_ABOUT_LENGTH:
+        return False, f"❌ Текст не должен превышать {MAX_ABOUT_LENGTH} символов"
+    
+    if contains_forbidden_words(about):
+        return False, "❌ Текст содержит недопустимые слова"
+    
+    return True, ""
 
-@router.message(Command("rank"))
-async def cmd_rank(message: types.Message):
-    """Показать текущий ранг пользователя"""
-    user_id = message.from_user.id
-    rank_data = await get_user_rank(user_id)
+
+def sanitize_text(text: str) -> str:
+    if not text:
+        return ""
+    
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
     user = await db.get_user(user_id)
-    
     if not user:
-        await message.answer("❌ Используйте /start для регистрации")
-        return
+        await db.create_user(user_id, username, first_name, START_BALANCE)
+        user = await db.get_user(user_id)
+    return user
+
+
+def _escape_html(text: str | None) -> str:
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ==================== ПРОСМОТР ПРОФИЛЯ ====================
+
+@router.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    user_id = message.from_user.id
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    profile = await db.get_profile(user_id)
     
-    next_rank = await get_next_rank_info(rank_data["rank_xp"], rank_data["rank_level"])
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
     
-    # Прогресс-бар
-    if next_rank:
-        current_rank_xp = RANKS[rank_data["rank_level"]]["xp"]
-        xp_in_current = rank_data["rank_xp"] - current_rank_xp
-        xp_to_next = next_rank["xp_needed"]
+    if not profile:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ АНКЕТУ", callback_data="fill_profile")],
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+        ])
         
-        # Прогресс в процентах
-        progress = int((xp_in_current / (current_rank_xp + xp_to_next)) * 20) if xp_to_next > 0 else 0
-        progress_bar = "█" * progress + "░" * (20 - progress)
-        
-        text = f"""
-🏆 *ВАШ РАНГ В NEXUS*
-
-━━━━━━━━━━━━━━━━━━━━━
-
-{rank_data['rank_name']}
-
-📊 Уровень: {rank_data['rank_level']}
-⭐ Бонус к выигрышам: +{rank_data['rank_bonus']}%
-📈 Опыт: {rank_data['rank_xp']} XP
-
-📊 *ПРОГРЕСС ДО {next_rank['name']}:*
-{progress_bar}
-{current_rank_xp} XP ━━━ {rank_data['rank_xp']} XP ━━━ {current_rank_xp + xp_to_next} XP
-
-Осталось: {next_rank['xp_needed']} XP
-
-━━━━━━━━━━━━━━━━━━━━━
-
-💰 *КАК ПОЛУЧИТЬ XP?*
-
-├ /daily — +100 XP
-├ Выигрыши в играх — +50 XP
-├ Приглашение друга — +200 XP
-├ Донаты — +10 XP за 1 рубль
-
-━━━━━━━━━━━━━━━━━━━━━
-
-📊 *Глобальный рейтинг:* /top_ranked
-🏅 *Топ донатеров:* /top_donors
-"""
-    else:
-        text = f"""
-🏆 *ВАШ РАНГ В NEXUS*
-
-━━━━━━━━━━━━━━━━━━━━━
-
-{rank_data['rank_name']}
-
-📊 Уровень: {rank_data['rank_level']}
-⭐ Бонус к выигрышам: +{rank_data['rank_bonus']}%
-📈 Опыт: {rank_data['rank_xp']} XP
-
-━━━━━━━━━━━━━━━━━━━━━
-
-🎉 *ПОЗДРАВЛЯЕМ!*
-Вы достигли МАКСИМАЛЬНОГО РАНГА!
-
-━━━━━━━━━━━━━━━━━━━━━
-
-📊 *Глобальный рейтинг:* /top_ranked
-🏅 *Топ донатеров:* /top_donors
-"""
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 ТОП РЕЙТИНГА", callback_data="top_ranked_menu"),
-         InlineKeyboardButton(text="🏅 ТОП ДОНАТЕРОВ", callback_data="top_donors_menu")],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-    ])
-    
-    await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-
-
-@router.message(Command("top_ranked"))
-async def cmd_top_ranked(message: types.Message):
-    """Топ пользователей по рангу"""
-    top = await get_top_ranked(10)
-    
-    if not top:
-        await message.answer("🏆 Пока нет участников в рейтинге!\n\nБудьте первыми!")
+        await message.answer(
+            "👤 <b>ПРОФИЛЬ</b>\n\n"
+            "У вас пока нет анкеты.\n"
+            "Хотите заполнить?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
         return
     
-    text = "🏆 *ТОП ПОЛЬЗОВАТЕЛЕЙ ПО РАНГУ*\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    for i, user in enumerate(top):
-        medal = medals[i] if i < len(medals) else f"{i+1}️⃣"
-        name = f"@{user['username']}" if user['username'] else user['name']
-        text += f"{medal} {name} — {user['rank']} (уровень {user['level']})\n"
-        text += f"   └ {user['xp']} XP\n\n"
+    text = (
+        f"👤 <b>АНКЕТА ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+        f"📛 Имя: <b>{_escape_html(profile.get('full_name', 'Не указано'))}</b>\n"
+        f"🎂 Возраст: <b>{profile.get('age', 'Не указано')}</b>\n"
+        f"🏙️ Город: <b>{_escape_html(profile.get('city', 'Не указано'))}</b>\n"
+        f"🌍 Часовой пояс: <b>{_escape_html(profile.get('timezone', 'Не указано'))}</b>\n"
+        f"📝 О себе: {_escape_html(profile.get('about', 'Не указано'))}\n\n"
+        f"💰 Баланс: <b>{balance}</b> NCoin\n"
+        f"🏆 Побед: {user.get('wins', 0)} | Поражений: {user.get('losses', 0)}"
+    )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ ИЗМЕНИТЬ АНКЕТУ", callback_data="fill_profile")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
     
-    await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-@router.message(Command("top_donors"))
-async def cmd_top_donors(message: types.Message):
-    """Топ донатеров"""
-    top = await get_top_donors(10)
-    
-    if not top:
-        await message.answer("🏅 Пока нет донатеров в рейтинге!\n\nСтань первым — /donate")
-        return
-    
-    text = "🏅 *ТОП ДОНАТЕРОВ NEXUS*\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    for i, donor in enumerate(top):
-        medal = medals[i] if i < len(medals) else f"{i+1}️⃣"
-        name = f"@{donor['username']}" if donor['username'] else donor['name']
-        text += f"{medal} {name} — {donor['rank']}\n"
-        text += f"   └ {donor['total']} ₽\n\n"
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-    ])
-    
-    await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-
-
-# ==================== ОБРАБОТЧИКИ КНОПОК ====================
-
-@router.callback_query(lambda c: c.data == "top_ranked_menu")
-async def top_ranked_menu_callback(callback: types.CallbackQuery):
-    await cmd_top_ranked(callback.message)
+@router.callback_query(F.data == "profile")
+async def profile_callback(callback: types.CallbackQuery):
+    await cmd_profile(callback.message)
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "top_donors_menu")
-async def top_donors_menu_callback(callback: types.CallbackQuery):
-    await cmd_top_donors(callback.message)
+# ==================== ЗАПОЛНЕНИЕ АНКЕТЫ ====================
+
+@router.callback_query(F.data == "fill_profile")
+async def start_fill_profile(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    profile_states[user_id] = True
+    
+    await state.set_state(ProfileStates.waiting_for_name)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 1 из 5\n\n"
+        f"<b>Как вас зовут?</b>\n"
+        f"├ Мин. длина: {MIN_NAME_LENGTH} символов\n"
+        f"├ Макс. длина: {MAX_NAME_LENGTH} символов\n"
+        f"└ Только буквы\n\n"
+        "Введите ваше имя:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    name = sanitize_text(message.text)
+    is_valid, error_msg = validate_name(name)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(full_name=name)
+    await state.set_state(ProfileStates.waiting_for_age)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 2 из 5\n\n"
+        f"<b>Сколько вам лет?</b>\n"
+        f"├ От {MIN_AGE} до {MAX_AGE} лет\n"
+        f"└ Только число\n\n"
+        "Введите ваш возраст:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_age)
+async def process_age(message: types.Message, state: FSMContext):
+    is_valid, result = validate_age(message.text)
+    
+    if not is_valid:
+        await message.answer(result + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(age=result)
+    await state.set_state(ProfileStates.waiting_for_city)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 3 из 5\n\n"
+        f"<b>Из какого вы города?</b>\n"
+        f"├ Мин. длина: {MIN_CITY_LENGTH} символов\n"
+        f"└ Только буквы\n\n"
+        "Введите ваш город:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_city)
+async def process_city(message: types.Message, state: FSMContext):
+    city = sanitize_text(message.text)
+    is_valid, error_msg = validate_city(city)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(city=city)
+    await state.set_state(ProfileStates.waiting_for_timezone)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 4 из 5\n\n"
+        "<b>Ваш часовой пояс?</b>\n\n"
+        "Примеры:\n"
+        "• <code>UTC+3</code> (Москва)\n"
+        "• <code>UTC+5</code> (Екатеринбург)\n"
+        "• <code>UTC+7</code> (Новосибирск)\n"
+        "• <code>GMT-5</code> (Нью-Йорк)\n\n"
+        "Введите часовой пояс:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_timezone)
+async def process_timezone(message: types.Message, state: FSMContext):
+    tz = message.text.strip()
+    is_valid, result = validate_timezone(tz)
+    
+    if not is_valid:
+        await message.answer(result + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(timezone=result)
+    await state.set_state(ProfileStates.waiting_for_about)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭️ ПРОПУСТИТЬ", callback_data="skip_about")],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 5 из 5\n\n"
+        f"<b>Расскажите немного о себе:</b>\n"
+        f"├ Мин. длина: 5 символов\n"
+        f"├ Макс. длина: {MAX_ABOUT_LENGTH} символов\n"
+        f"└ Без нецензурных слов\n\n"
+        "Пример: Люблю игры и программирование",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_about)
+async def process_about(message: types.Message, state: FSMContext):
+    about = sanitize_text(message.text)
+    is_valid, error_msg = validate_about(about)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз или нажмите 'ПРОПУСТИТЬ':")
+        return
+    
+    await save_profile(message, state, about)
+
+
+@router.callback_query(F.data == "skip_about")
+async def skip_about(callback: types.CallbackQuery, state: FSMContext):
+    await save_profile(callback.message, state, "")
+    await callback.answer()
+
+
+async def save_profile(event: types.Message | types.CallbackQuery, state: FSMContext, about: str):
+    if isinstance(event, types.CallbackQuery):
+        message = event.message
+        user_id = event.from_user.id
+    else:
+        message = event
+        user_id = event.from_user.id
+    
+    data = await state.get_data()
+    
+    full_name = data.get('full_name', '')
+    age = data.get('age', 0)
+    city = data.get('city', '')
+    timezone = data.get('timezone', 'UTC+3')
+    about_text = about if about else data.get('about', '')
+    
+    full_name = sanitize_text(full_name)
+    city = sanitize_text(city)
+    about_text = sanitize_text(about_text)
+    
+    await db.save_profile(user_id, full_name, age, city, timezone, about_text)
+    
+    profile_states.pop(user_id, None)
+    await state.clear()
+    
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    
+    text = (
+        f"✅ <b>АНКЕТА СОХРАНЕНА!</b>\n\n"
+        f"📛 Имя: <b>{_escape_html(full_name)}</b>\n"
+        f"🎂 Возраст: <b>{age}</b>\n"
+        f"🏙️ Город: <b>{_escape_html(city)}</b>\n"
+        f"🌍 Часовой пояс: <b>{_escape_html(timezone)}</b>\n"
+        f"📝 О себе: {_escape_html(about_text) if about_text else '<i>не указано</i>'}\n\n"
+        f"💰 Баланс: <b>{balance}</b> NCoin\n\n"
+        f"Используйте /profile для просмотра анкеты"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ В ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+    ])
+    
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "cancel_profile")
+async def cancel_profile(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    profile_states.pop(user_id, None)
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ Заполнение анкеты отменено.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+        ])
+    )
+    await callback.answer()
+
+
+@router.message(Command("cancel_profile"))
+async def cmd_cancel_profile(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    profile_states.pop(user_id, None)
+    await state.clear()
+    await message.answer("❌ Заполнение анкеты отменено.")
+
+
+# ==================== СТАТИСТИКА ====================
+
+@router.callback_query(F.data == "my_stats")
+async def my_stats_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    
+    conn = await db._get_connection_async()
+    cursor = await conn.execute(
+        """SELECT slots_played, roulette_played, rps_played, duel_played 
+           FROM user_game_stats WHERE user_id = ?""",
+        (user_id,)
+    )
+    row = await cursor.fetchone()
+    await conn.close()
+    
+    slots = row[0] if row else 0
+    roulette = row[1] if row else 0
+    rps = row[2] if row else 0
+    duel = row[3] if row else 0
+    
+    first_name = user.get('first_name', 'Не указано')
+    wins = user.get('wins', 0)
+    losses = user.get('losses', 0)
+    
+    text = f"""
+📊 <b>ВАША СТАТИСТИКА</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+👤 Имя: {_escape_html(first_name)}
+💰 Баланс: <b>{balance}</b> NCoin
+🏆 Побед: {wins} | Поражений: {losses}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>ИГРЫ:</b>
+🎰 Слот: {slots} игр
+🎡 Рулетка: {roulette} игр
+✂️ КНБ: {rps} игр
+⚔️ Дуэль: {duel} игр
+
+━━━━━━━━━━━━━━━━━━━━━
+
+💡 <i>Играйте больше, чтобы повысить ранг!</i>
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     await callback.answer()
