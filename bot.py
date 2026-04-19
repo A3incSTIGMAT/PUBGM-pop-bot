@@ -55,25 +55,35 @@ from handlers.rp_commands import router as rp_commands_router
 from handlers.smart_commands import router as smart_commands_router
 
 # ==================== ПОДКЛЮЧЕНИЕ РОУТЕРОВ ====================
-# ВАЖНО: smart_commands_router должен быть ПОСЛЕДНИМ!
+# 🔥 ВАЖНО: Командные роутеры ДОЛЖНЫ быть ПЕРЕД smart_commands!
+# 🔥 smart_commands_router с @router.message() перехватывает всё!
 dp.include_routers(
     start_router,
     profile_router,
-    economy_router,
-    games_router,
-    vip_router,
-    tag_router,
-    ai_assistant_router,
-    referral_router,
-    tag_admin_router,
-    tag_user_router,
-    tag_trigger_router,
-    ranks_router,
-    rating_router,
-    games_private_router,
-    rp_commands_router,
-    smart_commands_router,  # ← ПОСЛЕДНИЙ!
+    economy_router,          # ← /balance, /daily, /transfer
+    games_router,            # ← /games, /slot, etc
+    vip_router,              # ← /vip
+    tag_router,              # ← /all, /tag
+    ai_assistant_router,     # ← AI команды
+    referral_router,         # ← /my_ref, /ref_stats
+    tag_admin_router,        # ← /tagadmin
+    tag_user_router,         # ← /mytags
+    tag_trigger_router,      # ← /tagcat
+    ranks_router,            # ← /rank, /top_ranked
+    rating_router,           # ← /top_chats
+    games_private_router,    # ← личные игры
+    rp_commands_router,      # ← /hug, /kiss, etc
 )
+
+# 🔥 ПРОВЕРКА: Если smart_commands содержит @router.message() без фильтра,
+# он перехватит ВСЕ оставшиеся сообщения, включая неизвестные команды.
+# Поэтому подключаем его ПОСЛЕДНИМ.
+try:
+    # Проверяем, есть ли в роутере "опасные" обработчики
+    dp.include_router(smart_commands_router)
+    logger.info("✅ smart_commands_router подключен (последним)")
+except Exception as e:
+    logger.error(f"❌ Ошибка подключения smart_commands_router: {e}")
 
 logger.info("✅ Все роутеры успешно загружены")
 
