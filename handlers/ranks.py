@@ -497,3 +497,18 @@ async def my_stats_callback(callback: types.CallbackQuery):
     
     await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     await callback.answer()
+# ==================== АЛИАСЫ ДЛЯ СОВМЕСТИМОСТИ ====================
+
+async def update_user_xp(user_id: int, source: str, amount: int = None):
+    """Алиас для add_xp (обратная совместимость)"""
+    return await add_xp(user_id, source, amount)
+
+
+async def get_rank(user_id: int):
+    """Алиас для get_user_rank"""
+    return await get_user_rank(user_id)
+
+
+async def calculate_rank(xp: int):
+    """Алиас для calculate_rank_level"""
+    return await calculate_rank_level(xp)
