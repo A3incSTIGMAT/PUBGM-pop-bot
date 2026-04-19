@@ -1,3 +1,8 @@
+"""
+Модуль экономики NEXUS Bot
+Баланс, ежедневный бонус, переводы, ДОНАТ С АВТОРАСЧЁТОМ
+"""
+
 import asyncio
 import logging
 from aiogram import Router, F, types
@@ -5,23 +10,68 @@ from aiogram.filters import Command
 from datetime import datetime, timedelta
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database import db
-from config import START_BALANCE, ADMIN_IDS
+from config import START_BALANCE, ADMIN_IDS, DONATE_URL, DONATE_BANK, DONATE_RECEIVER
 from utils.keyboards import back_button, finance_category_menu
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Настройки доната
+
+# ==================== НАСТРОЙКИ ДОНАТА ====================
+
+# Фиксированные суммы с бонусом
 DONATE_RATES = {
     10: 100,
     50: 600,
     100: 1500,
     200: 3500,
     500: 10000,
+    1000: 22000,
+    2000: 48000,
+    5000: 130000,
+    10000: 300000,
 }
 
+# Автоматический расчёт: 1 рубль = 10 NCoin + бонус за крупные суммы
+def calculate_donate_coins(amount_rub: int) -> int:
+    """Автоматический расчёт NCoin за любую сумму"""
+    # Базовая ставка: 1 руб = 10 NCoin
+    base_coins = amount_rub * 10
+    
+    # Бонусы за крупные суммы
+    if amount_rub >= 10000:
+        bonus = 30000
+    elif amount_rub >= 5000:
+        bonus = 15000
+    elif amount_rub >= 2000:
+        bonus = 5000
+    elif amount_rub >= 1000:
+        bonus = 2000
+    elif amount_rub >= 500:
+        bonus = 800
+    elif amount_rub >= 200:
+        bonus = 300
+    elif amount_rub >= 100:
+        bonus = 100
+    elif amount_rub >= 50:
+        bonus = 30
+    else:
+        bonus = 0
+    
+    return base_coins + bonus
+
+
+# FSM для доната
+class DonateState(StatesGroup):
+    waiting_for_amount = State()
+    waiting_for_proof = State()
+
+
+# Импорт состояний анкеты
 try:
     from handlers.profile import profile_states
 except ImportError:
@@ -38,7 +88,7 @@ async def get_or_create_user(user_id: int, username: str = None, first_name: str
     return user
 
 
-# ==================== BALANCE ====================
+# ==================== КОМАНДА /balance ====================
 
 @router.message(Command("balance"))
 async def cmd_balance(message: types.Message):
@@ -75,107 +125,99 @@ async def balance_callback(callback: types.CallbackQuery):
         f"💡 <i>Используйте /daily для получения бонуса!</i>"
     )
     
-    await callback.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_button()
-    )
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button())
     await callback.answer()
 
 
-# ==================== DAILY (ПОЛНОСТЬЮ ПЕРЕПИСАНО С ПРОВЕРКОЙ NULL) ====================
+# ==================== КОМАНДА /daily ====================
 
 @router.message(Command("daily"))
 async def cmd_daily(message: types.Message):
-    """Обработка команды /daily — полностью асинхронная версия"""
     user_id = message.from_user.id
     
-    # 1. Авторегистрация пользователя
     user = await get_or_create_user(
         user_id,
         message.from_user.username,
         message.from_user.first_name
     )
     
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     last_daily = user.get("last_daily")
-    daily_streak = user.get("daily_streak") or 0
     
-    # 2. Проверка: получал ли уже сегодня
-    if last_daily == today_str:
+    if last_daily == today:
         await message.answer(
             f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
-            f"🔥 Стрик: <b>{daily_streak}</b> дней\n"
-            f"⏰ Следующий бонус: <b>завтра после 00:00</b>",
+            f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n"
+            f"⏰ Следующий бонус: <b>завтра</b>",
             parse_mode=ParseMode.HTML
         )
         return
     
     try:
-        # 3. Расчёт стрика
-        streak = daily_streak
+        streak = user.get("daily_streak", 0)
+        
         if last_daily:
             try:
                 last_date = datetime.strptime(last_daily, "%Y-%m-%d").date()
                 yesterday = datetime.now().date() - timedelta(days=1)
-                
-                if last_date == yesterday:
-                    streak += 1  # Вчера получал — увеличиваем
-                else:
-                    streak = 1   # Пропустил день или ошибка — сбрасываем
-            except Exception as e:
-                logger.warning(f"Error parsing last_daily '{last_daily}': {e}")
+                streak = streak + 1 if last_date == yesterday else 1
+            except:
                 streak = 1
         else:
-            streak = 1  # Первый раз
+            streak = 1
         
-        # 4. Расчёт суммы бонуса
         base_bonus = 100 + (streak * 50)
-        vip_level = user.get("vip_level") or 0
+        vip_level = user.get("vip_level", 0) or 0
         vip_bonus = vip_level * 50 if vip_level > 0 else 0
         total_bonus = base_bonus + vip_bonus
         
-        # 5. 🔥 АТОМАРНОЕ ОБНОВЛЕНИЕ ЧЕРЕЗ НОВЫЙ МЕТОД БД
-        result = await db.claim_daily_bonus(
-            user_id=user_id,
-            bonus_amount=total_bonus,
-            streak=streak,
-            today_str=today_str,
-            reason=f"Ежедневный бонус (стрик: {streak})"
+        def _sync_update():
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (total_bonus, user_id))
+                cursor.execute("UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?", (streak, today, user_id))
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                row = cursor.fetchone()
+                conn.commit()
+                return row[0] if row else user['balance'] + total_bonus
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        new_balance = await asyncio.to_thread(_sync_update)
+        
+        if streak >= 30:
+            emoji = "🔥🔥🔥"
+        elif streak >= 7:
+            emoji = "🔥🔥"
+        elif streak >= 3:
+            emoji = "🔥"
+        else:
+            emoji = "⭐"
+        
+        text = (
+            f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
+            f"💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
         )
-        
-        if not result.get('success'):
-            raise RuntimeError("DB claim_daily_bonus failed")
-        
-        new_balance = result['new_balance']
-        
-        # 6. Формирование красивого ответа
-        streak_emoji = "🔥🔥🔥" if streak >= 30 else "🔥🔥" if streak >= 7 else "🔥" if streak >= 3 else "⭐"
-        tomorrow_total = 100 + ((streak + 1) * 50) + vip_bonus
-        
-        text = f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
-        
         if vip_bonus > 0:
-            text += f"   ├ Базовый: {base_bonus} NCoin\n   └ VIP бонус: +{vip_bonus} NCoin\n"
+            text += f"   ├ Базовый: {base_bonus} NCoin\n"
+            text += f"   └ VIP бонус: +{vip_bonus} NCoin\n"
         
         text += (
-            f"\n{streak_emoji} Стрик: <b>{streak}</b> дней\n"
-            f"💎 Новый баланс: <b>{new_balance} NCoin</b>\n\n"
-            f"📅 Завтра получите: <b>{tomorrow_total} NCoin</b>!\n\n"
-            f"💡 <i>Заходите каждый день — стрик растёт!</i>"
+            f"\n{emoji} Стрик: <b>{streak}</b> дней\n"
+            f"💎 Новый баланс: <b>{new_balance} NCoin</b>"
         )
         
         await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ DAILY: user={user_id}, bonus={total_bonus}, streak={streak}, balance={new_balance}")
+        logger.info(f"✅ DAILY: user={user_id}, bonus={total_bonus}, streak={streak}")
         
     except Exception as e:
-        logger.error(f"❌ DAILY FAILED for {user_id}: {e}", exc_info=True)
-        await message.answer(
-            "❌ <b>Произошла ошибка при начислении бонуса</b>\n\n"
-            f"<code>{type(e).__name__}: {e}</code>\n\n"
-            "Попробуйте позже или сообщите администратору.",
-            parse_mode=ParseMode.HTML
-        )
+        logger.error(f"❌ DAILY FAILED: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при начислении бонуса. Попробуйте позже.")
 
 
 @router.callback_query(F.data == "daily")
@@ -184,28 +226,24 @@ async def daily_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== TRANSFER ====================
+# ==================== КОМАНДА /transfer ====================
 
 @router.message(Command("transfer"))
 async def cmd_transfer(message: types.Message):
     args = message.text.strip().split()
     if len(args) != 3:
-        await message.answer(
-            "❌ <b>Неверный формат!</b>\n\n"
-            "Использование: <code>/transfer @username 100</code>",
-            parse_mode=ParseMode.HTML
-        )
+        await message.answer("❌ Использование: <code>/transfer @username 100</code>", parse_mode=ParseMode.HTML)
         return
     
     target_username = args[1].lstrip("@")
     try:
         amount = int(args[2])
     except ValueError:
-        await message.answer("❌ Сумма должна быть целым числом")
+        await message.answer("❌ Сумма должна быть числом")
         return
     
     if amount < 10:
-        await message.answer("❌ Минимальная сумма: 10 NCoin")
+        await message.answer("❌ Минимум 10 NCoin")
         return
     
     sender = await get_or_create_user(
@@ -232,105 +270,202 @@ async def cmd_transfer(message: types.Message):
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
-        logger.error(f"Transfer error: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
 
-# ==================== ДОНАТ ====================
+# ==================== ДОНАТ (УДОБНЫЙ ИНТЕРФЕЙС) ====================
 
 @router.message(Command("donate"))
 async def cmd_donate(message: types.Message):
+    """Главное меню доната"""
     text = (
-        f"❤️ <b>ПОДДЕРЖКА ПРОЕКТА NEXUS</b> ❤️\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>⚠️ ВАЖНО:</b>\n"
-        f"Все функции бота <b>АБСОЛЮТНО БЕСПЛАТНЫ</b>!\n"
-        f"Донат — это исключительно добровольная поддержка.\n\n"
-        f"<b>🎁 В ЗНАК БЛАГОДАРНОСТИ:</b>\n\n"
-    )
-    for rub, coins in DONATE_RATES.items():
-        text += f"├ {rub} ₽ → <b>{coins} NCoin</b>\n"
-    
-    text += (
-        f"\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>📝 КАК ПОЛУЧИТЬ NCOINS:</b>\n"
-        f"1. Переведите сумму из списка\n"
-        f"2. Отправьте скриншот: <code>/donate_proof 100</code>\n"
-        f"3. Администратор проверит и начислит\n\n"
-        f"💝 <b>Спасибо за поддержку!</b>"
+        "❤️ <b>ПОДДЕРЖКА ПРОЕКТА NEXUS</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>⚠️ ВАЖНО:</b>\n"
+        "Все функции бота <b>АБСОЛЮТНО БЕСПЛАТНЫ</b>!\n"
+        "Донат — это добровольная поддержка.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🎁 АВТОМАТИЧЕСКИЙ РАСЧЁТ:</b>\n"
+        "• 1 ₽ = 10 NCoin\n"
+        "• Бонусы за крупные суммы!\n\n"
+        "<b>📊 ПРИМЕРЫ:</b>\n"
+        "├ 10 ₽ → 100 NCoin\n"
+        "├ 50 ₽ → 600 NCoin (+100 бонус)\n"
+        "├ 100 ₽ → 1500 NCoin (+500 бонус)\n"
+        "├ 500 ₽ → 10000 NCoin (+5000 бонус)\n"
+        "├ 1000 ₽ → 22000 NCoin (+12000 бонус)\n"
+        "└ 5000 ₽ → 130000 NCoin (+80000 бонус)\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>Выберите действие:</b>"
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 ВЫБРАТЬ СУММУ", callback_data="donate_select_amount")],
+        [InlineKeyboardButton(text="💰 ВВЕСТИ СВОЮ СУММУ", callback_data="donate_custom_amount")],
         [InlineKeyboardButton(text="💳 РЕКВИЗИТЫ СБП", callback_data="donate_sbp")],
-        [InlineKeyboardButton(text="📞 СВЯЗАТЬСЯ", url="https://t.me/A3incSTIGMAT")],
+        [InlineKeyboardButton(text="📋 КАК ПОЛУЧИТЬ NCOINS", callback_data="donate_help")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
     
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-@router.callback_query(F.data == "donate_sbp")
-async def donate_sbp_callback(callback: types.CallbackQuery):
-    from config import DONATE_URL, DONATE_BANK, DONATE_RECEIVER
-    
-    text = (
-        "💳 <b>РЕКВИЗИТЫ СБП</b>\n\n"
-        f"🏦 Банк: <b>{DONATE_BANK}</b>\n"
-        f"👤 Получатель: <b>{DONATE_RECEIVER}</b>\n\n"
-        f"📱 Ссылка:\n<code>{DONATE_URL}</code>\n\n"
-        "После оплаты: <code>/donate_proof [сумма]</code>"
-    )
-    
-    await callback.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate")]
-        ])
-    )
+@router.callback_query(F.data == "donate_menu")
+async def donate_menu_callback(callback: types.CallbackQuery):
+    await cmd_donate(callback.message)
     await callback.answer()
 
 
-@router.message(Command("donate_proof"))
-async def cmd_donate_proof(message: types.Message):
-    args = message.text.strip().split()
+@router.callback_query(F.data == "donate_select_amount")
+async def donate_select_amount(callback: types.CallbackQuery):
+    """Выбор из фиксированных сумм"""
+    text = (
+        "💎 <b>ВЫБЕРИТЕ СУММУ ДОНАТА</b>\n\n"
+        "Нажмите на сумму ниже:\n\n"
+        "💰 <i>После выбора вам нужно будет прикрепить скриншот</i>"
+    )
     
-    if len(args) < 2:
-        await message.answer("❌ Укажите сумму: <code>/donate_proof 100</code>", parse_mode=ParseMode.HTML)
-        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="10 ₽ → 100 NCoin", callback_data="donate_fixed_10")],
+        [InlineKeyboardButton(text="50 ₽ → 600 NCoin", callback_data="donate_fixed_50")],
+        [InlineKeyboardButton(text="100 ₽ → 1500 NCoin", callback_data="donate_fixed_100")],
+        [InlineKeyboardButton(text="200 ₽ → 3500 NCoin", callback_data="donate_fixed_200")],
+        [InlineKeyboardButton(text="500 ₽ → 10000 NCoin", callback_data="donate_fixed_500")],
+        [InlineKeyboardButton(text="1000 ₽ → 22000 NCoin", callback_data="donate_fixed_1000")],
+        [InlineKeyboardButton(text="2000 ₽ → 48000 NCoin", callback_data="donate_fixed_2000")],
+        [InlineKeyboardButton(text="5000 ₽ → 130000 NCoin", callback_data="donate_fixed_5000")],
+        [InlineKeyboardButton(text="10000 ₽ → 300000 NCoin", callback_data="donate_fixed_10000")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")]
+    ])
     
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("donate_fixed_"))
+async def donate_fixed_selected(callback: types.CallbackQuery, state: FSMContext):
+    """Пользователь выбрал фиксированную сумму"""
+    amount = int(callback.data.split("_")[2])
+    coins = calculate_donate_coins(amount)
+    
+    await state.update_data(donate_amount=amount, donate_coins=coins)
+    await state.set_state(DonateState.waiting_for_proof)
+    
+    text = (
+        f"💳 <b>ДОНАТ НА {amount} ₽</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏦 Банк: <b>{DONATE_BANK}</b>\n"
+        f"👤 Получатель: <b>{DONATE_RECEIVER}</b>\n\n"
+        f"📱 <b>Ссылка СБП:</b>\n"
+        f"<code>{DONATE_URL}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📸 ПРИКРЕПИТЕ СКРИНШОТ ПЕРЕВОДА:</b>\n\n"
+        f"1. Переведите <b>{amount} ₽</b> по ссылке\n"
+        f"2. Сделайте скриншот\n"
+        f"3. <b>Отправьте скриншот прямо сейчас</b>\n\n"
+        f"🪙 Вы получите: <b>{coins} NCoin</b>\n\n"
+        f"❌ Для отмены: /cancel"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 ОТКРЫТЬ СБП", url=DONATE_URL)],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="donate_menu")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "donate_custom_amount")
+async def donate_custom_amount(callback: types.CallbackQuery, state: FSMContext):
+    """Ввод своей суммы"""
+    await state.set_state(DonateState.waiting_for_amount)
+    
+    text = (
+        "💰 <b>ВВЕДИТЕ СУММУ ДОНАТА</b>\n\n"
+        "Напишите сумму в рублях (целое число):\n\n"
+        "Пример: <code>1500</code>\n\n"
+        "🪙 Расчёт: 1 ₽ = 10 NCoin + бонусы!\n\n"
+        "❌ Для отмены: /cancel"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="donate_menu")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.message(DonateState.waiting_for_amount)
+async def process_custom_amount(message: types.Message, state: FSMContext):
+    """Обработка введённой суммы"""
     try:
-        amount_rub = int(args[1])
+        amount = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Сумма должна быть числом!")
+        await message.answer("❌ Введите целое число!\nПопробуйте ещё раз:")
         return
     
-    if amount_rub not in DONATE_RATES:
-        rates = ", ".join(str(r) for r in DONATE_RATES.keys())
-        await message.answer(f"❌ Доступные суммы: {rates} ₽")
+    if amount < 10:
+        await message.answer("❌ Минимальная сумма доната: 10 ₽\nПопробуйте ещё раз:")
         return
     
-    if not message.photo:
-        await message.answer("❌ Прикрепите скриншот перевода!")
-        return
+    coins = calculate_donate_coins(amount)
     
-    coins = DONATE_RATES[amount_rub]
+    await state.update_data(donate_amount=amount, donate_coins=coins)
+    await state.set_state(DonateState.waiting_for_proof)
     
+    text = (
+        f"💳 <b>ДОНАТ НА {amount} ₽</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏦 Банк: <b>{DONATE_BANK}</b>\n"
+        f"👤 Получатель: <b>{DONATE_RECEIVER}</b>\n\n"
+        f"📱 <b>Ссылка СБП:</b>\n"
+        f"<code>{DONATE_URL}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📸 ПРИКРЕПИТЕ СКРИНШОТ ПЕРЕВОДА:</b>\n\n"
+        f"1. Переведите <b>{amount} ₽</b> по ссылке\n"
+        f"2. Сделайте скриншот\n"
+        f"3. <b>Отправьте скриншот прямо сейчас</b>\n\n"
+        f"🪙 Вы получите: <b>{coins} NCoin</b>\n\n"
+        f"❌ Для отмены: /cancel"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 ОТКРЫТЬ СБП", url=DONATE_URL)],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="donate_menu")]
+    ])
+    
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@router.message(DonateState.waiting_for_proof, F.photo | F.document)
+async def process_donate_proof(message: types.Message, state: FSMContext):
+    """Получение скриншота"""
+    data = await state.get_data()
+    amount = data.get("donate_amount", 0)
+    coins = data.get("donate_coins", 0)
+    
+    await state.clear()
+    
+    # Отправляем админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             try:
                 admin_text = (
                     f"💰 <b>НОВЫЙ ДОНАТ!</b>\n\n"
-                    f"👤 {message.from_user.full_name}\n"
-                    f"🆔 <code>{message.from_user.id}</code>\n"
-                    f"💵 {amount_rub} ₽ → {coins} NCoin"
+                    f"👤 От: {message.from_user.full_name}\n"
+                    f"🆔 ID: <code>{message.from_user.id}</code>\n"
+                    f"💵 Сумма: {amount} ₽\n"
+                    f"🪙 К начислению: {coins} NCoin\n\n"
+                    f"<b>Действия:</b>"
                 )
                 
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="✅ ПОДТВЕРДИТЬ",
-                            callback_data=f"confirm_donate_{message.from_user.id}_{amount_rub}_{coins}"
+                            callback_data=f"confirm_donate_{message.from_user.id}_{amount}_{coins}"
                         ),
                         InlineKeyboardButton(
                             text="❌ ОТКЛОНИТЬ",
@@ -339,26 +474,120 @@ async def cmd_donate_proof(message: types.Message):
                     ]
                 ])
                 
-                await message.bot.send_photo(
-                    admin_id,
-                    photo=message.photo[-1].file_id,
-                    caption=admin_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard
-                )
+                if message.photo:
+                    await message.bot.send_photo(
+                        admin_id,
+                        photo=message.photo[-1].file_id,
+                        caption=admin_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+                else:
+                    await message.bot.send_document(
+                        admin_id,
+                        document=message.document.file_id,
+                        caption=admin_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
             except Exception as e:
                 logger.error(f"Failed to send to admin {admin_id}: {e}")
     
     await message.answer(
-        f"✅ Заявка отправлена!\n"
-        f"💵 {amount_rub} ₽ → {coins} NCoin\n"
-        f"Ожидайте подтверждения.",
+        f"✅ <b>ЗАЯВКА ОТПРАВЛЕНА!</b>\n\n"
+        f"💵 Сумма: {amount} ₽\n"
+        f"🪙 Ожидаемое начисление: {coins} NCoin\n\n"
+        f"Администратор проверит платёж в ближайшее время.\n"
+        f"Спасибо за поддержку! ❤️",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+        ])
+    )
+
+
+@router.message(DonateState.waiting_for_proof)
+async def donate_waiting_for_photo(message: types.Message):
+    """Напоминание, что нужен скриншот"""
+    await message.answer(
+        "📸 <b>Прикрепите скриншот перевода!</b>\n\n"
+        "Просто отправьте фото или файл.\n"
+        "❌ Для отмены: /cancel",
         parse_mode=ParseMode.HTML
     )
 
 
+@router.message(Command("cancel"))
+async def cancel_donate(message: types.Message, state: FSMContext):
+    """Отмена доната"""
+    current_state = await state.get_state()
+    if current_state in [DonateState.waiting_for_amount, DonateState.waiting_for_proof]:
+        await state.clear()
+        await message.answer("❌ Донат отменён.")
+    else:
+        await message.answer("ℹ️ Нет активной операции.")
+
+
+@router.callback_query(F.data == "donate_sbp")
+async def donate_sbp_callback(callback: types.CallbackQuery):
+    """Показать реквизиты СБП"""
+    text = (
+        "💳 <b>РЕКВИЗИТЫ СБП</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏦 Банк: <b>{DONATE_BANK}</b>\n"
+        f"👤 Получатель: <b>{DONATE_RECEIVER}</b>\n\n"
+        f"📱 <b>Ссылка на оплату:</b>\n"
+        f"<code>{DONATE_URL}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💡 <i>Нажмите на ссылку или скопируйте её</i>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 ОТКРЫТЬ СБП", url=DONATE_URL)],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "donate_help")
+async def donate_help_callback(callback: types.CallbackQuery):
+    """Помощь по донату"""
+    text = (
+        "📋 <b>КАК ПОЛУЧИТЬ NCOINS ЗА ДОНАТ</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>1️⃣ Выберите сумму</b>\n"
+        "Нажмите на кнопку с суммой или введите свою\n\n"
+        "<b>2️⃣ Переведите деньги</b>\n"
+        "По реквизитам СБП (Озон Банк)\n\n"
+        "<b>3️⃣ Сделайте скриншот</b>\n"
+        "Подтверждения перевода\n\n"
+        "<b>4️⃣ Отправьте скриншот</b>\n"
+        "Прямо в чат с ботом\n\n"
+        "<b>5️⃣ Ожидайте проверки</b>\n"
+        "Администратор проверит и начислит NCoin\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>💰 АВТОРАСЧЁТ:</b>\n"
+        "• 1 ₽ = 10 NCoin\n"
+        "• Бонусы за крупные суммы!\n\n"
+        "⏰ Обычно проверка занимает до 24 часов.\n"
+        "💝 Спасибо за поддержку!"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+# ==================== ПОДТВЕРЖДЕНИЕ ДОНАТА АДМИНОМ ====================
+
 @router.callback_query(F.data.startswith("confirm_donate_"))
 async def confirm_donate_callback(callback: types.CallbackQuery):
+    """Админ подтверждает донат"""
     parts = callback.data.split("_")
     user_id = int(parts[2])
     amount_rub = int(parts[3])
@@ -368,7 +597,8 @@ async def confirm_donate_callback(callback: types.CallbackQuery):
     await db.update_donor_stats(user_id, amount_rub)
     
     await callback.message.edit_caption(
-        f"{callback.message.caption}\n\n✅ <b>ПОДТВЕРЖДЕНО!</b>",
+        f"{callback.message.caption}\n\n✅ <b>ПОДТВЕРЖДЕНО!</b>\n"
+        f"Начислено {coins} NCoin пользователю.",
         parse_mode=ParseMode.HTML
     )
     
@@ -376,19 +606,20 @@ async def confirm_donate_callback(callback: types.CallbackQuery):
         await callback.bot.send_message(
             user_id,
             f"🎉 <b>ДОНАТ ПОДТВЕРЖДЁН!</b>\n\n"
-            f"💵 {amount_rub} ₽\n"
-            f"🪙 +{coins} NCoin\n\n"
+            f"💵 Сумма: {amount_rub} ₽\n"
+            f"🪙 Начислено: <b>{coins} NCoin</b>\n\n"
             f"Спасибо за поддержку! ❤️",
             parse_mode=ParseMode.HTML
         )
     except:
         pass
     
-    await callback.answer("✅ Подтверждено!")
+    await callback.answer("✅ Донат подтверждён!")
 
 
 @router.callback_query(F.data.startswith("reject_donate_"))
 async def reject_donate_callback(callback: types.CallbackQuery):
+    """Админ отклоняет донат"""
     user_id = int(callback.data.split("_")[2])
     
     await callback.message.edit_caption(
@@ -399,16 +630,18 @@ async def reject_donate_callback(callback: types.CallbackQuery):
     try:
         await callback.bot.send_message(
             user_id,
-            "❌ Донат не подтверждён. Свяжитесь с разработчиком.",
+            f"❌ <b>ДОНАТ НЕ ПОДТВЕРЖДЁН</b>\n\n"
+            f"Платёж не найден или скриншот недействителен.\n"
+            f"Свяжитесь с разработчиком для уточнения.",
             parse_mode=ParseMode.HTML
         )
     except:
         pass
     
-    await callback.answer("❌ Отклонено")
+    await callback.answer("❌ Донат отклонён")
 
 
-# ==================== МЕНЮ ====================
+# ==================== МЕНЮ ФИНАНСОВ ====================
 
 @router.callback_query(F.data == "finance_category")
 async def finance_category_callback(callback: types.CallbackQuery):
@@ -419,29 +652,24 @@ async def finance_category_callback(callback: types.CallbackQuery):
     )
     
     today = datetime.now().strftime("%Y-%m-%d")
-    last_daily = user.get("last_daily")
-    can_claim = not last_daily or last_daily != today
+    can_claim = user.get("last_daily") != today
     daily_status = "✅ ДОСТУПЕН" if can_claim else "⏰ УЖЕ ПОЛУЧЕН"
     
     text = (
-        f"💰 <b>ФИНАНСЫ</b>\n\n"
+        f"💰 <b>ФИНАНСЫ И ЭКОНОМИКА</b>\n\n"
         f"💎 Баланс: <b>{user['balance']} NCoin</b>\n"
-        f"⭐ VIP: <b>{user.get('vip_level') or 0}</b>\n"
-        f"🔥 Стрик: <b>{user.get('daily_streak') or 0}</b>\n"
+        f"⭐ VIP: <b>{user.get('vip_level', 0)}</b>\n"
+        f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n"
         f"🎁 Бонус: {daily_status}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>Действия:</b>\n"
-        f"/balance — баланс\n"
-        f"/daily — бонус\n"
-        f"/transfer — перевод\n"
-        f"/donate — поддержать"
+        f"<b>Доступные действия:</b>\n"
+        f"├ /balance — баланс\n"
+        f"├ /daily — бонус\n"
+        f"├ /transfer — перевод\n"
+        f"└ /donate — поддержать"
     )
     
-    await callback.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=finance_category_menu()
-    )
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=finance_category_menu())
     await callback.answer()
 
 
@@ -455,10 +683,3 @@ async def transfer_menu_callback(callback: types.CallbackQuery):
         reply_markup=back_button()
     )
     await callback.answer()
-
-
-@router.callback_query(F.data == "donate_menu")
-async def donate_menu_callback(callback: types.CallbackQuery):
-    await cmd_donate(callback.message)
-    await callback.answer()
-
