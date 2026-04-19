@@ -2,18 +2,18 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
-С ПРЯМЫМИ ОБРАБОТЧИКАМИ ДЛЯ ДИАГНОСТИКИ
 """
 
 import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,54 +25,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
-# Создаём бота и диспетчер
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ==================== ПРЯМЫЕ ОБРАБОТЧИКИ (ДИАГНОСТИКА) ====================
+# ==================== ГЛАВНОЕ МЕНЮ ====================
+
+def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню бота"""
+    keyboard = [
+        [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
+         InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
+        [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
+         InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
+        [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
+         InlineKeyboardButton(text="🎲 ЛИЧНЫЕ ИГРЫ", callback_data="private_games")],
+        [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
+         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
+        [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
+         InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
+        [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
+         InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
+        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
+         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
+        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
+         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
+        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")]
+    ]
+    
+    if is_admin:
+        keyboard.insert(3, [InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+# ==================== ПРЯМЫЕ ОБРАБОТЧИКИ ====================
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
-    """Проверка работоспособности бота"""
-    logger.critical("🔥 PING COMMAND RECEIVED!")
+    """Проверка работоспособности"""
     await message.answer("🏓 PONG! Бот работает!")
-
-
-@dp.message(Command("testdaily"))
-async def cmd_testdaily(message: types.Message):
-    """Тестовый daily"""
-    logger.critical("🔥🔥🔥 TESTDAILY COMMAND RECEIVED! 🔥🔥🔥")
-    await message.answer("✅ Тестовая команда /testdaily работает!")
 
 
 @dp.message(Command("daily"))
 async def direct_daily(message: types.Message):
-    """ПРЯМОЙ ОБРАБОТЧИК /daily"""
-    logger.critical("🔥🔥🔥 DIRECT /daily HANDLER CALLED! 🔥🔥🔥")
-    
+    """Прямой обработчик /daily"""
     from database import db
-    import asyncio as aio
     
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Получаем или создаём пользователя
     user = await db.get_user(user_id)
     if not user:
-        await db.create_user(user_id, username, first_name, 1000)
+        await db.create_user(user_id, username, first_name, START_BALANCE)
         user = await db.get_user(user_id)
-        logger.info(f"Created new user {user_id}")
     
     today = datetime.now().strftime("%Y-%m-%d")
     last_daily = user.get("last_daily")
     
-    # Проверка на уже полученный бонус
     if last_daily == today:
         await message.answer(
             f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
@@ -82,51 +97,32 @@ async def direct_daily(message: types.Message):
         )
         return
     
-    # Расчёт стрика
     streak = user.get("daily_streak", 0)
     if last_daily:
         try:
             last_date = datetime.strptime(last_daily, "%Y-%m-%d").date()
-            yesterday = datetime.now().date() - __import__('datetime').timedelta(days=1)
-            if last_date == yesterday:
-                streak += 1
-            else:
-                streak = 1
+            yesterday = datetime.now().date() - timedelta(days=1)
+            streak = streak + 1 if last_date == yesterday else 1
         except:
             streak = 1
     else:
         streak = 1
     
-    # Расчёт бонуса
     base_bonus = 100 + (streak * 50)
     vip_level = user.get("vip_level", 0) or 0
     vip_bonus = vip_level * 50 if vip_level > 0 else 0
     total_bonus = base_bonus + vip_bonus
     
-    # Обновление БД
     def _sync_update():
         conn = db._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("BEGIN TRANSACTION")
-            
-            # Обновляем баланс
-            cursor.execute(
-                "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-                (total_bonus, user_id)
-            )
-            
-            # Обновляем стрик и дату
-            cursor.execute(
-                "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-                (streak, today, user_id)
-            )
-            
-            # Получаем новый баланс
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (total_bonus, user_id))
+            cursor.execute("UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?", (streak, today, user_id))
             cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             new_balance = row[0] if row else user['balance'] + total_bonus
-            
             conn.commit()
             return new_balance
         except Exception as e:
@@ -136,17 +132,13 @@ async def direct_daily(message: types.Message):
             conn.close()
     
     try:
-        new_balance = await aio.to_thread(_sync_update)
+        new_balance = await asyncio.to_thread(_sync_update)
         
-        # Эмодзи для стрика
+        emoji = "🔥" * min(3, (streak // 10) + 1) if streak >= 3 else "⭐"
         if streak >= 30:
             emoji = "🔥🔥🔥"
         elif streak >= 7:
             emoji = "🔥🔥"
-        elif streak >= 3:
-            emoji = "🔥"
-        else:
-            emoji = "⭐"
         
         text = (
             f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
@@ -178,7 +170,7 @@ async def direct_balance(message: types.Message):
     user = await db.get_user(user_id)
     
     if not user:
-        await db.create_user(user_id, message.from_user.username, message.from_user.first_name, 1000)
+        await db.create_user(user_id, message.from_user.username, message.from_user.first_name, START_BALANCE)
         user = await db.get_user(user_id)
     
     await message.answer(
@@ -191,30 +183,101 @@ async def direct_balance(message: types.Message):
 
 @dp.message(Command("start"))
 async def direct_start(message: types.Message):
-    """Прямой обработчик /start"""
+    """Прямой обработчик /start с главным меню"""
     from database import db
-    from config import START_BALANCE
     
     user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+    chat_id = message.chat.id
+    
+    # Проверка прав админа
+    is_admin = False
+    if message.chat.type in ['group', 'supergroup']:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            is_admin = member.status in ['creator', 'administrator']
+        except:
+            pass
+    
     user = await db.get_user(user_id)
     
     if not user:
-        await db.create_user(user_id, message.from_user.username, message.from_user.first_name, START_BALANCE)
+        await db.create_user(user_id, username, first_name, START_BALANCE)
+        
+        welcome_text = (
+            f"🤖 <b>ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
+            f"✨ <b>Привет, {first_name}!</b>\n\n"
+            f"Я — <b>NEXUS Chat Manager</b> — твой личный помощник в управлении чатом!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>🎯 ЧТО Я УМЕЮ:</b>\n\n"
+            f"├ 🎮 <b>Игры</b> — слоты, рулетка, КНБ, дуэли\n"
+            f"├ 💰 <b>Экономика</b> — баланс, переводы\n"
+            f"├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
+            f"├ 🤖 <b>AI помощник</b> — отвечаю на вопросы\n"
+            f"├ 🔗 <b>Рефералка</b> — приглашай друзей, получай NCoins\n"
+            f"├ 🏆 <b>Ранги</b> — повышай уровень, получай бонусы\n"
+            f"├ 💕 <b>Отношения</b> — создавай семьи и группы\n"
+            f"└ ❤️ <b>Поддержка</b> — помочь развитию проекта\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>📌 БЫСТРЫЙ СТАРТ:</b>\n\n"
+            f"├ <code>/daily</code> — получить бонус\n"
+            f"├ <code>/balance</code> — проверить баланс\n"
+            f"├ <code>/slot 100</code> — сыграть в слот\n"
+            f"└ <code>/help</code> — все команды\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} NCOIN!</b>"
+        )
+        
         await message.answer(
-            f"🤖 <b>ВЕЛКОМ ТО NEXUS!</b>\n\n"
-            f"✨ Привет, {message.from_user.first_name}!\n\n"
-            f"🎁 Вам начислено: {START_BALANCE} NCoin\n\n"
-            f"Используйте кнопки внизу для навигации.\n"
-            f"Команды: /daily, /balance, /help",
-            parse_mode=ParseMode.HTML
+            welcome_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu(is_admin=is_admin)
         )
     else:
         await message.answer(
-            f"👋 С возвращением, {message.from_user.first_name}!\n"
-            f"💰 Баланс: {user['balance']} NCoin\n"
-            f"🔥 Стрик: {user.get('daily_streak', 0)} дней",
-            parse_mode=ParseMode.HTML
+            f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER</b>\n\n"
+            f"👋 С возвращением, <b>{first_name}</b>!\n"
+            f"💰 Баланс: <b>{user['balance']}</b> NCoin\n"
+            f"⭐ VIP: {'✅' if user.get('vip_level', 0) > 0 else '❌'}\n"
+            f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n\n"
+            f"👇 Выберите действие:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu(is_admin=is_admin)
         )
+
+
+@dp.callback_query(lambda c: c.data == "back_to_menu")
+async def back_to_menu_callback(callback: types.CallbackQuery):
+    """Возврат в главное меню"""
+    from database import db
+    
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+    
+    is_admin = False
+    if callback.message.chat.type in ['group', 'supergroup']:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            is_admin = member.status in ['creator', 'administrator']
+        except:
+            pass
+    
+    user = await db.get_user(user_id)
+    balance = user['balance'] if user else 0
+    vip = user.get('vip_level', 0) if user else 0
+    streak = user.get('daily_streak', 0) if user else 0
+    
+    await callback.message.edit_text(
+        f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS CHAT MANAGER</b>\n\n"
+        f"💰 Баланс: <b>{balance}</b> NCoin\n"
+        f"⭐ VIP: {'✅' if vip > 0 else '❌'}\n"
+        f"🔥 Стрик: <b>{streak}</b> дней\n\n"
+        f"👇 Выберите категорию:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_menu(is_admin=is_admin)
+    )
+    await callback.answer()
 
 
 # ==================== ИМПОРТЫ РОУТЕРОВ ====================
@@ -238,7 +301,6 @@ try:
     from handlers.rp_commands import router as rp_commands_router
     from handlers.smart_commands import router as smart_commands_router
     
-    # Подключаем все роутеры
     dp.include_routers(
         start_router,
         profile_router,
@@ -265,7 +327,6 @@ except Exception as e:
 # ==================== ЖИЗНЕННЫЙ ЦИКЛ БОТА ====================
 
 async def on_startup():
-    """Инициализация при запуске"""
     logger.info("🚀 Запуск NEXUS Bot v5.0...")
     
     try:
@@ -275,7 +336,6 @@ async def on_startup():
         logger.critical(f"❌ Ошибка инициализации БД: {e}")
         sys.exit(1)
     
-    # Инициализация категорий тегов
     try:
         from handlers.tag_categories import init_categories
         await init_categories()
@@ -283,12 +343,10 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
     
-    logger.info("✅ NEXUS Bot v5.0 успешно запущен на Amvera!")
-    logger.info("📡 Прямые обработчики: /ping, /testdaily, /daily, /balance, /start")
+    logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
 
 
 async def on_shutdown():
-    """Очистка при остановке"""
     logger.info("🛑 Остановка бота...")
     try:
         await db.close()
