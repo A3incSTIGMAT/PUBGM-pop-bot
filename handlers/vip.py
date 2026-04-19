@@ -1,5 +1,6 @@
 """
-Модуль VIP статусов и преимуществ
+Модуль VIP статусов и преимуществ — ИСПРАВЛЕННАЯ ВЕРСИЯ
+Все отображения баланса используют ТОЛЬКО await db.get_balance()
 """
 
 import logging
@@ -89,25 +90,30 @@ async def check_achievement_vip(user_id: int, wins: int):
 
 @router.message(Command("vip"))
 async def cmd_vip(message: types.Message):
-    """Информация о VIP статусе"""
+    """Информация о VIP статусе — с актуальным балансом"""
     user_id = message.from_user.id
     
+    # Получаем базовые данные пользователя
     user = await get_or_create_user(
         user_id,
         message.from_user.username,
         message.from_user.first_name
     )
     
-    vip_level = user.get("vip_level", 0) or 0
-    vip_until = user.get("vip_until", "")
-    # 🔥 ПРИНУДИТЕЛЬНО ПОЛУЧАЕМ СВЕЖИЙ БАЛАНС
+    # 🔥 ВСЕГДА получаем свежий баланс непосредственно перед использованием
     balance = await db.get_balance(user_id)
     
+    vip_level = user.get("vip_level", 0) or 0
+    vip_until = user.get("vip_until", "")
     wins = user.get("wins", 0) or 0
+    
+    # Проверяем достижения (может изменить VIP)
     achievement_vip = await check_achievement_vip(user_id, wins)
     if achievement_vip:
         vip_level = achievement_vip
+        # 🔥 После изменений в БД — обновляем данные пользователя и баланс
         user = await db.get_user(user_id)
+        balance = await db.get_balance(user_id)
     
     if vip_level > 0:
         privileges = get_vip_privileges(vip_level)
@@ -117,6 +123,7 @@ async def cmd_vip(message: types.Message):
         except:
             until_date = "Бессрочно"
         
+        # 🔥 Используем ТОЛЬКО переменную balance, НЕ user['balance']
         text = f"""
 {privileges['icon']} *ВАШ VIP СТАТУС* {privileges['icon']}
 
@@ -137,6 +144,7 @@ async def cmd_vip(message: types.Message):
 └ ⭐ Приоритетная поддержка
 """
     else:
+        # 🔥 Здесь тоже используем balance, а не user['balance']
         text = f"""
 ⭐ *VIP СТАТУСЫ NEXUS* ⭐
 
@@ -198,7 +206,7 @@ async def vip_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "buy_vip")
 async def buy_vip_menu(callback: types.CallbackQuery):
-    """Меню покупки VIP"""
+    """Меню покупки VIP — с актуальным балансом"""
     user_id = callback.from_user.id
     
     user = await get_or_create_user(
@@ -207,7 +215,7 @@ async def buy_vip_menu(callback: types.CallbackQuery):
         callback.from_user.first_name
     )
     
-    # 🔥 СВЕЖИЙ БАЛАНС
+    # 🔥 СВЕЖИЙ БАЛАНС перед отображением
     balance = await db.get_balance(user_id)
     current_vip = user.get('vip_level', 0) or 0
     
@@ -227,6 +235,7 @@ async def buy_vip_menu(callback: types.CallbackQuery):
     buttons.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="vip")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     
+    # 🔥 Используем balance, а не user['balance']
     await callback.message.edit_text(
         f"💎 *ПОКУПКА VIP СТАТУСА*\n\n"
         f"💰 Ваш баланс: *{balance} NCoins*\n"
@@ -241,7 +250,7 @@ async def buy_vip_menu(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("buy_vip_"))
 async def buy_vip(callback: types.CallbackQuery):
-    """Покупка VIP уровня"""
+    """Покупка VIP уровня — с корректным обновлением баланса"""
     user_id = callback.from_user.id
     level = int(callback.data.split("_")[2])
     price = VIP_PRICES.get(level, 500)
@@ -258,7 +267,7 @@ async def buy_vip(callback: types.CallbackQuery):
         await callback.answer(f"❌ У вас уже есть VIP {current_vip} уровня!", show_alert=True)
         return
     
-    # 🔥 СВЕЖИЙ БАЛАНС
+    # 🔥 СВЕЖИЙ БАЛАНС перед проверкой
     balance = await db.get_balance(user_id)
     
     if balance < price:
@@ -269,12 +278,16 @@ async def buy_vip(callback: types.CallbackQuery):
         return
     
     try:
+        # Списываем средства
         await db.update_balance(user_id, -price, f"Покупка VIP уровня {level}")
         await update_user_vip(user_id, level, 30)
         
-        privileges = get_vip_privileges(level)
+        # 🔥 КРИТИЧНО: получаем баланс ПОСЛЕ обновления!
         new_balance = await db.get_balance(user_id)
         
+        privileges = get_vip_privileges(level)
+        
+        # 🔥 Используем ТОЛЬКО new_balance в ответе
         await callback.message.edit_text(
             f"🎉 *ПОЗДРАВЛЯЕМ С ПОКУПКОЙ VIP!*\n\n"
             f"{privileges['icon']} Новый уровень: *{privileges['name']}*\n"
@@ -306,7 +319,7 @@ async def buy_vip(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "vip_achievements")
 async def vip_achievements(callback: types.CallbackQuery):
-    """Достижения для получения VIP бесплатно"""
+    """Достижения для получения VIP бесплатно — с актуальным балансом"""
     user_id = callback.from_user.id
     
     user = await get_or_create_user(
@@ -317,10 +330,15 @@ async def vip_achievements(callback: types.CallbackQuery):
     
     wins = user.get("wins", 0) or 0
     current_vip = user.get("vip_level", 0) or 0
+    
     # 🔥 СВЕЖИЙ БАЛАНС
     balance = await db.get_balance(user_id)
     
     awarded_vip = await check_achievement_vip(user_id, wins)
+    
+    # Если VIP был выдан за достижения — обновляем баланс после этого
+    if awarded_vip:
+        balance = await db.get_balance(user_id)
     
     next_level = None
     next_wins = 0
@@ -349,6 +367,7 @@ async def vip_achievements(callback: types.CallbackQuery):
     filled = int(bar_length * progress / 100)
     progress_bar = "█" * filled + "░" * (bar_length - filled)
     
+    # 🔥 Используем balance, а не user['balance']
     text = f"""
 🏆 *БЕСПЛАТНЫЙ VIP ЗА ДОСТИЖЕНИЯ*
 
@@ -402,7 +421,4 @@ async def vip_achievements(callback: types.CallbackQuery):
         text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="vip")]
-        ])
-    )
-    await callback.answer()
+            [InlineKeyboardButton(text="
