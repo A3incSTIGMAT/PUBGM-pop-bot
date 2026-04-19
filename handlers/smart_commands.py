@@ -2,18 +2,19 @@
 Умный парсер команд NEXUS Bot
 Понимает: игры, экономику, тэги, РП команды, умные теги
 Обрабатывает ТОЛЬКО текст, НЕ начинающийся с /
+ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
 """
 
 import re
 import random
 import logging
+import asyncio
 from aiogram import Router, types, F
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command
 
 from database import db
-from config import SLOT_COST, ROULETTE_MIN, DUEL_MIN
+from config import SLOT_COST, ROULETTE_MIN, DUEL_MIN, START_BALANCE
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -32,7 +33,7 @@ TAG_KEYWORDS = {
     'mafia': ['мафия', 'mafia', 'партия', 'сбор', 'игроков в мафию'],
     'video_call': ['звонок', 'созвон', 'видеозвонок', 'скайп', 'discord', 'позвонить'],
     'important': ['важный вопрос', 'помогите', 'нужна помощь', 'вопрос', 'совет', 'подскажите'],
-    'giveaway': ['розыгрыш', 'giveaway', 'конкурс', 'ивент', 'приз', 'конкурс'],
+    'giveaway': ['розыгрыш', 'giveaway', 'конкурс', 'ивент', 'приз'],
     'offtopic': ['флуд', 'оффтоп', 'offtopic', 'болталка', 'поболтать'],
     'tech': ['техническое', 'баг', 'ошибка', 'bug', 'сломалась', 'не работает'],
     'urgent': ['срочно', 'urgent', 'помощь админам', 'внимание админы', 'срочная помощь'],
@@ -41,14 +42,20 @@ TAG_KEYWORDS = {
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
+async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
+    user = await db.get_user(user_id)
+    if not user:
+        await db.create_user(user_id, username, first_name, START_BALANCE)
+        user = await db.get_user(user_id)
+    return user
+
+
 def extract_number(text: str) -> int:
-    """Извлечь число из текста"""
     match = re.search(r'\b\d+\b', text)
     return int(match.group()) if match else 0
 
 
 def extract_color(text: str) -> str:
-    """Извлечь цвет для рулетки"""
     text = text.lower()
     if 'красн' in text or 'red' in text:
         return 'red'
@@ -58,7 +65,6 @@ def extract_color(text: str) -> str:
 
 
 def extract_choice_rps(text: str) -> str:
-    """Извлечь выбор для КНБ"""
     text = text.lower()
     if 'камень' in text or 'rock' in text:
         return 'rock'
@@ -70,7 +76,6 @@ def extract_choice_rps(text: str) -> str:
 
 
 def extract_username(text: str) -> str:
-    """Извлечь username из текста"""
     match = re.search(r'@([a-zA-Z0-9_]+)', text)
     return match.group(1) if match else None
 
@@ -81,7 +86,6 @@ def extract_username(text: str) -> str:
 async def smart_parser(message: types.Message):
     """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
     
-    # Игнорируем сообщения от ботов
     if message.from_user.is_bot:
         return
     
@@ -91,36 +95,29 @@ async def smart_parser(message: types.Message):
     if not text:
         return
     
-    # Проверка: если пользователь заполняет анкету — НЕ обрабатываем другие команды
     if user_id in profile_states:
         return
     
-    # Проверяем регистрацию
-    user = await db.get_user(user_id)
-    if not user:
-        await message.answer("👋 Используйте /start для регистрации")
-        return
+    # 🔥 СВЕЖИЙ БАЛАНС
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    balance = await db.get_balance(user_id)
     
-    # ==================== УМНЫЕ ТЕГИ (КАТЕГОРИИ) ====================
-    # Проверяем наличие обращения к боту
+    # ==================== УМНЫЕ ТЕГИ ====================
     bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
     
     if bot_called:
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in text:
-                    # Проверяем, включена ли категория в чате
                     try:
                         from handlers.tag_categories import get_chat_enabled_slugs
                         chat_id = message.chat.id
                         enabled_slugs = await get_chat_enabled_slugs(chat_id)
                         
                         if slug in enabled_slugs:
-                            # Извлекаем текст сообщения
                             msg_parts = text.split(keyword, 1)
                             msg_text = msg_parts[1].strip() if len(msg_parts) > 1 else "Внимание!"
                             
-                            # Вызываем тег
                             from handlers.tag_trigger import trigger_tag
                             await trigger_tag(message, slug, msg_text)
                             return
@@ -146,8 +143,10 @@ async def smart_parser(message: types.Message):
             await message.answer(f"❌ Минимальная ставка: {SLOT_COST} NCoins")
             return
         
-        if user["balance"] < bet:
-            await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} NCoins")
+        # 🔥 СВЕЖИЙ БАЛАНС
+        balance = await db.get_balance(user_id)
+        if balance < bet:
+            await message.answer(f"❌ Недостаточно средств! Баланс: {balance} NCoins")
             return
         
         symbols = ["🍒", "🍋", "🍊", "🍉", "⭐", "💎"]
@@ -196,8 +195,10 @@ async def smart_parser(message: types.Message):
             await message.answer(f"❌ Минимальная ставка: {ROULETTE_MIN} NCoins")
             return
         
-        if user["balance"] < bet:
-            await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} NCoins")
+        # 🔥 СВЕЖИЙ БАЛАНС
+        balance = await db.get_balance(user_id)
+        if balance < bet:
+            await message.answer(f"❌ Недостаточно средств! Баланс: {balance} NCoins")
             return
         
         result_color = random.choice(["red", "black"])
@@ -214,12 +215,14 @@ async def smart_parser(message: types.Message):
         await message.answer(response, parse_mode=ParseMode.MARKDOWN)
         return
     
-    # ==================== КАМЕНЬ-НОЖНИЦЫ-БУМАГА ====================
+    # ==================== КНБ ====================
     rps_choice = extract_choice_rps(text)
     if rps_choice:
         bet = 50
         
-        if user["balance"] < bet:
+        # 🔥 СВЕЖИЙ БАЛАНС
+        balance = await db.get_balance(user_id)
+        if balance < bet:
             await message.answer(f"❌ Недостаточно средств! Нужно {bet} NCoins")
             return
         
@@ -267,30 +270,28 @@ async def smart_parser(message: types.Message):
             await message.answer(f"❌ Минимальная ставка: {DUEL_MIN} NCoins")
             return
         
-        if user["balance"] < bet:
-            await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']} NCoins")
+        # 🔥 СВЕЖИЙ БАЛАНС
+        balance = await db.get_balance(user_id)
+        if balance < bet:
+            await message.answer(f"❌ Недостаточно средств! Баланс: {balance} NCoins")
             return
         
-        # Поиск противника
-        conn = db._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, first_name FROM users WHERE username = ?", (username,))
-        row = cursor.fetchone()
-        conn.close()
+        target_user = await db.get_user_by_username(username)
         
-        if not row:
+        if not target_user:
             await message.answer(f"❌ Пользователь @{username} не найден")
             return
         
-        target_id = row[0]
-        target_name = row[1]
+        target_id = target_user["user_id"]
+        target_name = target_user.get("first_name", username)
         
         if target_id == user_id:
             await message.answer("❌ Нельзя вызвать на дуэль самого себя!")
             return
         
-        target = await db.get_user(target_id)
-        if not target or target["balance"] < bet:
+        # 🔥 СВЕЖИЙ БАЛАНС ПРОТИВНИКА
+        target_balance = await db.get_balance(target_id)
+        if target_balance < bet:
             await message.answer(f"❌ У @{username} недостаточно средств для дуэли!")
             return
         
@@ -315,22 +316,21 @@ async def smart_parser(message: types.Message):
         )
         return
     
-    # ==================== ТЭГ ВСЕХ (старый) ====================
-    if 'нексус' in text or 'нэксус' in text or 'nexus' in text:
-        if 'оповести всех' in text or 'общий сбор' in text or 'собери всех' in text:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
-                 InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
-            ])
-            
-            await message.answer(
-                "📢 *ОБЩИЙ СБОР*\n\n"
-                "Будет отправлено несколько сообщений с упоминаниями.\n\n"
-                "Начать?",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=keyboard
-            )
-            return
+    # ==================== ТЭГ ВСЕХ ====================
+    if bot_called and ('оповести всех' in text or 'общий сбор' in text or 'собери всех' in text):
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
+             InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
+        ])
+        
+        await message.answer(
+            "📢 *ОБЩИЙ СБОР*\n\n"
+            "Будет отправлено несколько сообщений с упоминаниями.\n\n"
+            "Начать?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+        return
     
     # ==================== РП КОМАНДЫ ====================
     rp_responses = {
@@ -367,18 +367,15 @@ async def accept_duel(callback: types.CallbackQuery):
     from_name = request["from_name"]
     bet = request["bet"]
     
-    user = await db.get_user(user_id)
-    from_user = await db.get_user(from_id)
+    # 🔥 СВЕЖИЕ БАЛАНСЫ
+    user_balance = await db.get_balance(user_id)
+    from_balance = await db.get_balance(from_id)
     
-    if not user or not from_user:
-        await callback.answer("❌ Ошибка!", show_alert=True)
-        return
-    
-    if user["balance"] < bet:
+    if user_balance < bet:
         await callback.answer(f"❌ У вас недостаточно средств! Нужно {bet}", show_alert=True)
         return
     
-    if from_user["balance"] < bet:
+    if from_balance < bet:
         await callback.answer(f"❌ У {from_name} недостаточно средств!", show_alert=True)
         return
     
@@ -425,9 +422,10 @@ async def reject_duel(callback: types.CallbackQuery):
 
 
 @router.callback_query(lambda c: c.data == "start_all")
-async def start_all(callback: types.CallbackQuery):
-    from handlers.tag import start_all
-    await start_all(callback)
+async def start_all_callback(callback: types.CallbackQuery):
+    from handlers.tag import cmd_all
+    await cmd_all(callback.message)
+    await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "cancel_all")
