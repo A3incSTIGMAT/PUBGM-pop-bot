@@ -2,6 +2,7 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
+ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import asyncio
@@ -33,6 +34,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -63,7 +65,7 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-# ==================== ПРЯМЫЕ ОБРАБОТЧИКИ ====================
+# ==================== ПРЯМЫЕ ОБРАБОТЧИКИ КОМАНД ====================
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
@@ -84,6 +86,7 @@ async def direct_daily(message: types.Message):
     if not user:
         await db.create_user(user_id, username, first_name, START_BALANCE)
         user = await db.get_user(user_id)
+        logger.info(f"Created new user {user_id}")
     
     today = datetime.now().strftime("%Y-%m-%d")
     last_daily = user.get("last_daily")
@@ -134,11 +137,14 @@ async def direct_daily(message: types.Message):
     try:
         new_balance = await asyncio.to_thread(_sync_update)
         
-        emoji = "🔥" * min(3, (streak // 10) + 1) if streak >= 3 else "⭐"
         if streak >= 30:
             emoji = "🔥🔥🔥"
         elif streak >= 7:
             emoji = "🔥🔥"
+        elif streak >= 3:
+            emoji = "🔥"
+        else:
+            emoji = "⭐"
         
         text = (
             f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
