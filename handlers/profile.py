@@ -1,229 +1,455 @@
-import asyncio
+"""
+Модуль профиля и анкеты пользователя
+"""
+
 import logging
-from aiogram import Router, types
+import re
+import asyncio
+from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database import db
-from utils.keyboards import main_menu
+from config import START_BALANCE
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ⚠️ В продакшене замените на aiogram.fsm (SQLiteStorage/RedisStorage)
+
+# ==================== FSM ДЛЯ АНКЕТЫ ====================
+
+class ProfileStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_age = State()
+    waiting_for_city = State()
+    waiting_for_timezone = State()
+    waiting_for_about = State()
+
+
+# Словарь для экспорта состояний (для совместимости)
 profile_states = {}
 
-def _generate_profile_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 МОЯ АНКЕТА", callback_data="view_profile"),
-         InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ АНКЕТУ", callback_data="fill_profile")],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-    ])
 
-def _format_profile_text(user: dict, user_id: int) -> str:
-    reg_date = (user.get("register_date") or "Неизвестно")[:10]
-    vip = "✅ АКТИВИРОВАН" if (user.get("vip_level") or 0) > 0 else "❌ НЕТ"
-    wins = user.get("wins", 0)
-    losses = user.get("losses", 0)
-    streak = user.get("daily_streak", 0)
+# ==================== ФИЛЬТРЫ И ВАЛИДАЦИЯ ====================
+
+# Список запрещённых слов (мат и оскорбления)
+FORBIDDEN_WORDS = [
+    'хуй', 'пизда', 'ебать', 'блять', 'сука', 'нахер', 'похуй',
+    'залупа', 'жопа', 'говно', 'пидор', 'пидорас', 'гандон',
+    'fuck', 'shit', 'ass', 'bitch', 'dick', 'cunt', 'whore',
+    'ебан', 'ёбан', 'сосать', 'трахать', 'конча', 'сперм',
+    # Добавь свои слова при необходимости
+]
+
+# Минимальная и максимальная длина полей
+MIN_NAME_LENGTH = 2
+MAX_NAME_LENGTH = 30
+MIN_CITY_LENGTH = 2
+MAX_CITY_LENGTH = 30
+MIN_AGE = 12
+MAX_AGE = 100
+MAX_ABOUT_LENGTH = 200
+
+
+def contains_forbidden_words(text: str) -> bool:
+    """Проверяет, содержит ли текст запрещённые слова"""
+    if not text:
+        return False
     
-    return f"""
-👤 <b>ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ</b>
+    text_lower = text.lower()
+    # Убираем пробелы и символы для обхода фильтра
+    cleaned_text = re.sub(r'[^а-яa-z]', '', text_lower)
+    
+    for word in FORBIDDEN_WORDS:
+        if word in cleaned_text or word in text_lower:
+            return True
+    return False
 
-━━━━━━━━━━━━━━━━━━━━━
-📛 Имя: {user.get("first_name", "Не указано")}
-🆔 ID: {user_id}
-📅 Регистрация: {reg_date}
-━━━━━━━━━━━━━━━━━━━━━
 
-💰 Баланс: {user.get("balance", 0)} NCoins
+def validate_name(name: str) -> tuple[bool, str]:
+    """Валидация имени"""
+    if not name or len(name.strip()) < MIN_NAME_LENGTH:
+        return False, f"❌ Имя должно быть не короче {MIN_NAME_LENGTH} символов"
+    
+    if len(name) > MAX_NAME_LENGTH:
+        return False, f"❌ Имя должно быть не длиннее {MAX_NAME_LENGTH} символов"
+    
+    # Проверка на буквы и пробелы
+    if not re.match(r'^[а-яА-Яa-zA-Z\s\-]+$', name):
+        return False, "❌ Имя может содержать только буквы, пробелы и дефис"
+    
+    if contains_forbidden_words(name):
+        return False, "❌ Имя содержит недопустимые слова"
+    
+    return True, ""
 
-⭐ VIP статус: {vip}
 
-🏆 СТАТИСТИКА:
-├ Побед: {wins}
-├ Поражений: {losses}
-└ Всего игр: {wins + losses}
+def validate_age(age_str: str) -> tuple[bool, int | str]:
+    """Валидация возраста"""
+    try:
+        age = int(age_str.strip())
+    except ValueError:
+        return False, "❌ Возраст должен быть числом"
+    
+    if age < MIN_AGE:
+        return False, f"❌ Минимальный возраст: {MIN_AGE} лет"
+    
+    if age > MAX_AGE:
+        return False, f"❌ Максимальный возраст: {MAX_AGE} лет"
+    
+    return True, age
 
-🔥 Стрик: {streak} дней
 
-━━━━━━━━━━━━━━━━━━━━━
-"""
+def validate_city(city: str) -> tuple[bool, str]:
+    """Валидация города"""
+    if not city or len(city.strip()) < MIN_CITY_LENGTH:
+        return False, f"❌ Название города должно быть не короче {MIN_CITY_LENGTH} символов"
+    
+    if len(city) > MAX_CITY_LENGTH:
+        return False, f"❌ Название города должно быть не длиннее {MAX_CITY_LENGTH} символов"
+    
+    # Проверка на буквы, пробелы и дефис
+    if not re.match(r'^[а-яА-Яa-zA-Z\s\-\.]+$', city):
+        return False, "❌ Город может содержать только буквы, пробелы, точку и дефис"
+    
+    if contains_forbidden_words(city):
+        return False, "❌ Название города содержит недопустимые слова"
+    
+    return True, ""
 
-async def _exec_db_sync(query: str, params: tuple = ()):
-    """Безопасный вызов синхронной БД в асинхронном потоке"""
-    def _run():
-        conn = db._get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute(query, params)
-            conn.commit()
-            return cur.fetchall() if cur.description else None
-        finally:
-            conn.close()
-    return await asyncio.to_thread(_run)
 
+def validate_timezone(tz: str) -> tuple[bool, str]:
+    """Валидация часового пояса"""
+    if not tz:
+        return False, "❌ Укажите часовой пояс"
+    
+    # Проверка формата UTC+/-XX или GMT+/-XX
+    if not re.match(r'^(UTC|GMT)[+-]\d{1,2}(:\d{2})?$', tz.upper()):
+        return False, "❌ Формат: UTC+3, GMT-5, UTC+5:30"
+    
+    return True, tz.upper()
+
+
+def validate_about(about: str) -> tuple[bool, str]:
+    """Валидация текста 'О себе'"""
+    if not about or len(about.strip()) < 5:
+        return False, "❌ Расскажите о себе подробнее (минимум 5 символов)"
+    
+    if len(about) > MAX_ABOUT_LENGTH:
+        return False, f"❌ Текст не должен превышать {MAX_ABOUT_LENGTH} символов"
+    
+    if contains_forbidden_words(about):
+        return False, "❌ Текст содержит недопустимые слова"
+    
+    return True, ""
+
+
+def sanitize_text(text: str) -> str:
+    """Очистка текста от HTML-тегов и лишних символов"""
+    if not text:
+        return ""
+    
+    # Убираем HTML-теги
+    text = re.sub(r'<[^>]+>', '', text)
+    # Убираем множественные пробелы
+    text = re.sub(r'\s+', ' ', text)
+    # Обрезаем пробелы по краям
+    return text.strip()
+
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
+    user = await db.get_user(user_id)
+    if not user:
+        await db.create_user(user_id, username, first_name, START_BALANCE)
+        user = await db.get_user(user_id)
+    return user
+
+
+def _escape_html(text: str | None) -> str:
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ==================== ПРОСМОТР ПРОФИЛЯ ====================
 
 @router.message(Command("profile"))
-@router.callback_query(lambda c: c.data == "profile")
-async def handle_profile(message_or_cb: types.Message | types.CallbackQuery):
-    user_id = message_or_cb.from_user.id
-    user = await db.get_user(user_id)
+async def cmd_profile(message: types.Message):
+    user_id = message.from_user.id
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    profile = await db.get_profile(user_id)
     
-    if not user:
-        response = "❌ Используйте /start для регистрации"
-        kb = main_menu()
-        if isinstance(message_or_cb, types.CallbackQuery):
-            await message_or_cb.message.edit_text(response, reply_markup=kb)
-            await message_or_cb.answer()
-        else:
-            await message_or_cb.answer(response, reply_markup=kb)
-        return
-
-    text = _format_profile_text(user, user_id)
-    kb = _generate_profile_keyboard()
-    
-    if isinstance(message_or_cb, types.CallbackQuery):
-        await message_or_cb.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        await message_or_cb.answer()
-    else:
-        await message_or_cb.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-
-
-@router.callback_query(lambda c: c.data == "view_profile")
-async def view_profile(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    try:
-        rows = await _exec_db_sync(
-            "SELECT full_name, age, city, timezone, about, created_at FROM user_profiles WHERE user_id = ?", 
-            (user_id,)
-        )
-    except Exception as e:
-        logger.error(f"DB error in view_profile: {e}")
-        await callback.answer("❌ Ошибка загрузки данных", show_alert=True)
-        return
-
-    if not rows:
-        await callback.message.edit_text(
-            "❌ <b>АНКЕТА НЕ НАЙДЕНА!</b>\n\nНажмите 'ЗАПОЛНИТЬ АНКЕТУ', чтобы создать её.",
+    if not profile:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ АНКЕТУ", callback_data="fill_profile")],
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+        ])
+        
+        await message.answer(
+            "👤 <b>ПРОФИЛЬ</b>\n\n"
+            "У вас пока нет анкеты.\n"
+            "Хотите заполнить?",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📝 ЗАПОЛНИТЬ", callback_data="fill_profile")],
-                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="profile")]
-            ])
+            reply_markup=keyboard
         )
-        await callback.answer()
         return
+    
+    text = (
+        f"👤 <b>АНКЕТА ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+        f"📛 Имя: <b>{_escape_html(profile.get('full_name', 'Не указано'))}</b>\n"
+        f"🎂 Возраст: <b>{profile.get('age', 'Не указано')}</b>\n"
+        f"🏙️ Город: <b>{_escape_html(profile.get('city', 'Не указано'))}</b>\n"
+        f"🌍 Часовой пояс: <b>{_escape_html(profile.get('timezone', 'Не указано'))}</b>\n"
+        f"📝 О себе: {_escape_html(profile.get('about', 'Не указано'))}\n\n"
+        f"💰 Баланс: <b>{user['balance']}</b> NCoin\n"
+        f"🏆 Побед: {user.get('wins', 0)} | Поражений: {user.get('losses', 0)}"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ ИЗМЕНИТЬ АНКЕТУ", callback_data="fill_profile")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+    
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
-    row = rows[0]
-    created = (row[5] or "Неизвестно")[:10]
+
+@router.callback_query(F.data == "profile")
+async def profile_callback(callback: types.CallbackQuery):
+    await cmd_profile(callback.message)
+    await callback.answer()
+
+
+# ==================== ЗАПОЛНЕНИЕ АНКЕТЫ ====================
+
+@router.callback_query(F.data == "fill_profile")
+async def start_fill_profile(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    # Регистрируем состояние для совместимости с другими модулями
+    profile_states[user_id] = True
+    
+    await state.set_state(ProfileStates.waiting_for_name)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
     
     await callback.message.edit_text(
-        f"👤 <b>ВАША АНКЕТА</b>\n\n"
-        f"📛 Имя: {row[0]}\n"
-        f"📅 Возраст: {row[1]}\n"
-        f"🏙️ Город: {row[2]}\n"
-        f"🕐 Часовой пояс: {row[3]}\n"
-        f"📝 О себе: {row[4]}\n\n"
-        f"📅 Создана: {created}",
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 1 из 5\n\n"
+        f"<b>Как вас зовут?</b>\n"
+        f"├ Мин. длина: {MIN_NAME_LENGTH} символов\n"
+        f"├ Макс. длина: {MAX_NAME_LENGTH} символов\n"
+        f"└ Только буквы\n\n"
+        "Введите ваше имя:",
         parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    name = sanitize_text(message.text)
+    is_valid, error_msg = validate_name(name)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(full_name=name)
+    await state.set_state(ProfileStates.waiting_for_age)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 2 из 5\n\n"
+        f"<b>Сколько вам лет?</b>\n"
+        f"├ От {MIN_AGE} до {MAX_AGE} лет\n"
+        f"└ Только число\n\n"
+        "Введите ваш возраст:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_age)
+async def process_age(message: types.Message, state: FSMContext):
+    is_valid, result = validate_age(message.text)
+    
+    if not is_valid:
+        await message.answer(result + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(age=result)
+    await state.set_state(ProfileStates.waiting_for_city)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 3 из 5\n\n"
+        f"<b>Из какого вы города?</b>\n"
+        f"├ Мин. длина: {MIN_CITY_LENGTH} символов\n"
+        f"└ Только буквы\n\n"
+        "Введите ваш город:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_city)
+async def process_city(message: types.Message, state: FSMContext):
+    city = sanitize_text(message.text)
+    is_valid, error_msg = validate_city(city)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(city=city)
+    await state.set_state(ProfileStates.waiting_for_timezone)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 4 из 5\n\n"
+        "<b>Ваш часовой пояс?</b>\n\n"
+        "Примеры:\n"
+        "• <code>UTC+3</code> (Москва)\n"
+        "• <code>UTC+5</code> (Екатеринбург)\n"
+        "• <code>UTC+7</code> (Новосибирск)\n"
+        "• <code>GMT-5</code> (Нью-Йорк)\n\n"
+        "Введите часовой пояс:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_timezone)
+async def process_timezone(message: types.Message, state: FSMContext):
+    tz = message.text.strip()
+    is_valid, result = validate_timezone(tz)
+    
+    if not is_valid:
+        await message.answer(result + "\n\nПопробуйте ещё раз:")
+        return
+    
+    await state.update_data(timezone=result)
+    await state.set_state(ProfileStates.waiting_for_about)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭️ ПРОПУСТИТЬ", callback_data="skip_about")],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
+    ])
+    
+    await message.answer(
+        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+        "Шаг 5 из 5\n\n"
+        f"<b>Расскажите немного о себе:</b>\n"
+        f"├ Мин. длина: 5 символов\n"
+        f"├ Макс. длина: {MAX_ABOUT_LENGTH} символов\n"
+        f"└ Без нецензурных слов\n\n"
+        "Пример: Люблю игры и программирование",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@router.message(ProfileStates.waiting_for_about)
+async def process_about(message: types.Message, state: FSMContext):
+    about = sanitize_text(message.text)
+    is_valid, error_msg = validate_about(about)
+    
+    if not is_valid:
+        await message.answer(error_msg + "\n\nПопробуйте ещё раз или нажмите 'ПРОПУСТИТЬ':")
+        return
+    
+    await save_profile(message, state, about)
+
+
+@router.callback_query(F.data == "skip_about")
+async def skip_about(callback: types.CallbackQuery, state: FSMContext):
+    await save_profile(callback.message, state, "")
+    await callback.answer()
+
+
+async def save_profile(event: types.Message | types.CallbackQuery, state: FSMContext, about: str):
+    """Сохранение анкеты"""
+    if isinstance(event, types.CallbackQuery):
+        message = event.message
+        user_id = event.from_user.id
+    else:
+        message = event
+        user_id = event.from_user.id
+    
+    data = await state.get_data()
+    
+    full_name = data.get('full_name', '')
+    age = data.get('age', 0)
+    city = data.get('city', '')
+    timezone = data.get('timezone', 'UTC+3')
+    about_text = about if about else data.get('about', '')
+    
+    # Финальная очистка
+    full_name = sanitize_text(full_name)
+    city = sanitize_text(city)
+    about_text = sanitize_text(about_text)
+    
+    await db.save_profile(user_id, full_name, age, city, timezone, about_text)
+    
+    # Убираем состояние
+    profile_states.pop(user_id, None)
+    await state.clear()
+    
+    text = (
+        f"✅ <b>АНКЕТА СОХРАНЕНА!</b>\n\n"
+        f"📛 Имя: <b>{_escape_html(full_name)}</b>\n"
+        f"🎂 Возраст: <b>{age}</b>\n"
+        f"🏙️ Город: <b>{_escape_html(city)}</b>\n"
+        f"🌍 Часовой пояс: <b>{_escape_html(timezone)}</b>\n"
+        f"📝 О себе: {_escape_html(about_text) if about_text else '<i>не указано</i>'}\n\n"
+        f"Используйте /profile для просмотра анкеты"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ В ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+    ])
+    
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "cancel_profile")
+async def cancel_profile(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    profile_states.pop(user_id, None)
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ Заполнение анкеты отменено.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ РЕДАКТИРОВАТЬ", callback_data="fill_profile")],
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="profile")]
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
         ])
     )
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "fill_profile")
-async def fill_profile(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    profile_states[user_id] = {"step": 1}
-    
-    await callback.message.answer(
-        "📝 <b>СОЗДАНИЕ АНКЕТЫ</b>\n\n"
-        "<b>Шаг 1 из 5:</b> Введите ваше имя\n\n"
-        "Пример: <code>Александр</code>\n\n"
-        "❌ Отмена: /cancel_profile",
-        parse_mode=ParseMode.HTML
-    )
-    await callback.answer()
-
-
 @router.message(Command("cancel_profile"))
-async def cancel_profile(message: types.Message):
+async def cmd_cancel_profile(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     profile_states.pop(user_id, None)
+    await state.clear()
     await message.answer("❌ Заполнение анкеты отменено.")
-
-
-# ⚠️ ВАЖНО: этот хендлер должен быть ПОСЛЕДНИМ в файле/роутере
-@router.message()
-async def process_profile_step(message: types.Message):
-    user_id = message.from_user.id
-    
-    # Игнорируем не-текст и команды
-    if not message.text or message.text.startswith("/"):
-        return
-        
-    if user_id not in profile_states:
-        return
-
-    state = profile_states[user_id]
-    step = state.get("step", 1)
-
-    if step == 1:
-        state["full_name"] = message.text.strip()
-        state["step"] = 2
-        await message.answer("📝 <b>Шаг 2 из 5</b>\n\nВведите ваш возраст (число):\n\nПример: <code>25</code>", parse_mode=ParseMode.HTML)
-
-    elif step == 2:
-        try:
-            age = int(message.text.strip())
-            if not (1 <= age <= 150):
-                raise ValueError
-            state["age"] = age
-            state["step"] = 3
-            await message.answer("📝 <b>Шаг 3 из 5</b>\n\nВведите ваш город:\n\nПример: <code>Москва</code>", parse_mode=ParseMode.HTML)
-        except ValueError:
-            await message.answer("❌ Введите корректный возраст (число от 1 до 150)")
-
-    elif step == 3:
-        state["city"] = message.text.strip()
-        state["step"] = 4
-        await message.answer("📝 <b>Шаг 4 из 5</b>\n\nВведите ваш часовой пояс (UTC):\n\nПример: <code>UTC+3</code> или <code>+3</code>", parse_mode=ParseMode.HTML)
-
-    elif step == 4:
-        state["timezone"] = message.text.strip()
-        state["step"] = 5
-        await message.answer("📝 <b>Шаг 5 из 5</b>\n\nРасскажите немного о себе:\n\nПример: <code>Люблю игры и программирование</code>", parse_mode=ParseMode.HTML)
-
-    elif step == 5:
-        state["about"] = message.text.strip()
-        try:
-            await _exec_db_sync(
-                """INSERT OR REPLACE INTO user_profiles 
-                   (user_id, full_name, age, city, timezone, about, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 
-                           COALESCE((SELECT created_at FROM user_profiles WHERE user_id = ?), ?), ?)""",
-                (user_id, state["full_name"], state["age"], state["city"], 
-                 state["timezone"], state["about"], user_id, datetime.now().isoformat(), datetime.now().isoformat())
-            )
-            await message.answer(
-                "✅ <b>АНКЕТА СОХРАНЕНА!</b>\n\n"
-                f"📛 Имя: {state['full_name']}\n"
-                f"📅 Возраст: {state['age']}\n"
-                f"🏙️ Город: {state['city']}\n"
-                f"🕐 Часовой пояс: {state['timezone']}\n"
-                f"📝 О себе: {state['about']}\n\n"
-                "Используйте /profile для просмотра анкеты",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Failed to save profile for {user_id}: {e}")
-            await message.answer("❌ Произошла ошибка при сохранении. Попробуйте позже.")
-        finally:
-            del profile_states[user_id]
-
