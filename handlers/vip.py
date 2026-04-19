@@ -45,7 +45,7 @@ def get_vip_privileges(vip_level: int) -> dict:
 
 
 async def update_user_vip(user_id: int, vip_level: int, days: int = 30):
-    """Обновить VIP статус пользователя (асинхронно)"""
+    """Обновить VIP статус пользователя"""
     def _sync_update():
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -66,13 +66,13 @@ async def check_achievement_vip(user_id: int, wins: int):
     vip_level = 0
     
     if wins >= 200:
-        vip_level = 4  # Платина
+        vip_level = 4
     elif wins >= 100:
-        vip_level = 3  # Золото
+        vip_level = 3
     elif wins >= 50:
-        vip_level = 2  # Серебро
+        vip_level = 2
     elif wins >= 10:
-        vip_level = 1  # Бронза
+        vip_level = 1
     
     if vip_level > 0:
         user = await db.get_user(user_id)
@@ -92,19 +92,18 @@ async def cmd_vip(message: types.Message):
     """Информация о VIP статусе"""
     user_id = message.from_user.id
     
-    # Авторегистрация
     user = await get_or_create_user(
         user_id,
         message.from_user.username,
         message.from_user.first_name
     )
     
-    vip_level = user.get("vip_level", 0)
+    vip_level = user.get("vip_level", 0) or 0
     vip_until = user.get("vip_until", "")
-    balance = user.get("balance", 0)
+    # 🔥 ПРИНУДИТЕЛЬНО ПОЛУЧАЕМ СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
     
-    # Проверяем достижения
-    wins = user.get("wins", 0)
+    wins = user.get("wins", 0) or 0
     achievement_vip = await check_achievement_vip(user_id, wins)
     if achievement_vip:
         vip_level = achievement_vip
@@ -113,7 +112,6 @@ async def cmd_vip(message: types.Message):
     if vip_level > 0:
         privileges = get_vip_privileges(vip_level)
         
-        # Форматируем дату
         try:
             until_date = datetime.fromisoformat(vip_until).strftime("%d.%m.%Y") if vip_until else "Бессрочно"
         except:
@@ -125,22 +123,18 @@ async def cmd_vip(message: types.Message):
 ━━━━━━━━━━━━━━━━━━━━━
 
 📛 Уровень: *{privileges['name']}* (Уровень {vip_level})
-💰 Баланс: {balance} NCoins
+💰 Баланс: *{balance}* NCoins
 📅 Действует до: {until_date}
 
 ━━━━━━━━━━━━━━━━━━━━━
 
 *✨ ВАШИ ПРЕИМУЩЕСТВА:*
 
-├ 🎮 +{privileges['win_bonus']}% к выигрышам в играх
-├ 🎁 +{privileges['daily_bonus']} NCoins к ежедневному бонусу
-├ 👑 Эксклюзивный статус в чате
+├ 🎮 +{privileges['win_bonus']}% к выигрышам
+├ 🎁 +{privileges['daily_bonus']} NCoins к бонусу
+├ 👑 Статус в чате
 ├ 💎 Доступ к VIP-комнатам
 └ ⭐ Приоритетная поддержка
-
-━━━━━━━━━━━━━━━━━━━━━
-
-💡 *Продлите VIP сейчас и получите скидку 20%!*
 """
     else:
         text = f"""
@@ -196,7 +190,6 @@ async def cmd_vip(message: types.Message):
 @router.callback_query(F.data == "vip")
 @router.callback_query(F.data == "vip_menu")
 async def vip_callback(callback: types.CallbackQuery):
-    """Обработчик кнопки VIP из главного меню"""
     await cmd_vip(callback.message)
     await callback.answer()
 
@@ -208,17 +201,16 @@ async def buy_vip_menu(callback: types.CallbackQuery):
     """Меню покупки VIP"""
     user_id = callback.from_user.id
     
-    # Авторегистрация
     user = await get_or_create_user(
         user_id,
         callback.from_user.username,
         callback.from_user.first_name
     )
     
-    balance = user['balance']
-    current_vip = user.get('vip_level', 0)
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    current_vip = user.get('vip_level', 0) or 0
     
-    # Создаем кнопки с ценами
     buttons = []
     for level, price in VIP_PRICES.items():
         name = VIP_NAMES[level]['name']
@@ -240,8 +232,7 @@ async def buy_vip_menu(callback: types.CallbackQuery):
         f"💰 Ваш баланс: *{balance} NCoins*\n"
         f"⭐ Текущий VIP: *{current_vip} уровень*\n\n"
         f"Выберите уровень VIP:\n\n"
-        f"💡 *Совет:* VIP действует 30 дней\n"
-        f"Бонусы складываются с ежедневными!",
+        f"💡 *Совет:* VIP действует 30 дней",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
@@ -253,49 +244,42 @@ async def buy_vip(callback: types.CallbackQuery):
     """Покупка VIP уровня"""
     user_id = callback.from_user.id
     level = int(callback.data.split("_")[2])
-    
     price = VIP_PRICES.get(level, 500)
     
-    # Авторегистрация
     user = await get_or_create_user(
         user_id,
         callback.from_user.username,
         callback.from_user.first_name
     )
     
-    current_vip = user.get('vip_level', 0)
+    current_vip = user.get('vip_level', 0) or 0
     
-    # Проверяем, не куплен ли уже этот уровень
     if level <= current_vip:
-        await callback.answer(
-            f"❌ У вас уже есть VIP {current_vip} уровня или выше!",
-            show_alert=True
-        )
+        await callback.answer(f"❌ У вас уже есть VIP {current_vip} уровня!", show_alert=True)
         return
     
-    # Проверяем баланс
-    if user["balance"] < price:
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
+    
+    if balance < price:
         await callback.answer(
-            f"❌ Недостаточно средств!\n"
-            f"Нужно: {price} NCoins\n"
-            f"Баланс: {user['balance']} NCoins",
+            f"❌ Недостаточно средств!\nНужно: {price} NCoins\nБаланс: {balance} NCoins",
             show_alert=True
         )
         return
     
     try:
-        # Атомарная операция: списываем монеты и обновляем VIP
         await db.update_balance(user_id, -price, f"Покупка VIP уровня {level}")
         await update_user_vip(user_id, level, 30)
         
         privileges = get_vip_privileges(level)
-        new_user = await db.get_user(user_id)
+        new_balance = await db.get_balance(user_id)
         
         await callback.message.edit_text(
             f"🎉 *ПОЗДРАВЛЯЕМ С ПОКУПКОЙ VIP!*\n\n"
             f"{privileges['icon']} Новый уровень: *{privileges['name']}*\n"
             f"💰 Списано: *{price} NCoins*\n"
-            f"💎 Новый баланс: *{new_user['balance']} NCoins*\n\n"
+            f"💎 Новый баланс: *{new_balance} NCoins*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✨ *НОВЫЕ ПРЕИМУЩЕСТВА:*\n"
             f"├ 🎮 +{privileges['win_bonus']}% к выигрышам\n"
@@ -303,18 +287,17 @@ async def buy_vip(callback: types.CallbackQuery):
             f"├ 👑 Статус в чате\n"
             f"└ ⭐ Приоритетная поддержка\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📅 Статус действует *30 дней*\n"
-            f"💡 Продлите до истечения срока для скидки 20%!",
+            f"📅 Статус действует *30 дней*",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ ПОНЯТНО", callback_data="vip")]
             ])
         )
-        logger.info(f"User {user_id} purchased VIP level {level} for {price} NCoins")
+        logger.info(f"User {user_id} purchased VIP level {level}")
         
     except Exception as e:
-        logger.error(f"VIP purchase failed for {user_id}: {e}")
-        await callback.answer("❌ Ошибка при покупке. Попробуйте позже.", show_alert=True)
+        logger.error(f"VIP purchase failed: {e}")
+        await callback.answer("❌ Ошибка при покупке", show_alert=True)
     
     await callback.answer()
 
@@ -326,20 +309,19 @@ async def vip_achievements(callback: types.CallbackQuery):
     """Достижения для получения VIP бесплатно"""
     user_id = callback.from_user.id
     
-    # Авторегистрация
     user = await get_or_create_user(
         user_id,
         callback.from_user.username,
         callback.from_user.first_name
     )
     
-    wins = user.get("wins", 0)
-    current_vip = user.get("vip_level", 0)
+    wins = user.get("wins", 0) or 0
+    current_vip = user.get("vip_level", 0) or 0
+    # 🔥 СВЕЖИЙ БАЛАНС
+    balance = await db.get_balance(user_id)
     
-    # Проверяем достижения и выдаем VIP если нужно
     awarded_vip = await check_achievement_vip(user_id, wins)
     
-    # Прогресс до следующего уровня
     next_level = None
     next_wins = 0
     progress = 0
@@ -347,7 +329,7 @@ async def vip_achievements(callback: types.CallbackQuery):
     if wins < 10:
         next_level = "🥉 Бронза"
         next_wins = 10
-        progress = int((wins / 10) * 100)
+        progress = int((wins / 10) * 100) if wins > 0 else 0
     elif wins < 50:
         next_level = "🥈 Серебро"
         next_wins = 50
@@ -363,7 +345,6 @@ async def vip_achievements(callback: types.CallbackQuery):
     else:
         progress = 100
     
-    # Прогресс-бар
     bar_length = 10
     filled = int(bar_length * progress / 100)
     progress_bar = "█" * filled + "░" * (bar_length - filled)
@@ -375,19 +356,20 @@ async def vip_achievements(callback: types.CallbackQuery):
 
 📊 *ВАШ ПРОГРЕСС:*
 
+💰 Баланс: *{balance} NCoins*
 🏆 Побед: *{wins}*
 ⭐ Текущий VIP: *{current_vip} уровень*
 
 """
     
     if wins >= 200:
-        text += "🎉 *ВЫ ДОСТИГЛИ ПЛАТИНЫ!*\n└ VIP статус активирован!\n\n"
+        text += "🎉 *ВЫ ДОСТИГЛИ ПЛАТИНЫ!*\n\n"
     elif wins >= 100:
-        text += "🎉 *ВЫ ДОСТИГЛИ ЗОЛОТА!*\n└ VIP статус активирован!\n\n"
+        text += "🎉 *ВЫ ДОСТИГЛИ ЗОЛОТА!*\n\n"
     elif wins >= 50:
-        text += "🎉 *ВЫ ДОСТИГЛИ СЕРЕБРА!*\n└ VIP статус активирован!\n\n"
+        text += "🎉 *ВЫ ДОСТИГЛИ СЕРЕБРА!*\n\n"
     elif wins >= 10:
-        text += "🎉 *ВЫ ДОСТИГЛИ БРОНЗЫ!*\n└ VIP статус активирован!\n\n"
+        text += "🎉 *ВЫ ДОСТИГЛИ БРОНЗЫ!*\n\n"
     
     if awarded_vip:
         text += f"✨ *Только что получен VIP {awarded_vip} уровня!*\n\n"
