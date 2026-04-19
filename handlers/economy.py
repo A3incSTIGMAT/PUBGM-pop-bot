@@ -87,9 +87,10 @@ async def balance_callback(callback: types.CallbackQuery):
 
 @router.message(Command("daily"))
 async def cmd_daily(message: types.Message):
+    """Обработка команды /daily — полностью асинхронная версия"""
     user_id = message.from_user.id
     
-    # Авторегистрация
+    # 1. Авторегистрация пользователя
     user = await get_or_create_user(
         user_id,
         message.from_user.username,
@@ -97,120 +98,65 @@ async def cmd_daily(message: types.Message):
     )
     
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # 🔥 ПРОВЕРКА НА NULL
     last_daily = user.get("last_daily")
     daily_streak = user.get("daily_streak") or 0
     
-    # Если last_daily None или пустая строка
-    if not last_daily:
-        last_daily = None
-    
-    # Проверяем, получал ли уже сегодня
+    # 2. Проверка: получал ли уже сегодня
     if last_daily == today_str:
         await message.answer(
             f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
             f"🔥 Стрик: <b>{daily_streak}</b> дней\n"
-            f"⏰ Следующий бонус: <b>завтра</b>",
+            f"⏰ Следующий бонус: <b>завтра после 00:00</b>",
             parse_mode=ParseMode.HTML
         )
         return
     
     try:
-        # Расчёт стрика
+        # 3. Расчёт стрика
         streak = daily_streak
-        
         if last_daily:
             try:
-                # Парсим дату из строки
                 last_date = datetime.strptime(last_daily, "%Y-%m-%d").date()
                 yesterday = datetime.now().date() - timedelta(days=1)
                 
                 if last_date == yesterday:
                     streak += 1  # Вчера получал — увеличиваем
-                elif last_date < yesterday:
-                    streak = 1   # Пропустил день — сбрасываем
                 else:
-                    streak = 1   # Будущая дата (ошибка) — сбрасываем
+                    streak = 1   # Пропустил день или ошибка — сбрасываем
             except Exception as e:
                 logger.warning(f"Error parsing last_daily '{last_daily}': {e}")
                 streak = 1
         else:
-            # Первый раз
-            streak = 1
+            streak = 1  # Первый раз
         
-        # Расчёт бонуса
+        # 4. Расчёт суммы бонуса
         base_bonus = 100 + (streak * 50)
         vip_level = user.get("vip_level") or 0
         vip_bonus = vip_level * 50 if vip_level > 0 else 0
         total_bonus = base_bonus + vip_bonus
         
-        # АТОМАРНОЕ ОБНОВЛЕНИЕ ВСЕГО В ОДНОЙ ТРАНЗАКЦИИ
-        def _sync_update_all():
-            conn = db._get_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute("BEGIN TRANSACTION")
-                
-                # Проверяем текущий баланс
-                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-                row = cursor.fetchone()
-                if not row:
-                    raise ValueError("User not found")
-                
-                old_balance = row[0]
-                new_balance = old_balance + total_bonus
-                
-                # Обновляем баланс
-                cursor.execute(
-                    "UPDATE users SET balance = ? WHERE user_id = ?",
-                    (new_balance, user_id)
-                )
-                
-                # Обновляем стрик и дату
-                cursor.execute(
-                    "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-                    (streak, today_str, user_id)
-                )
-                
-                # Записываем транзакцию
-                cursor.execute("""
-                    INSERT INTO transactions (from_id, to_id, amount, reason, date)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, user_id, total_bonus, f"Ежедневный бонус (стрик: {streak})", datetime.now().isoformat()))
-                
-                conn.commit()
-                return new_balance
-                
-            except Exception as e:
-                conn.rollback()
-                raise e
-            finally:
-                conn.close()
-        
-        new_balance = await asyncio.to_thread(_sync_update_all)
-        
-        # Эмодзи для стрика
-        if streak >= 30:
-            streak_emoji = "🔥🔥🔥"
-        elif streak >= 7:
-            streak_emoji = "🔥🔥"
-        elif streak >= 3:
-            streak_emoji = "🔥"
-        else:
-            streak_emoji = "⭐"
-        
-        # Завтрашний бонус
-        tomorrow_total = 100 + ((streak + 1) * 50) + vip_bonus
-        
-        text = (
-            f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
-            f"💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
+        # 5. 🔥 АТОМАРНОЕ ОБНОВЛЕНИЕ ЧЕРЕЗ НОВЫЙ МЕТОД БД
+        result = await db.claim_daily_bonus(
+            user_id=user_id,
+            bonus_amount=total_bonus,
+            streak=streak,
+            today_str=today_str,
+            reason=f"Ежедневный бонус (стрик: {streak})"
         )
         
+        if not result.get('success'):
+            raise RuntimeError("DB claim_daily_bonus failed")
+        
+        new_balance = result['new_balance']
+        
+        # 6. Формирование красивого ответа
+        streak_emoji = "🔥🔥🔥" if streak >= 30 else "🔥🔥" if streak >= 7 else "🔥" if streak >= 3 else "⭐"
+        tomorrow_total = 100 + ((streak + 1) * 50) + vip_bonus
+        
+        text = f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
+        
         if vip_bonus > 0:
-            text += f"   ├ Базовый: {base_bonus} NCoin\n"
-            text += f"   └ VIP бонус: +{vip_bonus} NCoin\n"
+            text += f"   ├ Базовый: {base_bonus} NCoin\n   └ VIP бонус: +{vip_bonus} NCoin\n"
         
         text += (
             f"\n{streak_emoji} Стрик: <b>{streak}</b> дней\n"
@@ -226,6 +172,7 @@ async def cmd_daily(message: types.Message):
         logger.error(f"❌ DAILY FAILED for {user_id}: {e}", exc_info=True)
         await message.answer(
             "❌ <b>Произошла ошибка при начислении бонуса</b>\n\n"
+            f"<code>{type(e).__name__}: {e}</code>\n\n"
             "Попробуйте позже или сообщите администратору.",
             parse_mode=ParseMode.HTML
         )
@@ -514,3 +461,4 @@ async def transfer_menu_callback(callback: types.CallbackQuery):
 async def donate_menu_callback(callback: types.CallbackQuery):
     await cmd_donate(callback.message)
     await callback.answer()
+
