@@ -1,8 +1,9 @@
-"""
-Модуль навигации, старта, помощи, управления данными
-ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
-ДОНАТ ПЕРЕАДРЕСОВАН В economy.py
-"""
+# ============================================
+# ФАЙЛ: handlers/start.py
+# ОПИСАНИЕ: Модуль навигации, старта, помощи
+# ИСПРАВЛЕНО: Статистика побед из xo_stats вместо users.wins/losses
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ============================================
 
 import asyncio
 import logging
@@ -70,13 +71,16 @@ async def get_or_create_user(user_id: int, username: str = None, first_name: str
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
+    if message is None:
+        return
+        
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     chat_id = message.chat.id
     
     # Рефералка
-    args = message.text.split()
+    args = message.text.split() if message.text else []
     if len(args) > 1 and args[1].startswith("ref_"):
         parts = args[1].split("_")
         if len(parts) == 3:
@@ -100,7 +104,7 @@ async def cmd_start(message: types.Message):
             "Я — <b>NEXUS Chat Manager</b> — твой личный помощник в чате!\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<b>🎯 ЧТО Я УМЕЮ:</b>\n\n"
-            "├ 🎮 <b>Игры</b> — слоты, рулетка, КНБ, дуэли\n"
+            "├ 🎮 <b>Крестики-нолики</b> — играй с ботом и друзьями\n"
             "├ 💰 <b>Экономика</b> — баланс, переводы, бонусы\n"
             "├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
             "├ 🏷️ <b>Умные теги</b> — поиск игроков по категориям\n"
@@ -130,15 +134,22 @@ async def cmd_start(message: types.Message):
         )
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=60)
     else:
-        # 🔥 СВЕЖИЙ БАЛАНС
+        # 🔥 ПОЛУЧАЕМ СВЕЖИЙ БАЛАНС И СТАТИСТИКУ XO
         balance = await db.get_balance(user_id)
+        xo_stats = await db.get_user_stats(user_id)
+        
+        xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
+        xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
+        vip_level = user.get('vip_level', 0) or 0
+        daily_streak = user.get('daily_streak', 0) or 0
         
         msg = await message.answer(
             f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
             f"👋 С возвращением, <b>{_escape_html(first_name)}</b>!\n"
             f"💰 Баланс: <b>{balance}</b> NCoin\n"
-            f"⭐ VIP: {'✅' if user.get('vip_level', 0) > 0 else '❌'}\n"
-            f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n\n"
+            f"⭐ VIP: {'✅' if vip_level > 0 else '❌'}\n"
+            f"🔥 Daily стрик: <b>{daily_streak}</b> дней\n"
+            f"🎮 XO: <b>{xo_wins}</b> побед ({xo_games} игр)\n\n"
             "👇 Выберите действие:",
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu(is_admin=is_admin)
@@ -146,10 +157,13 @@ async def cmd_start(message: types.Message):
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=30)
 
 
-# ==================== КОМАНДА /help (ОБНОВЛЁННАЯ) ====================
+# ==================== КОМАНДА /help ====================
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
+    if message is None:
+        return
+        
     help_text = (
         "🤖 <b>NEXUS CHAT MANAGER — ПОМОЩЬ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -168,11 +182,11 @@ async def cmd_help(message: types.Message):
         "<code>/balance</code> — проверить баланс\n"
         "<code>/help</code> — эта помощь\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>🎮 ИГРЫ (через меню):</b>\n"
-        "├ Слот-машина\n"
-        "├ Рулетка\n"
-        "├ Камень-ножницы-бумага\n"
-        "└ Дуэли с другими игроками\n\n"
+        "<b>🎮 КРЕСТИКИ-НОЛИКИ (через меню):</b>\n"
+        "├ Игра с ботом (3 уровня сложности)\n"
+        "├ Игра с игроком (дуэли)\n"
+        "├ Ставки на NCoin\n"
+        "└ Статистика и топы\n\n"
         "<b>👤 ПРОФИЛЬ (через меню):</b>\n"
         "├ Анкета\n"
         "├ VIP статус\n"
@@ -205,6 +219,9 @@ async def cmd_help(message: types.Message):
 
 @router.message(Command("privacy"))
 async def cmd_privacy(message: types.Message):
+    if message is None:
+        return
+        
     privacy_text = (
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -233,6 +250,9 @@ async def cmd_privacy(message: types.Message):
 
 @router.message(Command("delete_my_data"))
 async def cmd_delete_my_data(message: types.Message):
+    if message is None:
+        return
+        
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ ДА, УДАЛИТЬ", callback_data="confirm_delete"),
          InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_delete")]
@@ -257,6 +277,9 @@ async def cmd_delete_my_data(message: types.Message):
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
@@ -266,15 +289,22 @@ async def back_to_menu_callback(callback: types.CallbackQuery):
     
     await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
-    # 🔥 СВЕЖИЙ БАЛАНС
+    # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
     balance = await db.get_balance(user_id)
     user = await db.get_user(user_id)
+    xo_stats = await db.get_user_stats(user_id)
+    
+    xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
+    xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
+    vip_level = user.get('vip_level', 0) if user else 0
+    daily_streak = user.get('daily_streak', 0) if user else 0
     
     await callback.message.edit_text(
         f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
         f"💰 Баланс: <b>{balance}</b> NCoin\n"
-        f"⭐ VIP: {'✅' if user.get('vip_level', 0) > 0 else '❌'}\n"
-        f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n\n"
+        f"⭐ VIP: {'✅' if vip_level > 0 else '❌'}\n"
+        f"🔥 Daily стрик: <b>{daily_streak}</b> дней\n"
+        f"🎮 XO: <b>{xo_wins}</b> побед ({xo_games} игр)\n\n"
         f"👇 Выберите категорию:",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(is_admin=is_admin)
@@ -284,6 +314,9 @@ async def back_to_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
@@ -304,8 +337,11 @@ async def admin_panel_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "games_category")
 async def games_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
-        "🎮 <b>ИГРЫ NEXUS</b>\n\nВыберите игру:",
+        "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n\nВыберите действие:",
         parse_mode=ParseMode.HTML,
         reply_markup=games_category_menu()
     )
@@ -314,6 +350,9 @@ async def games_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "profile_category")
 async def profile_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "👤 <b>ПРОФИЛЬ</b>\n\nВыберите действие:",
         parse_mode=ParseMode.HTML,
@@ -324,6 +363,9 @@ async def profile_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "finance_category")
 async def finance_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "💰 <b>ФИНАНСЫ</b>\n\nУправление балансом:",
         parse_mode=ParseMode.HTML,
@@ -334,6 +376,9 @@ async def finance_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "social_category")
 async def social_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "👥 <b>СОЦИАЛКА</b>\n\nОтношения, группы, РП:",
         parse_mode=ParseMode.HTML,
@@ -344,6 +389,9 @@ async def social_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "notifications_category")
 async def notifications_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "📢 <b>ОПОВЕЩЕНИЯ</b>\n\nУправление тегами:",
         parse_mode=ParseMode.HTML,
@@ -354,6 +402,9 @@ async def notifications_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "settings_category")
 async def settings_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "⚙️ <b>НАСТРОЙКИ</b>\n\nПомощь и информация:",
         parse_mode=ParseMode.HTML,
@@ -366,6 +417,9 @@ async def settings_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "feedback_menu")
 async def feedback_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback is None or callback.message is None:
+        return
+        
     await state.set_state(FeedbackState.waiting_for_message)
     
     msg = await callback.message.answer(
@@ -384,6 +438,9 @@ async def feedback_menu_callback(callback: types.CallbackQuery, state: FSMContex
 
 @router.message(Command("cancel"))
 async def cancel_feedback_command(message: types.Message, state: FSMContext):
+    if message is None:
+        return
+        
     current_state = await state.get_state()
     
     if current_state == FeedbackState.waiting_for_message:
@@ -401,6 +458,9 @@ async def cancel_feedback_command(message: types.Message, state: FSMContext):
 
 @router.message(FeedbackState.waiting_for_message)
 async def process_feedback_message(message: types.Message, state: FSMContext):
+    if message is None:
+        return
+        
     data = await state.get_data()
     
     if prompt_id := data.get('prompt_msg_id'):
@@ -409,7 +469,7 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
         except:
             pass
     
-    feedback_text = message.text.strip()
+    feedback_text = message.text.strip() if message.text else ""
     
     if feedback_text == '/cancel':
         await state.clear()
@@ -423,6 +483,8 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
     
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
+            if admin_id is None:
+                continue
             try:
                 await message.bot.send_message(
                     admin_id,
@@ -447,10 +509,15 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "confirm_delete")
 async def confirm_delete(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     user_id = callback.from_user.id
     
     def _delete_user_data():
         conn = db._get_connection()
+        if conn is None:
+            return
         cursor = conn.cursor()
         try:
             cursor.execute("BEGIN TRANSACTION")
@@ -461,7 +528,9 @@ async def confirm_delete(callback: types.CallbackQuery):
             cursor.execute("DELETE FROM ref_links WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM ref_invites WHERE inviter_id = ? OR invited_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM user_ranks WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM user_game_stats WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM xo_stats WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM user_stats WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM user_economy_stats WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM relationships WHERE user1_id = ? OR user2_id = ?", (user_id, user_id))
             cursor.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM custom_rp WHERE user_id = ?", (user_id,))
@@ -486,12 +555,18 @@ async def confirm_delete(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "cancel_delete")
 async def cancel_delete(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text("❌ Удаление отменено", reply_markup=back_button())
     await callback.answer()
 
 
 @router.callback_query(F.data == "privacy")
 async def privacy_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
         "📌 <b>Собираемые данные:</b>\n"
@@ -505,6 +580,9 @@ async def privacy_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     await cmd_help(callback.message)
     await callback.answer()
 
@@ -513,14 +591,18 @@ async def help_callback(callback: types.CallbackQuery):
 
 @router.message(Command("donate"))
 async def cmd_donate_proxy(message: types.Message):
-    """Прокси на новый донат из economy.py"""
+    if message is None:
+        return
+        
     from handlers.economy import cmd_donate as economy_donate
     await economy_donate(message)
 
 
 @router.callback_query(F.data == "donate")
 async def donate_callback(callback: types.CallbackQuery):
-    """Кнопка ПОДДЕРЖАТЬ — переадресация в economy.py"""
+    if callback is None:
+        return
+        
     from handlers.economy import cmd_donate as economy_donate
     await economy_donate(callback.message)
     await callback.answer()
@@ -530,12 +612,18 @@ async def donate_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "my_stats")
 async def my_stats_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.profile import my_stats_callback as target
     await target(callback)
 
 
 @router.callback_query(F.data == "rank_menu")
 async def rank_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.ranks import cmd_rank
     await cmd_rank(callback.message)
     await callback.answer()
@@ -543,13 +631,20 @@ async def rank_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "private_games")
 async def private_games_callback(callback: types.CallbackQuery):
-    from handlers.games_private import cmd_private_games
-    await cmd_private_games(callback.message)
+    if callback is None:
+        return
+        
+    # Перенаправляем на крестики-нолики
+    from handlers.tictactoe import cmd_xo
+    await cmd_xo(callback.message)
     await callback.answer()
 
 
 @router.callback_query(F.data == "top_chats")
 async def top_chats_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.rating import cmd_top_chats
     await cmd_top_chats(callback.message)
     await callback.answer()
@@ -557,6 +652,9 @@ async def top_chats_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "relationships_menu")
 async def relationships_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.rp_commands import cmd_my_relationships
     await cmd_my_relationships(callback.message)
     await callback.answer()
@@ -564,6 +662,9 @@ async def relationships_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "groups_menu")
 async def groups_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.rp_commands import cmd_my_groups
     await cmd_my_groups(callback.message)
     await callback.answer()
@@ -571,6 +672,9 @@ async def groups_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "rp_menu")
 async def rp_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.rp_commands import cmd_my_rp
     await cmd_my_rp(callback.message)
     await callback.answer()
@@ -578,6 +682,9 @@ async def rp_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "my_tags_menu")
 async def my_tags_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.tag_user import cmd_mytags
     try:
         await cmd_mytags(callback.message)
@@ -593,6 +700,9 @@ async def my_tags_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "start_all")
 async def start_all_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.tag import cmd_all
     await cmd_all(callback.message)
     await callback.answer()
@@ -600,6 +710,9 @@ async def start_all_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "my_ref")
 async def my_ref_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.referral import my_referral_link
     await my_referral_link(callback.message)
     await callback.answer()
@@ -607,5 +720,8 @@ async def my_ref_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "ref_menu")
 async def ref_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
+        
     from handlers.referral import ref_menu_callback
     await ref_menu_callback(callback)
