@@ -1,7 +1,8 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер с трекингом слов для аналитики
+# ОПИСАНИЕ: Умный парсер команд NEXUS Bot
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# АВТОРЕГИСТРАЦИЯ: При любом взаимодействии
 # ============================================
 
 import re
@@ -11,7 +12,7 @@ import hashlib
 import asyncio
 import html
 import random
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -20,6 +21,14 @@ from config import START_BALANCE
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# Глобальный экземпляр бота
+bot: Bot = None
+
+def set_bot(bot_instance: Bot):
+    """Установка экземпляра бота"""
+    global bot
+    bot = bot_instance
 
 # Хранилище состояний анкеты
 profile_states = {}
@@ -56,17 +65,20 @@ RP_ACTIONS = {
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
+async def ensure_user_exists(user_id: int, username: str = None, first_name: str = None) -> dict:
+    """Гарантирует, что пользователь существует в БД"""
     if user_id is None:
         return {}
     user = await db.get_user(user_id)
     if not user:
         await db.create_user(user_id, username, first_name, START_BALANCE)
         user = await db.get_user(user_id)
+        logger.info(f"Auto-registered user {user_id} in smart_commands")
     return user or {}
 
 
 def extract_username(text: str) -> str:
+    """Извлечь username из текста"""
     if not text:
         return None
     match = re.search(r'@([a-zA-Z0-9_]+)', text)
@@ -74,16 +86,21 @@ def extract_username(text: str) -> str:
 
 
 def extract_number(text: str) -> int:
+    """Извлечь число из текста"""
     if not text:
         return 0
     match = re.search(r'\b\d+\b', text)
     return int(match.group()) if match else 0
 
 
-def format_number(num: int) -> str:
+def format_number(num: any) -> str:
+    """Форматирование числа"""
     if num is None:
         return "0"
-    return f"{num:,}".replace(",", " ")
+    try:
+        return f"{int(num):,}".replace(",", " ")
+    except (ValueError, TypeError):
+        return "0"
 
 
 # ==================== РП ДЕЙСТВИЯ ====================
@@ -104,25 +121,42 @@ RP_TEXTS = {
 
 
 async def send_rp_action(message: types.Message, from_id: int, target_id: int, target_user: dict, action: str):
+    """Отправить РП действие"""
     from_user = await db.get_user(from_id)
     from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
     target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
     
     texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-    text = random.choice(texts).format(from_name=html.escape(from_name), target_name=html.escape(target_name))
+    text = random.choice(texts).format(
+        from_name=html.escape(from_name),
+        target_name=html.escape(target_name)
+    )
     
     await message.answer(text)
 
 
 async def challenge_xo(message: types.Message, from_id: int, target_id: int, target_user: dict, bet: int = 0):
+    """Вызвать на крестики-нолики"""
     if from_id == target_id:
         await message.answer("❌ Нельзя вызвать самого себя!")
+        return
+    
+    # 🔥 АВТОРЕГИСТРАЦИЯ ВЫЗЫВАЮЩЕГО
+    await ensure_user_exists(from_id, message.from_user.username, message.from_user.first_name)
+    
+    # Проверяем, что цель существует
+    if not target_user or not target_user.get("user_id"):
+        await message.answer(
+            f"❌ <b>Пользователь не активировал бота!</b>\n\n"
+            f"Попросите его написать /start.",
+            parse_mode=ParseMode.HTML
+        )
         return
     
     if bet > 0:
         balance = await db.get_balance(from_id)
         if balance < bet:
-            await message.answer(f"❌ Недостаточно средств! Баланс: {format_number(balance)} NCoin")
+            await message.answer(f"❌ У вас недостаточно средств! Баланс: {format_number(balance)} NCoin")
             return
     
     game_id = f"xo_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
@@ -132,6 +166,14 @@ async def challenge_xo(message: types.Message, from_id: int, target_id: int, tar
     except ImportError:
         await message.answer("❌ Игра временно недоступна")
         return
+    
+    # Проверяем, нет ли уже активного вызова
+    for gid, game in active_games.items():
+        if game.get("pending", False):
+            if (game.get("player_x") == from_id and game.get("player_o") == target_id) or \
+               (game.get("player_x") == target_id and game.get("player_o") == from_id):
+                await message.answer("❌ У вас уже есть активный вызов! Дождитесь ответа.")
+                return
     
     active_games[game_id] = {
         "type": "pvp",
@@ -144,6 +186,8 @@ async def challenge_xo(message: types.Message, from_id: int, target_id: int, tar
         "created_at": time.time(),
         "last_move": time.time(),
         "pending": True,
+        "challenger_name": html.escape(message.from_user.first_name or "Игрок"),
+        "challenged_name": html.escape(target_user.get("first_name") or "Игрок"),
     }
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -156,19 +200,25 @@ async def challenge_xo(message: types.Message, from_id: int, target_id: int, tar
     target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
     target_username = target_user.get('username', target_name) if target_user else ''
     
-    bet_text = f"<b>{bet} NCoin</b>" if bet > 0 else "<b>без ставки</b>"
+    bet_text = f"<b>{format_number(bet)} NCoin</b>" if bet > 0 else "<b>без ставки</b>"
     
-    await message.answer(
-        f"🎮 <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
+    msg = await message.answer(
+        f"⚔️ <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
         f"👤 {html.escape(from_name)} вызывает {html.escape(target_name)}!\n"
         f"💰 Ставка: {bet_text}\n\n"
-        f"@{html.escape(target_username if target_username else '')}, примите вызов!",
+        f"⏰ Вызов действителен 60 секунд\n\n"
+        f"⚠️ ТОЛЬКО @{html.escape(target_username)} может принять или отклонить!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
+    
+    # Автоотмена через 60 секунд
+    from handlers.tictactoe import auto_cancel_challenge
+    asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
 
 
 async def show_profile(message: types.Message, target_id: int, target_user: dict):
+    """Показать анкету пользователя"""
     profile = await db.get_profile(target_id)
     balance = await db.get_balance(target_id)
     user = await db.get_user(target_id)
@@ -199,6 +249,7 @@ async def show_profile(message: types.Message, target_id: int, target_user: dict
 
 
 async def transfer_coins(message: types.Message, from_id: int, target_id: int, target_user: dict, amount: int):
+    """Перевести монеты"""
     if from_id == target_id:
         await message.answer("❌ Нельзя перевести монеты самому себе!")
         return
@@ -207,6 +258,9 @@ async def transfer_coins(message: types.Message, from_id: int, target_id: int, t
         await message.answer("❌ Минимальная сумма перевода: 10 NCoin")
         return
     
+    # 🔥 АВТОРЕГИСТРАЦИЯ ОТПРАВИТЕЛЯ
+    await ensure_user_exists(from_id, message.from_user.username, message.from_user.first_name)
+    
     balance = await db.get_balance(from_id)
     if balance < amount:
         await message.answer(f"❌ Недостаточно средств! Баланс: {format_number(balance)} NCoin")
@@ -214,6 +268,10 @@ async def transfer_coins(message: types.Message, from_id: int, target_id: int, t
     
     try:
         target_username = target_user.get('username') if target_user else None
+        if not target_username:
+            await message.answer(f"❌ Не удалось определить получателя!")
+            return
+            
         success = await db.transfer_coins(from_id, target_username, amount, "transfer")
         if not success:
             await message.answer(f"❌ Не удалось перевести монеты")
@@ -231,13 +289,39 @@ async def transfer_coins(message: types.Message, from_id: int, target_id: int, t
         )
     except Exception as e:
         logger.error(f"Transfer error: {e}")
-        await message.answer("❌ Ошибка перевода.")
+        await message.answer("❌ Ошибка перевода. Попробуйте позже.")
+
+
+async def send_help(message: types.Message):
+    """Отправить помощь"""
+    help_text = (
+        "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🗣️ УМНЫЕ КОМАНДЫ:</b>\n"
+        "• <code>Нексус, оповести всех</code> — общий сбор\n"
+        "• <code>Нексус, найди сквад в PUBG</code>\n"
+        "• <code>Нексус, крестики-нолики</code> — играть\n"
+        "• <code>Нексус, статистика</code>\n\n"
+        "<b>👤 ДЕЙСТВИЯ:</b>\n"
+        "• <code>@user обнять</code>\n"
+        "• <code>@user крестики 100</code> — вызвать на игру\n"
+        "• <code>@user анкета</code> — посмотреть анкету\n"
+        "• <code>@user 500</code> — перевести монеты\n\n"
+        "<b>📌 КОМАНДЫ:</b>\n"
+        "• /start — меню\n"
+        "• /daily — бонус\n"
+        "• /stats — статистика\n"
+        "• /top — топы"
+    )
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
 
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 
 @router.message(F.text, lambda message: not message.text.startswith('/'))
 async def smart_parser(message: types.Message):
+    """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
+    
     if message.from_user.is_bot:
         return
     
@@ -248,26 +332,28 @@ async def smart_parser(message: types.Message):
     if not text:
         return
     
-    # Трекинг статистики
+    # 🔥 ТРЕКИНГ СТАТИСТИКИ
     try:
         from handlers.stats import track_message
         await track_message(user_id, message)
     except Exception as e:
         logger.error(f"Stats tracking error: {e}")
     
-    # Логирование слов для аналитики чата
+    # 🔥 ЛОГИРОВАНИЕ СЛОВ ДЛЯ АНАЛИТИКИ ЧАТА
     try:
         if message.chat and message.chat.id:
             await db.log_chat_message(message.chat.id, user_id, text)
     except Exception as e:
         logger.error(f"Chat word logging error: {e}")
     
-    if user_id in profile_states:
-        return
-    
-    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    # 🔥 АВТОРЕГИСТРАЦИЯ
+    user = await ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
     if not user:
         await message.answer("👋 Используйте /start для регистрации")
+        return
+    
+    # Проверка заполнения анкеты
+    if user_id in profile_states:
         return
     
     # ==================== ОПРЕДЕЛЯЕМ ЦЕЛЕВОГО ПОЛЬЗОВАТЕЛЯ ====================
@@ -326,6 +412,7 @@ async def smart_parser(message: types.Message):
     bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'бот'])
     
     if bot_called:
+        # Умные теги
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in text:
@@ -344,6 +431,7 @@ async def smart_parser(message: types.Message):
                     except Exception as e:
                         logger.error(f"Tag trigger error: {e}")
         
+        # Общий сбор
         if 'оповести всех' in text or 'общий сбор' in text or 'собери всех' in text:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
@@ -357,44 +445,29 @@ async def smart_parser(message: types.Message):
             )
             return
         
+        # Крестики-нолики
         if 'крестики' in text or 'нолики' in text or 'xo' in text:
             from handlers.tictactoe import cmd_xo
             await cmd_xo(message)
             return
         
+        # Статистика
         if 'статистика' in text or 'стата' in text or 'stats' in text:
             from handlers.stats import cmd_stats
             await cmd_stats(message)
             return
         
+        # Помощь
         if 'помоги' in text or 'помощь' in text or 'что ты умеешь' in text:
-            help_text = (
-                "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "<b>🗣️ УМНЫЕ КОМАНДЫ:</b>\n"
-                "• <code>Нексус, оповести всех</code> — общий сбор\n"
-                "• <code>Нексус, найди сквад в PUBG</code>\n"
-                "• <code>Нексус, крестики-нолики</code> — играть\n"
-                "• <code>Нексус, статистика</code>\n\n"
-                "<b>👤 ДЕЙСТВИЯ:</b>\n"
-                "• <code>@user обнять</code>\n"
-                "• <code>@user крестики 100</code>\n"
-                "• <code>@user анкета</code>\n"
-                "• <code>@user 500</code> — перевод\n\n"
-                "<b>📌 КОМАНДЫ:</b>\n"
-                "• /start — меню\n"
-                "• /daily — бонус\n"
-                "• /stats — статистика\n"
-                "• /top — топы"
-            )
-            await message.answer(help_text, parse_mode=ParseMode.HTML)
+            await send_help(message)
             return
         
+        # Приветствие
         if 'привет' in text or 'здарова' in text or 'хай' in text:
             await message.answer(f"👋 Привет, {html.escape(message.from_user.first_name or '')}!")
             return
     
-    # РП команды без цели
+    # ==================== РП КОМАНДЫ БЕЗ ЦЕЛИ ====================
     rp_responses = {
         'привет': 'Привет! 👋',
         'пока': 'Пока! 👋',
@@ -414,6 +487,8 @@ async def smart_parser(message: types.Message):
 
 @router.callback_query(lambda c: c.data == "start_all")
 async def start_all_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
     from handlers.tag import cmd_all
     await cmd_all(callback.message)
     await callback.answer()
@@ -421,5 +496,7 @@ async def start_all_callback(callback: types.CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "cancel_all")
 async def cancel_all_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
     await callback.message.edit_text("❌ Общий сбор отменён.")
     await callback.answer()
