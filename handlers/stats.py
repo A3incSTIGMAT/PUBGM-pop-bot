@@ -1,12 +1,13 @@
-"""
-Модуль статистики NEXUS Bot — Production Ready
-Версия: 2.0 (Safe Types + Error Handling + DB Compatibility)
-"""
+# ============================================
+# ФАЙЛ: handlers/stats.py
+# ОПИСАНИЕ: Модуль статистики — ИСПРАВЛЕННЫЙ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ============================================
 
 import asyncio
 import logging
 import html
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional, List, Dict
 from aiogram import Router, types, F
 from aiogram.filters import Command
@@ -36,7 +37,6 @@ def format_date(date_str: Optional[str]) -> str:
     if not date_str:
         return "Неизвестно"
     try:
-        # Поддержка ISO формата и простого YYYY-MM-DD
         if "T" in date_str:
             return date_str.split("T")[0]
         return date_str[:10] if len(date_str) >= 10 else date_str
@@ -112,7 +112,7 @@ def format_user_stats(user: Dict, stats: Dict) -> str:
     name_display = escape_name(user)
     first_name = html.escape(user.get("first_name") or "Пользователь")
     
-    register_date = format_date(safe_get(stats, "register_date", ""))
+    register_date = format_date(safe_get(stats, "user_register_date", ""))
     days_active = safe_get(stats, "days_active", 0)
     
     # Расчёты
@@ -216,23 +216,24 @@ async def cmd_stats(message: types.Message):
             )
             return
         
-        # Собираем статистику из доступных источников
-        stats = {
-            "balance": await db.get_balance(target_id),
-            "vip_level": user.get("vip_level", 0),
-            "daily_streak": user.get("daily_streak", 0),
-            "wins": user.get("wins", 0),
-            "losses": user.get("losses", 0),
-            "register_date": user.get("register_date", ""),
-            # Остальные поля — заглушки, пока нет специальных таблиц
-            "messages_total": 0, "messages_today": 0, "messages_week": 0, "messages_month": 0,
-            "total_voice": 0, "total_stickers": 0, "total_photos": 0, "total_videos": 0, "total_gifs": 0,
-            "days_active": 0, "current_streak": 0, "max_streak": 0,
-            "games_played": 0, "draws": 0, "wins_vs_bot": 0, "losses_vs_bot": 0,
-            "current_win_streak": 0, "max_win_streak": 0,
-            "total_earned": 0, "total_spent": 0, "daily_claims": 0,
-            "total_donated_rub": 0, "total_donated_coins": 0,
-        }
+        # 🔥 ПОЛУЧАЕМ РЕАЛЬНУЮ СТАТИСТИКУ ИЗ БД
+        stats = await db.get_user_stats(target_id)
+        
+        if not stats:
+            # Если статистики нет — создаём базовую
+            stats = {
+                "balance": await db.get_balance(target_id),
+                "vip_level": user.get("vip_level", 0) or 0,
+                "daily_streak": user.get("daily_streak", 0) or 0,
+                "user_register_date": user.get("register_date", ""),
+                "messages_total": 0, "messages_today": 0, "messages_week": 0, "messages_month": 0,
+                "total_voice": 0, "total_stickers": 0, "total_photos": 0, "total_videos": 0, "total_gifs": 0,
+                "days_active": 0, "current_streak": 0, "max_streak": 0,
+                "games_played": 0, "wins": 0, "losses": 0, "draws": 0,
+                "wins_vs_bot": 0, "losses_vs_bot": 0, "max_win_streak": 0,
+                "total_earned": 0, "total_spent": 0, "daily_claims": 0,
+                "total_donated_rub": 0, "total_donated_coins": 0,
+            }
         
         text = format_user_stats(user, stats)
         
@@ -286,28 +287,30 @@ async def stats_my_callback(callback: types.CallbackQuery):
         
         if not user:
             await callback.message.edit_text(
-                "❌ Статистика не найдена!",
+                "❌ Статистика не найдена!\nИспользуйте /start для регистрации.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_keyboard("stats_menu")
             )
             await callback.answer()
             return
         
-        stats = {
-            "balance": await db.get_balance(target_id),
-            "vip_level": user.get("vip_level", 0),
-            "daily_streak": user.get("daily_streak", 0),
-            "wins": user.get("wins", 0),
-            "losses": user.get("losses", 0),
-            "register_date": user.get("register_date", ""),
-            "messages_total": 0, "messages_today": 0, "messages_week": 0, "messages_month": 0,
-            "total_voice": 0, "total_stickers": 0, "total_photos": 0, "total_videos": 0, "total_gifs": 0,
-            "days_active": 0, "current_streak": 0, "max_streak": 0,
-            "games_played": 0, "draws": 0, "wins_vs_bot": 0, "losses_vs_bot": 0,
-            "current_win_streak": 0, "max_win_streak": 0,
-            "total_earned": 0, "total_spent": 0, "daily_claims": 0,
-            "total_donated_rub": 0, "total_donated_coins": 0,
-        }
+        # 🔥 ПОЛУЧАЕМ РЕАЛЬНУЮ СТАТИСТИКУ ИЗ БД
+        stats = await db.get_user_stats(target_id)
+        
+        if not stats:
+            stats = {
+                "balance": await db.get_balance(target_id),
+                "vip_level": user.get("vip_level", 0) or 0,
+                "daily_streak": user.get("daily_streak", 0) or 0,
+                "user_register_date": user.get("register_date", ""),
+                "messages_total": 0, "messages_today": 0, "messages_week": 0, "messages_month": 0,
+                "total_voice": 0, "total_stickers": 0, "total_photos": 0, "total_videos": 0, "total_gifs": 0,
+                "days_active": 0, "current_streak": 0, "max_streak": 0,
+                "games_played": 0, "wins": 0, "losses": 0, "draws": 0,
+                "wins_vs_bot": 0, "losses_vs_bot": 0, "max_win_streak": 0,
+                "total_earned": 0, "total_spent": 0, "daily_claims": 0,
+                "total_donated_rub": 0, "total_donated_coins": 0,
+            }
         
         text = format_user_stats(user, stats)
         
@@ -340,13 +343,53 @@ async def stats_tops_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
-# ==================== ТОПЫ (на основе существующих методов БД) ====================
+# ==================== ТОПЫ ====================
+
+@router.callback_query(F.data == "top_messages")
+async def top_messages_callback(callback: types.CallbackQuery):
+    """Топ по сообщениям"""
+    try:
+        top_users = await db.get_top_messages(15)
+        
+        if not top_users:
+            await callback.message.edit_text(
+                "💬 <b>ТОП ПО СООБЩЕНИЯМ</b>\n\nПока нет данных!",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard("stats_tops")
+            )
+            await callback.answer()
+            return
+        
+        text = format_top_list(
+            "💬 <b>ТОП-15 ПО СООБЩЕНИЯМ</b>",
+            top_users,
+            value_key="messages_total",
+            suffix=" сообщ."
+        )
+        
+        user_id = callback.from_user.id
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            user_messages = safe_get(user_stats, "messages_total", 0)
+            text += f"\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваши сообщения: <b>{format_number(user_messages)}</b>"
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard("stats_tops")
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in top_messages: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
 
 @router.callback_query(F.data == "top_balance")
 async def top_balance_callback(callback: types.CallbackQuery):
-    """Топ по балансу — использует существующий db.get_top_users()"""
+    """Топ по балансу"""
     try:
-        top_users = await db.get_top_users(limit=15)
+        top_users = await db.get_top_balance(15)
         
         if not top_users:
             await callback.message.edit_text(
@@ -365,7 +408,6 @@ async def top_balance_callback(callback: types.CallbackQuery):
             show_extra=True
         )
         
-        # Добавляем позицию текущего пользователя
         user_id = callback.from_user.id
         user_balance = await db.get_balance(user_id)
         if user_balance > 0:
@@ -383,11 +425,144 @@ async def top_balance_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
+@router.callback_query(F.data == "top_xo")
+async def top_xo_callback(callback: types.CallbackQuery):
+    """Топ по крестикам-ноликам"""
+    try:
+        top_users = await db.get_top_xo(15)
+        
+        if not top_users:
+            await callback.message.edit_text(
+                "🎮 <b>ТОП ПО КРЕСТИКАМ-НОЛИКАМ</b>\n\nПока нет данных! Сыграйте хотя бы 3 игры.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard("stats_tops")
+            )
+            await callback.answer()
+            return
+        
+        text = "🎮 <b>ТОП-15 ПО КРЕСТИКАМ-НОЛИКАМ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, u in enumerate(top_users, 1):
+            if u is None:
+                continue
+            medal = get_medal(i)
+            name = escape_name(u)
+            wins = safe_get(u, "wins", 0)
+            games = safe_get(u, "games_played", 0)
+            text += f"{medal} <b>{name}</b> — {wins} побед ({games} игр)\n"
+        
+        user_id = callback.from_user.id
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            user_wins = safe_get(user_stats, "wins", 0)
+            user_games = safe_get(user_stats, "games_played", 0)
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎮 Ваши победы: <b>{user_wins}</b> ({user_games} игр)"
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard("stats_tops")
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in top_xo: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "top_activity")
+async def top_activity_callback(callback: types.CallbackQuery):
+    """Топ по активности"""
+    try:
+        top_users = await db.get_top_activity(15)
+        
+        if not top_users:
+            await callback.message.edit_text(
+                "🔥 <b>ТОП ПО АКТИВНОСТИ</b>\n\nПока нет данных!",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard("stats_tops")
+            )
+            await callback.answer()
+            return
+        
+        text = "🔥 <b>ТОП-15 ПО АКТИВНОСТИ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, u in enumerate(top_users, 1):
+            if u is None:
+                continue
+            medal = get_medal(i)
+            name = escape_name(u)
+            days = safe_get(u, "days_active", 0)
+            streak = safe_get(u, "current_streak", 0)
+            text += f"{medal} <b>{name}</b> — {days} дней (стрик {streak})\n"
+        
+        user_id = callback.from_user.id
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            user_days = safe_get(user_stats, "days_active", 0)
+            user_streak = safe_get(user_stats, "current_streak", 0)
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваша активность: <b>{user_days} дней (стрик {user_streak})</b>"
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard("stats_tops")
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in top_activity: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "top_daily")
+async def top_daily_callback(callback: types.CallbackQuery):
+    """Топ по daily стрику"""
+    try:
+        top_users = await db.get_top_daily_streak(15)
+        
+        if not top_users:
+            await callback.message.edit_text(
+                "🎁 <b>ТОП ПО DAILY СТРИКУ</b>\n\nПока нет данных! Получите ежедневный бонус.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard("stats_tops")
+            )
+            await callback.answer()
+            return
+        
+        text = "🎁 <b>ТОП-15 ПО DAILY СТРИКУ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, u in enumerate(top_users, 1):
+            if u is None:
+                continue
+            medal = get_medal(i)
+            name = escape_name(u)
+            streak = safe_get(u, "daily_streak", 0)
+            text += f"{medal} <b>{name}</b> — {streak} дней\n"
+        
+        user_id = callback.from_user.id
+        user = await db.get_user(user_id)
+        if user:
+            user_streak = safe_get(user, "daily_streak", 0)
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎁 Ваш стрик: <b>{user_streak} дней</b>"
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard("stats_tops")
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in top_daily: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
 @router.callback_query(F.data == "top_donors")
 async def top_donors_callback(callback: types.CallbackQuery):
-    """Топ донатеров — использует существующий db.get_top_donors()"""
+    """Топ донатеров"""
     try:
-        top_users = await db.get_top_donors(limit=15)
+        top_users = await db.get_top_donors(15)
         
         if not top_users:
             await callback.message.edit_text(
@@ -419,75 +594,52 @@ async def top_donors_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("top_"))
-async def top_placeholder_callback(callback: types.CallbackQuery):
-    """Заглушка для топов, которые требуют дополнительных таблиц"""
+# ==================== ИНТЕГРАЦИОННЫЕ ФУНКЦИИ ====================
+
+async def track_message(user_id: int, message: types.Message):
+    """Отслеживание сообщения"""
     try:
-        top_name = callback.data.replace("top_", "").upper()
-        await callback.message.edit_text(
-            f"📊 <b>ТОП ПО {top_name}</b>\n\n"
-            f"⚙️ Этот раздел в разработке!\n"
-            f"Статистика будет доступна после обновления бота.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"Error in top_placeholder: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
-
-
-# ==================== ИНТЕГРАЦИОННЫЕ ФУНКЦИИ (для вызова из других модулей) ====================
-
-async def track_message_simple(user_id: int, message: types.Message):
-    """
-    Простое отслеживание сообщения.
-    Вызывать из smart_commands.py для учёта активности.
-    Пока только логирование — расширить при добавлении таблиц активности.
-    """
-    try:
-        # Здесь можно добавить вызов db.track_message() когда метод будет создан
-        logger.debug(f"Message tracked: user={user_id}, chat={message.chat.id}")
+        activity_type = "message"
+        if message.sticker:
+            activity_type = "sticker"
+        elif message.voice:
+            activity_type = "voice"
+        elif message.video:
+            activity_type = "video"
+        elif message.photo:
+            activity_type = "photo"
+        elif message.animation:
+            activity_type = "gif"
+        
+        await db.track_user_activity(user_id, activity_type, 1)
+        logger.debug(f"Message tracked: user={user_id}, type={activity_type}")
     except Exception as e:
         logger.error(f"Error tracking message: {e}")
 
 
-async def track_xo_result(user_id: int, result: str, bet: int = 0):
-    """
-    Отслеживание результата игры в крестики-нолики.
-    result: 'win', 'loss', 'draw', 'win_vs_bot', 'loss_vs_bot'
-    """
+async def track_xo_game(user_id: int, result_type: str, bet: int = 0, won: int = 0):
+    """Отслеживание игры в крестики-нолики"""
     try:
-        # Обновляем статистику побед/поражений в основной таблице users
-        if result in ('win', 'win_vs_bot'):
-            await db._sync_execute(
-                "UPDATE users SET wins = wins + 1 WHERE user_id = ?", 
-                (user_id,)
-            )
-        elif result in ('loss', 'loss_vs_bot'):
-            await db._sync_execute(
-                "UPDATE users SET losses = losses + 1 WHERE user_id = ?", 
-                (user_id,)
-            )
-        logger.debug(f"XO result tracked: user={user_id}, result={result}, bet={bet}")
+        await db.update_xo_stats(user_id, result_type, bet, won)
+        await db.track_user_activity(user_id, "xo_game", 1)
+        logger.debug(f"XO game tracked: user={user_id}, result={result_type}")
     except Exception as e:
-        logger.error(f"Error tracking XO result: {e}")
+        logger.error(f"Error tracking XO game: {e}")
 
 
-# ==================== УТИЛИТЫ ДЛЯ ПЛАНИРОВЩИКА ====================
-
-async def daily_stats_maintenance():
-    """
-    Ежедневное обслуживание статистики.
-    Вызывать из планировщика (например, apscheduler) раз в сутки.
-    """
+async def update_all_streaks():
+    """Обновление стриков всех пользователей"""
     try:
-        logger.info("🔄 Starting daily stats maintenance...")
-        # Здесь можно добавить:
-        # - Сброс дневных счётчиков
-        # - Обновление стриков активности
-        # - Архивацию старых данных
-        logger.info("✅ Daily stats maintenance completed")
+        await db.update_user_streaks()
+        logger.info("✅ Стрики активности обновлены")
     except Exception as e:
-        logger.error(f"Error in daily_stats_maintenance: {e}")
+        logger.error(f"Error updating streaks: {e}")
 
+
+async def reset_daily_counters():
+    """Сброс дневных счётчиков"""
+    try:
+        await db.reset_daily_counters()
+        logger.info("✅ Дневные счётчики сброшены")
+    except Exception as e:
+        logger.error(f"Error resetting daily counters: {e}")
