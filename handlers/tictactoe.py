@@ -1,7 +1,8 @@
 # ============================================
 # ФАЙЛ: handlers/tictactoe.py
-# ОПИСАНИЕ: Крестики-нолики — ПОЛНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ
-# ИСПРАВЛЕНО: Вызовы, клетка занята, авторегистрация, защита от NULL
+# ОПИСАНИЕ: Крестики-нолики — ИГРА В ЛИЧНЫХ СООБЩЕНИЯХ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ИСПРАВЛЕНО: Игра перенесена в ЛС, нет спама в чате
 # ============================================
 
 import random
@@ -180,7 +181,7 @@ async def auto_cancel_challenge(game_id: str, chat_id: int, message_id: int):
 
 # ==================== ЗАВЕРШЕНИЕ ИГРЫ ====================
 
-async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, result: str):
+async def end_game(game_id: str, game: dict, result: str, callback: types.CallbackQuery = None):
     """Завершение игры с сохранением статистики"""
     if game.get("finished", False):
         return
@@ -247,21 +248,54 @@ async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, resu
     
     active_games.pop(game_id, None)
     
-    try:
-        await callback.message.edit_text(
-            f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
-                [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
-            ])
-        )
-    except Exception as e:
-        logger.error(f"Error editing end game message: {e}")
+    # 🔥 ОТПРАВЛЯЕМ РЕЗУЛЬТАТ В ЛС ОБОИМ ИГРОКАМ
+    if game.get("in_private", False):
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
+            [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+        ])
+        
+        # Отправляем результат X
+        if player_x != "bot" and player_x is not None:
+            try:
+                await bot.send_message(
+                    player_x,
+                    f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Error sending result to X: {e}")
+        
+        # Отправляем результат O
+        if player_o != "bot" and player_o is not None:
+            try:
+                await bot.send_message(
+                    player_o,
+                    f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Error sending result to O: {e}")
+    
+    # Если игра была в чате — обновляем сообщение там
+    if callback is not None and not game.get("in_private", False):
+        try:
+            await callback.message.edit_text(
+                f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
+                    [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+                ])
+            )
+        except Exception as e:
+            logger.error(f"Error editing end game message: {e}")
 
 
-async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
-    """Ход бота"""
+async def bot_turn(game_id: str, game: dict):
+    """Ход бота (для игры в ЛС)"""
     difficulty = game.get("difficulty", "medium")
     if difficulty not in BOT_MOVES:
         difficulty = "medium"
@@ -273,7 +307,7 @@ async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
     if not move:
         winner = check_winner(game["board"])
         if winner:
-            await end_game(callback, game_id, game, winner)
+            await end_game(game_id, game, winner)
         return
     
     r, c = move
@@ -281,7 +315,7 @@ async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
     
     winner = check_winner(game["board"])
     if winner:
-        await end_game(callback, game_id, game, winner)
+        await end_game(game_id, game, winner)
         return
     
     game["current_turn"] = "O" if bot_side == "X" else "X"
@@ -294,17 +328,23 @@ async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
     
     diff_name = BOT_DIFFICULTY[difficulty]["name"]
     
-    try:
-        await callback.message.edit_text(
-            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-            f"❌ X vs ⭕ O\n"
-            f"🤖 Сложность: {diff_name}\n\n"
-            f"👇 <b>Ваш ход, {user_name} ({user_side})</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
-        )
-    except Exception as e:
-        logger.error(f"Error updating bot turn message: {e}")
+    # 🔥 ОБНОВЛЯЕМ СООБЩЕНИЕ В ЛС ПОЛЬЗОВАТЕЛЯ
+    if game.get("in_private", False) and user_id != "bot":
+        try:
+            msg_id = game.get("private_msg_user")
+            if msg_id:
+                await bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=msg_id,
+                    text=f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                         f"❌ X vs ⭕ O\n"
+                         f"🤖 Сложность: {diff_name}\n\n"
+                         f"👇 <b>Ваш ход, {user_name} ({user_side})</b>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
+                )
+        except Exception as e:
+            logger.error(f"Error updating bot turn private message: {e}")
 
 
 # ==================== ОБРАБОТЧИКИ ====================
@@ -399,11 +439,10 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
         "current_turn": current_turn,
         "bet": 0,
         "difficulty": difficulty,
-        "chat_id": callback.message.chat.id,
-        "message_id": callback.message.message_id,
         "created_at": time.time(),
         "last_move": time.time(),
         "finished": False,
+        "in_private": True,
     }
     
     diff_name = BOT_DIFFICULTY[difficulty]["name"]
@@ -412,7 +451,9 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
     
     is_user_turn = (current_turn == player_side)
     
-    await callback.message.edit_text(
+    # 🔥 ОТПРАВЛЯЕМ ИГРУ В ЛС
+    msg = await bot.send_message(
+        user_id,
         f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
         f"Сложность: {diff_name}\n"
         f"Вы играете за {user_symbol} <b>{player_side}</b>\n"
@@ -421,10 +462,18 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
         parse_mode=ParseMode.HTML,
         reply_markup=xo_board_keyboard(board, game_id, can_play=is_user_turn)
     )
+    active_games[game_id]["private_msg_user"] = msg.message_id
+    
+    await callback.message.edit_text(
+        f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
+        f"📩 <b>Игра началась в личных сообщениях!</b>\n"
+        f"Проверьте ЛС от бота.",
+        parse_mode=ParseMode.HTML
+    )
     
     if not is_user_turn:
         await asyncio.sleep(0.8)
-        await bot_turn(callback, game_id, active_games[game_id])
+        await bot_turn(game_id, active_games[game_id])
     
     await callback.answer()
 
@@ -472,7 +521,6 @@ async def xo_challenge_player(message: types.Message):
     username = message.text.replace('@', '').strip()
     bet = pending_challenges.pop(user_id, 0)
     
-    # 🔥 АВТОМАТИЧЕСКАЯ РЕГИСТРАЦИЯ ВЫЗЫВАЮЩЕГО
     await ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
     
     target = await db.get_user_by_username(username)
@@ -500,7 +548,6 @@ async def xo_challenge_player(message: types.Message):
         await message.answer("❌ Нельзя вызвать самого себя!")
         return
     
-    # 🔥 Проверяем, нет ли уже активного вызова
     for game_id, game in active_games.items():
         if game.get("pending", False):
             if (game.get("player_x") == user_id and game.get("player_o") == target_id) or \
@@ -523,7 +570,6 @@ async def xo_challenge_player(message: types.Message):
         "current_turn": "X",
         "bet": bet,
         "chat_id": message.chat.id,
-        "message_id": message.message_id,
         "created_at": time.time(),
         "last_move": time.time(),
         "pending": True,
@@ -573,7 +619,6 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
     
     game = active_games[game_id]
     
-    # 🔥 СТРОГАЯ ПРОВЕРКА
     if user_id != game.get("player_o"):
         await callback.answer("❌ Этот вызов не вам! Только вызванный игрок может принять.", show_alert=True)
         return
@@ -608,23 +653,87 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
     
     game["pending"] = False
     game["last_move"] = time.time()
+    game["in_private"] = True
     
     px_user = await db.get_user(player_x) if player_x is not None else None
     po_user = await db.get_user(player_o) if player_o is not None else None
     player_x_name = html.escape(px_user["first_name"]) if px_user else "Игрок X"
     player_o_name = html.escape(po_user["first_name"]) if po_user else "Игрок O"
     
+    # 🔥 УВЕДОМЛЕНИЕ В ЧАТЕ
     await callback.message.edit_text(
         f"🎮 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
         f"❌ X: {player_x_name}\n"
         f"⭕ O: {player_o_name}\n"
         f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
-        f"👇 Ходит {player_x_name} (X)\n\n"
-        f"⚠️ Только {player_x_name} может ходить сейчас!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=(user_id == player_x))
+        f"📩 <b>Игра продолжается в личных сообщениях!</b>\n"
+        f"Проверьте ЛС от бота.",
+        parse_mode=ParseMode.HTML
     )
-    await callback.answer("✅ Игра началась!")
+    
+    # 🔥 ОТПРАВЛЯЕМ ИГРОВОЕ ПОЛЕ В ЛС ОБОИМ ИГРОКАМ
+    try:
+        msg_x = await bot.send_message(
+            player_x,
+            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+            f"❌ Вы: {player_x_name} (X)\n"
+            f"⭕ Соперник: {player_o_name} (O)\n"
+            f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
+            f"👇 <b>Ваш ход!</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
+        )
+        game["private_msg_x"] = msg_x.message_id
+    except Exception as e:
+        logger.error(f"Error sending private message to X: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка!</b>\n\n"
+            f"Не удалось отправить игру в ЛС игроку {player_x_name}.\n"
+            f"Возможно, бот заблокирован или пользователь не запускал бота.",
+            parse_mode=ParseMode.HTML
+        )
+        # Возвращаем ставки
+        if bet > 0:
+            await db.update_balance(player_x, bet, "Возврат ставки (ошибка)")
+            await db.update_balance(player_o, bet, "Возврат ставки (ошибка)")
+        active_games.pop(game_id, None)
+        await callback.answer("❌ Ошибка отправки игры в ЛС", show_alert=True)
+        return
+    
+    try:
+        msg_o = await bot.send_message(
+            player_o,
+            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+            f"❌ Соперник: {player_x_name} (X)\n"
+            f"⭕ Вы: {player_o_name} (O)\n"
+            f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
+            f"⏳ <b>Ожидайте хода соперника...</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=xo_board_keyboard(game["board"], game_id, can_play=False)
+        )
+        game["private_msg_o"] = msg_o.message_id
+    except Exception as e:
+        logger.error(f"Error sending private message to O: {e}")
+        # Пытаемся удалить сообщение у X
+        try:
+            await bot.delete_message(player_x, game["private_msg_x"])
+        except:
+            pass
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка!</b>\n\n"
+            f"Не удалось отправить игру в ЛС игроку {player_o_name}.\n"
+            f"Возможно, бот заблокирован или пользователь не запускал бота.",
+            parse_mode=ParseMode.HTML
+        )
+        # Возвращаем ставки
+        if bet > 0:
+            await db.update_balance(player_x, bet, "Возврат ставки (ошибка)")
+            await db.update_balance(player_o, bet, "Возврат ставки (ошибка)")
+        active_games.pop(game_id, None)
+        await callback.answer("❌ Ошибка отправки игры в ЛС", show_alert=True)
+        return
+    
+    await callback.answer("✅ Игра началась! Проверьте ЛС.")
 
 
 @router.callback_query(F.data.startswith("xo_reject_"))
@@ -650,7 +759,6 @@ async def xo_reject_challenge(callback: types.CallbackQuery):
     
     game = active_games[game_id]
     
-    # 🔥 СТРОГАЯ ПРОВЕРКА
     if user_id != game.get("player_o"):
         await callback.answer("❌ Этот вызов не вам! Только вызванный игрок может отклонить.", show_alert=True)
         return
@@ -697,12 +805,12 @@ async def xo_make_move(callback: types.CallbackQuery):
         return
         
     if time.time() - game.get("last_move", 0) > GAME_TIMEOUT_SECONDS:
-        await end_game(callback, game_id, game, "timeout")
+        await end_game(game_id, game, "timeout", callback)
         return
     
     current_turn = game.get("current_turn", "X")
     
-    # 🔥 СТРОГАЯ ПРОВЕРКА ОЧЕРЕДИ
+    # 🔥 ПРОВЕРКА ОЧЕРЕДИ
     if game.get("type") == "pvb":
         user_side = game.get("user_side", "X")
         if current_turn != user_side:
@@ -728,57 +836,90 @@ async def xo_make_move(callback: types.CallbackQuery):
     
     winner = check_winner(game["board"])
     if winner:
-        await end_game(callback, game_id, game, winner)
+        await end_game(game_id, game, winner, callback)
         return
     
     # Меняем ход
     game["current_turn"] = "O" if current_turn == "X" else "X"
     
-    if game.get("type") == "pvb":
-        user_side = game.get("user_side", "X")
-        user_id_actual = game["player_x"] if user_side == "X" else game["player_o"]
-        user_data = await db.get_user(user_id_actual) if user_id_actual != "bot" else None
-        user_name = html.escape(user_data["first_name"]) if user_data else "Игрок"
-        next_is_user = (game["current_turn"] == user_side)
-        
-        diff_name = BOT_DIFFICULTY[game.get("difficulty", "medium")]["name"]
-        
-        await callback.message.edit_text(
-            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-            f"❌ X vs ⭕ O\n"
-            f"🤖 Сложность: {diff_name}\n\n"
-            f"👇 {'Ваш ход' if next_is_user else 'Ход бота'}...",
-            parse_mode=ParseMode.HTML,
-            reply_markup=xo_board_keyboard(game["board"], game_id, can_play=next_is_user)
-        )
-        
-        if not next_is_user:
-            await asyncio.sleep(0.6)
-            await bot_turn(callback, game_id, game)
-    else:
-        # PvP
-        px_user = await db.get_user(game["player_x"]) if game["player_x"] is not None else None
-        po_user = await db.get_user(game["player_o"]) if game["player_o"] is not None else None
-        player_x_name = html.escape(px_user["first_name"]) if px_user else "Игрок X"
-        player_o_name = html.escape(po_user["first_name"]) if po_user else "Игрок O"
-        next_player = player_x_name if game["current_turn"] == "X" else player_o_name
-        
-        can_play = (game["current_turn"] == "X" and user_id == game["player_x"]) or \
-                   (game["current_turn"] == "O" and user_id == game["player_o"])
-        
-        # 🔥 ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ
-        try:
-            await callback.message.edit_text(
-                f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-                f"❌ {player_x_name} vs ⭕ {player_o_name}\n"
-                f"💰 Ставка: <b>{format_number(game.get('bet', 0))} NCoin</b>\n\n"
-                f"👇 Ход <b>{next_player} ({game['current_turn']})</b>\n\n"
-                f"⚠️ Сейчас ходит только <b>{next_player}</b>!",
-                parse_mode=ParseMode.HTML,
-                reply_markup=xo_board_keyboard(game["board"], game_id, can_play=can_play)
-            )
-        except Exception as e:
-            logger.error(f"Error updating PvP board: {e}")
+    # 🔥 ОБНОВЛЯЕМ СООБЩЕНИЯ В ЛС
+    if game.get("in_private", False):
+        if game.get("type") == "pvb":
+            # Игра с ботом
+            user_side = game.get("user_side", "X")
+            user_id_actual = game["player_x"] if user_side == "X" else game["player_o"]
+            user_data = await db.get_user(user_id_actual) if user_id_actual != "bot" else None
+            user_name = html.escape(user_data["first_name"]) if user_data else "Игрок"
+            next_is_user = (game["current_turn"] == user_side)
+            
+            diff_name = BOT_DIFFICULTY[game.get("difficulty", "medium")]["name"]
+            
+            try:
+                msg_id = game.get("private_msg_user")
+                if msg_id:
+                    await bot.edit_message_text(
+                        chat_id=user_id_actual,
+                        message_id=msg_id,
+                        text=f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                             f"❌ X vs ⭕ O\n"
+                             f"🤖 Сложность: {diff_name}\n\n"
+                             f"👇 {'Ваш ход' if next_is_user else 'Ход бота'}...",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=next_is_user)
+                    )
+            except Exception as e:
+                logger.error(f"Error updating private bot game: {e}")
+            
+            if not next_is_user:
+                await asyncio.sleep(0.6)
+                await bot_turn(game_id, game)
+        else:
+            # PvP
+            player_x = game["player_x"]
+            player_o = game["player_o"]
+            
+            px_user = await db.get_user(player_x) if player_x is not None else None
+            po_user = await db.get_user(player_o) if player_o is not None else None
+            player_x_name = html.escape(px_user["first_name"]) if px_user else "Игрок X"
+            player_o_name = html.escape(po_user["first_name"]) if po_user else "Игрок O"
+            
+            next_is_x = (game["current_turn"] == "X")
+            
+            # Обновляем для X
+            try:
+                msg_id = game.get("private_msg_x")
+                if msg_id:
+                    await bot.edit_message_text(
+                        chat_id=player_x,
+                        message_id=msg_id,
+                        text=f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                             f"❌ Вы: {player_x_name} (X)\n"
+                             f"⭕ Соперник: {player_o_name} (O)\n"
+                             f"💰 Ставка: <b>{format_number(game.get('bet', 0))} NCoin</b>\n\n"
+                             f"👇 { '<b>Ваш ход!</b>' if next_is_x else '⏳ Ожидайте хода соперника...' }",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=next_is_x)
+                    )
+            except Exception as e:
+                logger.error(f"Error updating X private message: {e}")
+            
+            # Обновляем для O
+            try:
+                msg_id = game.get("private_msg_o")
+                if msg_id:
+                    await bot.edit_message_text(
+                        chat_id=player_o,
+                        message_id=msg_id,
+                        text=f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                             f"❌ Соперник: {player_x_name} (X)\n"
+                             f"⭕ Вы: {player_o_name} (O)\n"
+                             f"💰 Ставка: <b>{format_number(game.get('bet', 0))} NCoin</b>\n\n"
+                             f"👇 { '<b>Ваш ход!</b>' if not next_is_x else '⏳ Ожидайте хода соперника...' }",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=not next_is_x)
+                    )
+            except Exception as e:
+                logger.error(f"Error updating O private message: {e}")
     
     await callback.answer(f"✅ Ход на ({r+1}, {c+1})")
 
@@ -816,7 +957,7 @@ async def xo_surrender(callback: types.CallbackQuery):
         await callback.answer("❌ Вы не участвуете в этой игре!", show_alert=True)
         return
     
-    await end_game(callback, game_id, game, winner)
+    await end_game(game_id, game, winner, callback)
     await callback.answer("🏳️ Вы сдались!")
 
 
@@ -882,7 +1023,8 @@ async def xo_help_callback(callback: types.CallbackQuery):
         "🎯 <b>Цель:</b> Собрать 3 своих символа в ряд\n\n"
         "🤖 <b>С ботом:</b> Выберите сторону (X/O) и сложность\n"
         "👤 <b>С игроком:</b> Вызовите друга и играйте на NCoin\n\n"
-        "💰 <b>Ставки:</b> Победитель получает ×2 (комиссия 5%)",
+        "💰 <b>Ставки:</b> Победитель получает ×2 (комиссия 5%)\n\n"
+        "📩 <b>Игра проходит в личных сообщениях!</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button("game_xo")
     )
