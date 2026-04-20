@@ -1,7 +1,8 @@
-"""
-Умное автоудаление сообщений бота + Утреннее приветствие с топами
-ПОЛНОСТЬЮ ЗАЩИЩЕНО ОТ NULL
-"""
+# ============================================
+# ФАЙЛ: utils/auto_delete.py
+# ОПИСАНИЕ: Утренняя очистка + приветствие с топами + итоги дня
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ============================================
 
 import asyncio
 import logging
@@ -11,30 +12,20 @@ import pytz
 
 logger = logging.getLogger(__name__)
 
-# Хранилище последних сообщений бота по чатам
 _last_bot_messages = {}
-
-# Список служебных сообщений для утренней очистки
 _pending_cleanup = set()
-
-# Список чатов для утреннего приветствия
 _active_chats = set()
 
 
 async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, message_id: int, delay: int = None):
-    """
-    Отслеживает сообщение бота и удаляет предыдущее в этом чате.
-    """
     if bot is None or chat_id is None or message_id is None:
         return
         
     key = f"chat_{chat_id}"
     
-    # Добавляем чат в активные
     if chat_id:
         _active_chats.add(chat_id)
     
-    # Удаляем предыдущее сообщение
     if key in _last_bot_messages:
         old_msg = _last_bot_messages.get(key)
         if old_msg and old_msg.get("message_id"):
@@ -44,7 +35,6 @@ async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, mes
             except Exception as e:
                 logger.debug(f"Could not delete previous message: {e}")
     
-    # Сохраняем новое
     _last_bot_messages[key] = {
         "message_id": message_id,
         "user_id": user_id if user_id is not None else 0,
@@ -55,7 +45,6 @@ async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, mes
 
 
 async def delete_bot_message_after(bot: Bot, chat_id: int, message_id: int, delay: int = 30):
-    """Устаревший метод для совместимости"""
     if bot is None or chat_id is None or message_id is None:
         return
         
@@ -64,21 +53,7 @@ async def delete_bot_message_after(bot: Bot, chat_id: int, message_id: int, dela
     _pending_cleanup.add((chat_id, message_id))
 
 
-async def clear_chat_history(bot: Bot, chat_id: int):
-    """Очищает историю сообщений бота в чате"""
-    if chat_id is None:
-        return
-        
-    key = f"chat_{chat_id}"
-    if key in _last_bot_messages:
-        del _last_bot_messages[key]
-    
-    to_remove = {(c, m) for c, m in _pending_cleanup if c == chat_id}
-    _pending_cleanup.difference_update(to_remove)
-
-
 def format_top_name(user: dict) -> str:
-    """Безопасное форматирование имени пользователя"""
     if user is None:
         return "Игрок"
     
@@ -94,7 +69,6 @@ def format_top_name(user: dict) -> str:
 
 
 def format_number(num: any) -> str:
-    """Безопасное форматирование числа"""
     if num is None:
         return "0"
     try:
@@ -104,10 +78,6 @@ def format_number(num: any) -> str:
 
 
 async def morning_cleanup_and_greeting(bot: Bot):
-    """
-    Утренняя очистка + приветствие с топами.
-    Вызывается в 10:00 по МСК.
-    """
     from database import db
     
     if bot is None:
@@ -115,7 +85,7 @@ async def morning_cleanup_and_greeting(bot: Bot):
         return
     
     active_count = len(_active_chats) if _active_chats else 0
-    logger.info(f"🌅 Starting morning cleanup and greeting for {active_count} chats")
+    logger.info(f"🌅 Starting morning cleanup for {active_count} chats")
     
     # 1. Удаляем все служебные сообщения
     deleted = 0
@@ -134,19 +104,18 @@ async def morning_cleanup_and_greeting(bot: Bot):
     
     logger.info(f"🗑️ Deleted {deleted} service messages")
     
-    # 2. Получаем топы (с защитой от NULL)
+    # 2. Получаем топы
     top_balance = await db.get_top_balance(5) if db else []
     top_xo = await db.get_top_xo(5) if db else []
     top_messages = await db.get_top_messages(5) if db else []
     top_donors = await db.get_top_donors(5) if db else []
     
-    # 3. Формируем приветствие
+    # 3. Формируем приветствие с топами
     greeting = (
         "☀️ <b>ДОБРОЕ УТРО, NEXUS!</b>\n\n"
         "🔥 С возвращением в игру! Вот вчерашние топы:\n\n"
     )
     
-    # Топ по балансу
     if top_balance and len(top_balance) > 0:
         greeting += "🏆 <b>ТОП-5 ПО БАЛАНСУ:</b>\n"
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
@@ -158,7 +127,6 @@ async def morning_cleanup_and_greeting(bot: Bot):
             greeting += f"{medals[i]} {name} — {format_number(balance)} NCoin\n"
         greeting += "\n"
     
-    # Топ по крестикам-ноликам
     if top_xo and len(top_xo) > 0:
         greeting += "🎮 <b>ТОП-5 ПО КРЕСТИКАМ-НОЛИКАМ:</b>\n"
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
@@ -171,7 +139,6 @@ async def morning_cleanup_and_greeting(bot: Bot):
             greeting += f"{medals[i]} {name} — {format_number(wins)} побед ({format_number(games)} игр)\n"
         greeting += "\n"
     
-    # Топ по сообщениям
     if top_messages and len(top_messages) > 0:
         greeting += "💬 <b>ТОП-5 ПО СООБЩЕНИЯМ:</b>\n"
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
@@ -183,7 +150,6 @@ async def morning_cleanup_and_greeting(bot: Bot):
             greeting += f"{medals[i]} {name} — {format_number(msgs)} сообщений\n"
         greeting += "\n"
     
-    # Топ донатеров
     if top_donors and len(top_donors) > 0:
         greeting += "💎 <b>ТОП-5 ДОНАТЕРОВ:</b>\n"
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
@@ -203,7 +169,7 @@ async def morning_cleanup_and_greeting(bot: Bot):
         "Удачного дня! 🚀"
     )
     
-    # 4. Отправляем во все активные чаты
+    # 4. Отправляем приветствие во все чаты
     sent = 0
     failed = 0
     
@@ -221,7 +187,24 @@ async def morning_cleanup_and_greeting(bot: Bot):
                 failed += 1
                 logger.debug(f"Could not send greeting to chat {chat_id}: {e}")
     
-    # 5. Отправляем админам отчёт
+    # 5. Генерируем и отправляем итоги дня
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    for chat_id in list(_active_chats):
+        if chat_id is None:
+            continue
+        try:
+            if db:
+                summary = await db.generate_and_save_summary(chat_id, yesterday)
+                if summary:
+                    msg = await bot.send_message(chat_id, summary, parse_mode="HTML")
+                    if msg and msg.message_id:
+                        _pending_cleanup.add((chat_id, msg.message_id))
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.debug(f"Could not send summary to chat {chat_id}: {e}")
+    
+    # 6. Отчёт админам
     try:
         from config import ADMIN_IDS
         if ADMIN_IDS:
@@ -242,14 +225,10 @@ async def morning_cleanup_and_greeting(bot: Bot):
     except Exception as e:
         logger.debug(f"Could not send admin report: {e}")
     
-    logger.info(f"🌅 Morning greeting sent to {sent}/{active_count} chats ({failed} failed)")
+    logger.info(f"🌅 Morning cleanup completed: {sent}/{active_count} greetings sent")
 
 
 async def schedule_morning_cleanup(bot: Bot):
-    """
-    Планировщик утренней очистки.
-    Запускается при старте бота и ждёт 10:00 МСК.
-    """
     if bot is None:
         logger.error("Bot is None in schedule_morning_cleanup")
         return
@@ -291,16 +270,9 @@ async def schedule_morning_cleanup(bot: Bot):
 
 
 def add_active_chat(chat_id: int):
-    """Добавляет чат в список активных"""
     if chat_id is not None:
         _active_chats.add(chat_id)
 
 
 def get_active_chats_count() -> int:
-    """Возвращает количество активных чатов"""
     return len(_active_chats) if _active_chats else 0
-
-
-def get_pending_count() -> int:
-    """Возвращает количество сообщений в очереди на удаление"""
-    return len(_pending_cleanup) if _pending_cleanup else 0
