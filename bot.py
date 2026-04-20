@@ -2,7 +2,7 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
-ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ — БЕЗ ДУБЛЕЙ
+С КРЕСТИКАМИ-НОЛИКАМИ
 """
 
 import asyncio
@@ -37,14 +37,13 @@ dp = Dispatcher()
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню бота"""
     keyboard = [
         [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
          InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
         [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
          InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
         [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
-         InlineKeyboardButton(text="🎲 ЛИЧНЫЕ ИГРЫ", callback_data="private_games")],
+         InlineKeyboardButton(text="🎲 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo")],
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
          InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
         [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
@@ -64,11 +63,10 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-# ==================== ТОЛЬКО ТЕСТОВЫЕ КОМАНДЫ ====================
+# ==================== ТЕСТОВЫЕ КОМАНДЫ ====================
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
-    """Проверка работоспособности"""
     await message.answer("🏓 PONG! Бот работает!")
 
 
@@ -79,7 +77,7 @@ try:
     from handlers.start import router as start_router
     from handlers.profile import router as profile_router
     from handlers.economy import router as economy_router
-    from handlers.games import router as games_router
+    from handlers.tictactoe import router as tictactoe_router
     from handlers.vip import router as vip_router
     from handlers.tag import router as tag_router
     from handlers.ai_assistant import router as ai_assistant_router
@@ -89,7 +87,6 @@ try:
     from handlers.tag_trigger import router as tag_trigger_router
     from handlers.ranks import router as ranks_router
     from handlers.rating import router as rating_router
-    from handlers.games_private import router as games_private_router
     from handlers.rp_commands import router as rp_commands_router
     from handlers.smart_commands import router as smart_commands_router
     
@@ -97,7 +94,7 @@ try:
         start_router,
         profile_router,
         economy_router,
-        games_router,
+        tictactoe_router,
         vip_router,
         tag_router,
         ai_assistant_router,
@@ -107,7 +104,6 @@ try:
         tag_trigger_router,
         ranks_router,
         rating_router,
-        games_private_router,
         rp_commands_router,
         smart_commands_router,
     )
