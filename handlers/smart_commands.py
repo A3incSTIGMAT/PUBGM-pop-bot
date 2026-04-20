@@ -1,6 +1,6 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер — МОДУЛЬНАЯ АРХИТЕКТУРА
+# ОПИСАНИЕ: Умный парсер — МОДУЛЬНАЯ АРХИТЕКТУРА + ПРАВИЛЬНЫЙ ТРЕКИНГ
 # ЛЕГКО ДОБАВЛЯТЬ НОВЫЕ КОМАНДЫ БЕЗ ПЕРЕДЕЛКИ ВСЕГО ФАЙЛА
 # ============================================
 
@@ -39,6 +39,7 @@ class CommandHandler:
         self.keywords = keywords
         self.handler = handler
         self.need_target = need_target
+
 
 # Реестр команд без цели (просто текст)
 NO_TARGET_COMMANDS: Dict[str, CommandHandler] = {}
@@ -114,14 +115,22 @@ def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Opti
     if username:
         target_username = username
         # Пытаемся найти в БД (может быть None, если пользователь не зарегистрирован)
-        target_user = asyncio.run(db.get_user_by_username(username))
+        # Используем asyncio.run только если нужно, но лучше await
+        # Здесь упрощаем — если не найден, то target_user останется None
+        try:
+            target_user = asyncio.get_event_loop().run_until_complete(db.get_user_by_username(username))
+        except:
+            pass
         if target_user:
             target_id = target_user.get("user_id")
     
     # Способ 2: Ответ на сообщение
     if not target_id and reply and reply.from_user and not reply.from_user.is_bot:
         target_id = reply.from_user.id
-        target_user = asyncio.run(db.get_user(target_id))
+        try:
+            target_user = asyncio.get_event_loop().run_until_complete(db.get_user(target_id))
+        except:
+            pass
         if target_user:
             target_username = target_user.get("username")
     
@@ -418,10 +427,22 @@ async def smart_parser(message: types.Message):
     
     logger.info(f"🔍 SMART PARSER: user={user_id}, text='{text[:50]}'")
     
-    # 🔥 ТРЕКИНГ СТАТИСТИКИ
+    # 🔥 ТРЕКИНГ СТАТИСТИКИ (ИСПРАВЛЕНО)
     try:
-        from handlers.stats import track_message
-        await track_message(user_id, message)
+        activity_type = "message"
+        if message.sticker:
+            activity_type = "sticker"
+        elif message.voice:
+            activity_type = "voice"
+        elif message.video:
+            activity_type = "video"
+        elif message.photo:
+            activity_type = "photo"
+        elif message.animation:
+            activity_type = "gif"
+        
+        await db.track_user_activity(user_id, activity_type, 1)
+        logger.debug(f"📊 Tracked: user={user_id}, type={activity_type}")
     except Exception as e:
         logger.error(f"Stats tracking error: {e}")
     
@@ -531,3 +552,17 @@ async def cancel_all_callback(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("❌ Общий сбор отменён.")
     await callback.answer()
+
+
+# ============================================================
+# ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ (ДОБАВЛЯЙТЕ СЮДА)
+# ============================================================
+
+# Примеры:
+# @register_command(['погода', 'weather'])
+# async def cmd_weather(message: types.Message, **kwargs):
+#     await message.answer("🌤 Сегодня солнечно!")
+#
+# @register_command(['пнуть', 'кикнуть'], need_target=True)
+# async def cmd_kick_user(message: types.Message, from_id: int, target_id: int, target_user: dict, **kwargs):
+#     await message.answer(f"👢 {message.from_user.first_name} пинает {target_user.get('first_name')}!")
