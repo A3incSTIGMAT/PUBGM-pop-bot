@@ -1448,9 +1448,8 @@ class Database:
 
     async def cleanup_bot_from_all_tables(self, bot_id: int):
     """Полностью удалить бота из всех таблиц"""
-    if bot_id is None:
-        return
-        
+        if bot_id is None:
+        return    
     def _sync_cleanup():
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
