@@ -2,7 +2,7 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
-С КРЕСТИКАМИ-НОЛИКАМИ
+ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import asyncio
@@ -37,24 +37,24 @@ dp = Dispatcher()
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню бота"""
     keyboard = [
         [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
          InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
         [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
          InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
-        [InlineKeyboardButton(text="🎮 ИГРЫ", callback_data="games"),
-         InlineKeyboardButton(text="🎲 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo")],
+        [InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo"),
+         InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats")],
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
          InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
         [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
          InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
         [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
          InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
-        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
-         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
-        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
-         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
-        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")]
+        [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
+         InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
+        [InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate"),
+         InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")]
     ]
     
     if is_admin:
