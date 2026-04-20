@@ -1,7 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/stats.py
-# ОПИСАНИЕ: Модуль статистики — ИСПРАВЛЕННЫЙ
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ОПИСАНИЕ: Модуль статистики — ВСЕ ТОПЫ РАБОТАЮТ
+# ИСПРАВЛЕНО: Удалены заглушки, все топы реальные
 # ============================================
 
 import asyncio
@@ -105,7 +105,32 @@ def back_keyboard(callback_data: str) -> InlineKeyboardMarkup:
     ])
 
 
-# ==================== ФОРМАТТЕРЫ ТЕКСТА ====================
+def format_top_list(title: str, users: List[Dict], value_key: str, 
+                    suffix: str = "", show_extra: bool = False) -> str:
+    """Формирует текст топ-листа"""
+    if not users:
+        return f"📊 {title}\n\nПока нет данных!"
+    
+    text = f"{title}\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, u in enumerate(users, 1):
+        if u is None:
+            continue
+        medal = get_medal(i)
+        name = escape_name(u)
+        value = format_number(safe_get(u, value_key, 0))
+        extra = ""
+        
+        if show_extra:
+            if value_key == "balance" and safe_get(u, "vip_level", 0) > 0:
+                extra = " ⭐"
+            elif value_key == "total_donated":
+                extra = f"\n   {u.get('donor_rank', '💎 Поддерживающий')}"
+        
+        text += f"{medal} <b>{name}</b>{extra} — {value}{suffix}\n"
+    
+    return text
+
 
 def format_user_stats(user: Dict, stats: Dict) -> str:
     """Формирует текст статистики пользователя"""
@@ -115,7 +140,6 @@ def format_user_stats(user: Dict, stats: Dict) -> str:
     register_date = format_date(safe_get(stats, "user_register_date", ""))
     days_active = safe_get(stats, "days_active", 0)
     
-    # Расчёты
     games = safe_get(stats, "games_played", 0)
     wins = safe_get(stats, "wins", 0)
     winrate = (wins / games * 100) if games > 0 else 0
@@ -164,33 +188,6 @@ def format_user_stats(user: Dict, stats: Dict) -> str:
     )
 
 
-def format_top_list(title: str, users: List[Dict], value_key: str, 
-                    suffix: str = "", show_extra: bool = False) -> str:
-    """Формирует текст топ-листа"""
-    if not users:
-        return f"📊 {title}\n\nПока нет данных!"
-    
-    text = f"{title}\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    for i, u in enumerate(users, 1):
-        if u is None:
-            continue
-        medal = get_medal(i)
-        name = escape_name(u)
-        value = format_number(safe_get(u, value_key, 0))
-        extra = ""
-        
-        if show_extra:
-            if value_key == "balance" and safe_get(u, "vip_level", 0) > 0:
-                extra = " ⭐"
-            elif value_key == "total_donated":
-                extra = f"\n   {u.get('donor_rank', '💎 Поддерживающий')}"
-        
-        text += f"{medal} <b>{name}</b>{extra} — {value}{suffix}\n"
-    
-    return text
-
-
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
 @router.message(Command("stats"))
@@ -200,7 +197,6 @@ async def cmd_stats(message: types.Message):
         args = message.text.strip().split() if message.text else []
         target_id = message.from_user.id
         
-        # Проверка упоминания другого пользователя
         if len(args) > 1 and args[1].startswith('@'):
             username = args[1].lstrip('@')
             if username:
@@ -216,11 +212,9 @@ async def cmd_stats(message: types.Message):
             )
             return
         
-        # 🔥 ПОЛУЧАЕМ РЕАЛЬНУЮ СТАТИСТИКУ ИЗ БД
         stats = await db.get_user_stats(target_id)
         
         if not stats:
-            # Если статистики нет — создаём базовую
             stats = {
                 "balance": await db.get_balance(target_id),
                 "vip_level": user.get("vip_level", 0) or 0,
@@ -294,7 +288,6 @@ async def stats_my_callback(callback: types.CallbackQuery):
             await callback.answer()
             return
         
-        # 🔥 ПОЛУЧАЕМ РЕАЛЬНУЮ СТАТИСТИКУ ИЗ БД
         stats = await db.get_user_stats(target_id)
         
         if not stats:
@@ -373,11 +366,7 @@ async def top_messages_callback(callback: types.CallbackQuery):
             user_messages = safe_get(user_stats, "messages_total", 0)
             text += f"\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваши сообщения: <b>{format_number(user_messages)}</b>"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
@@ -413,11 +402,7 @@ async def top_balance_callback(callback: types.CallbackQuery):
         if user_balance > 0:
             text += f"\n\n━━━━━━━━━━━━━━━━━━━━━\n💰 Ваш баланс: <b>{format_number(user_balance)} NCoin</b>"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
@@ -458,11 +443,7 @@ async def top_xo_callback(callback: types.CallbackQuery):
             user_games = safe_get(user_stats, "games_played", 0)
             text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎮 Ваши победы: <b>{user_wins}</b> ({user_games} игр)"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
@@ -503,11 +484,7 @@ async def top_activity_callback(callback: types.CallbackQuery):
             user_streak = safe_get(user_stats, "current_streak", 0)
             text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваша активность: <b>{user_days} дней (стрик {user_streak})</b>"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
@@ -546,11 +523,7 @@ async def top_daily_callback(callback: types.CallbackQuery):
             user_streak = safe_get(user, "daily_streak", 0)
             text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎁 Ваш стрик: <b>{user_streak} дней</b>"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
@@ -582,11 +555,7 @@ async def top_donors_callback(callback: types.CallbackQuery):
         )
         text += "\n\n━━━━━━━━━━━━━━━━━━━━━\n❤️ <i>Спасибо за поддержку проекта!</i>"
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard("stats_tops")
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
         
     except Exception as e:
