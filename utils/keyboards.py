@@ -24,7 +24,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     
     row3 = [
         InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo"),
-        InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats")
+        InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="stats")
     ]
     
     row4 = [
@@ -43,16 +43,20 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     ]
     
     row7 = [
-        InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
-        InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")
+        InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
+        InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")
     ]
     
     row8 = [
-        InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate"),
+        InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
+        InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")
+    ]
+    
+    row9 = [
         InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")
     ]
     
-    keyboard = [row1, row2, row3, row4, row5, row6, row7, row8]
+    keyboard = [row1, row2, row3, row4, row5, row6, row7, row8, row9]
     
     if is_admin:
         keyboard.insert(3, [InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
