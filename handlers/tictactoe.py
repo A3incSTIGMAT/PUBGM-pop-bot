@@ -1,13 +1,15 @@
 """
 Крестики-нолики для NEXUS Bot
 Игра против бота и против других игроков
+Версия: 2.0 (Fixed AI, Memory Leak, State Safety)
 """
 
 import random
 import asyncio
 import time
+import html
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
@@ -15,36 +17,72 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db
 from config import START_BALANCE
-from utils.keyboards import (
-    xo_menu_keyboard, xo_difficulty_keyboard, xo_board_keyboard,
-    xo_bet_keyboard, back_button
-)
+
+# Импорт клавиатур (с защитой от отсутствия файла)
+try:
+    from utils.keyboards import (
+        xo_menu_keyboard, xo_difficulty_keyboard, xo_board_keyboard,
+        xo_bet_keyboard, back_button
+    )
+except ImportError:
+    # Заглушки на случай, если utils.keyboards ещё не создан
+    def xo_menu_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 С ботом", callback_data="xo_vs_bot")],
+        [InlineKeyboardButton(text="👤 С игроком", callback_data="xo_vs_player")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+    ])
+    def xo_difficulty_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="😊 Лёгкий", callback_data="xo_diff_easy")],
+        [InlineKeyboardButton(text="🤔 Средний", callback_data="xo_diff_medium")],
+        [InlineKeyboardButton(text="🤖 Сложный", callback_data="xo_diff_hard")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="xo_vs_bot")]
+    ])
+    def xo_board_keyboard(board, game_id, can_play=True): 
+        # Простая заглушка. Замените на вашу реализацию в utils.keyboards
+        kb = []
+        for r in range(3):
+            row = []
+            for c in range(3):
+                cell = board[r][c]
+                cb_data = f"xo_move_{game_id}_{r}_{c}" if cell == " " and can_play else "xo_noop"
+                text = cell if cell != " " else "⬜"
+                row.append(InlineKeyboardButton(text=text, callback_data=cb_data))
+            kb.append(row)
+        return InlineKeyboardMarkup(inline_keyboard=kb)
+    def xo_bet_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Без ставки", callback_data="xo_bet_0")],
+        [InlineKeyboardButton(text="💰 50 NCoin", callback_data="xo_bet_50")],
+        [InlineKeyboardButton(text="💰 100 NCoin", callback_data="xo_bet_100")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="xo_vs_player")]
+    ])
+    def back_button(cb_data="back_to_menu"): return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=cb_data)]
+    ])
 
 router = Router()
 logger = __import__('logging').getLogger(__name__)
 
-# Хранилище активных игр
-active_games = {}
+# ==================== КОНФИГУРАЦИЯ ====================
 
-# Win combinations
+# Хранилище активных игр и временных состояний
+active_games = {}          # game_id -> game_state
+pending_challenges = {}    # user_id -> bet_amount
+
+# Комбинации победы
 WIN_COMBINATIONS = [
     [(0,0), (0,1), (0,2)], [(1,0), (1,1), (1,2)], [(2,0), (2,1), (2,2)],
     [(0,0), (1,0), (2,0)], [(0,1), (1,1), (2,1)], [(0,2), (1,2), (2,2)],
     [(0,0), (1,1), (2,2)], [(0,2), (1,1), (2,0)],
 ]
 
-# Сложность бота
 BOT_DIFFICULTY = {
     "easy": {"name": "😊 Лёгкий", "mistake_chance": 0.4},
-    "medium": {"name": "🤔 Средний", "mistake_chance": 0.1},
-    "hard": {"name": "🤖 Сложный", "mistake_chance": 0},
+    "medium": {"name": "🤔 Средний", "mistake_chance": 0.15},
+    "hard": {"name": "🤖 Сложный", "mistake_chance": 0.0},
 }
 
-# Таймаут хода (сек)
-TURN_TIMEOUT = 60
-
-# Комиссия (5%)
 COMMISSION = 0.05
+GAME_TIMEOUT_SECONDS = 600  # 10 минут на игру
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -58,15 +96,12 @@ async def get_or_create_user(user_id: int, username: str = None, first_name: str
 
 
 def check_winner(board: list) -> str | None:
-    """Проверка победителя"""
     for combo in WIN_COMBINATIONS:
         cells = [board[r][c] for r, c in combo]
         if cells[0] != " " and cells[0] == cells[1] == cells[2]:
             return cells[0]
-    
     if all(board[r][c] != " " for r in range(3) for c in range(3)):
         return "draw"
-    
     return None
 
 
@@ -74,96 +109,86 @@ def generate_game_id() -> str:
     return f"xo_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
 
 
-def _escape_html(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def copy_board(board: list) -> list:
+    """Безопасная копия поля для симуляции ходов ИИ"""
+    return [row[:] for row in board]
 
 
 # ==================== ЛОГИКА БОТА ====================
 
 def bot_move_easy(board: list) -> tuple:
-    """Лёгкий бот — 40% ошибок"""
-    if random.random() < 0.4:
+    if random.random() < BOT_DIFFICULTY["easy"]["mistake_chance"]:
         empty = [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]
         return random.choice(empty) if empty else None
     return bot_move_medium(board)
 
 
 def bot_move_medium(board: list) -> tuple:
-    """Средний бот — 10% ошибок"""
-    # 1. Победный ход
-    for r, c in [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]:
-        board[r][c] = "O"
-        if check_winner(board) == "O":
-            board[r][c] = " "
-            return (r, c)
-        board[r][c] = " "
-    
-    # 2. Блокировка
-    for r, c in [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]:
-        board[r][c] = "X"
-        if check_winner(board) == "X":
-            board[r][c] = " "
-            return (r, c)
-        board[r][c] = " "
-    
-    # 3. Центр
-    if board[1][1] == " ":
-        return (1, 1)
-    
-    # 4. Углы
-    corners = [(0,0), (0,2), (2,0), (2,2)]
-    empty_corners = [c for c in corners if board[c[0]][c[1]] == " "]
-    if empty_corners:
-        return random.choice(empty_corners)
-    
-    # 5. Случайный
-    empty = [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]
-    return random.choice(empty) if empty else None
+    if random.random() < BOT_DIFFICULTY["medium"]["mistake_chance"]:
+        empty = [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]
+        return random.choice(empty) if empty else None
+    return bot_move_hard(board)
 
 
 def bot_move_hard(board: list) -> tuple:
-    """Сложный бот — без ошибок"""
-    # 1. Победный ход
-    for r, c in [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]:
-        board[r][c] = "O"
-        if check_winner(board) == "O":
-            board[r][c] = " "
-            return (r, c)
-        board[r][c] = " "
+    sim = copy_board(board)
     
-    # 2. Блокировка
-    for r, c in [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]:
-        board[r][c] = "X"
-        if check_winner(board) == "X":
-            board[r][c] = " "
+    # 1. Победный ход
+    for r, c in [(r, c) for r in range(3) for c in range(3) if sim[r][c] == " "]:
+        sim[r][c] = "O"
+        if check_winner(sim) == "O":
             return (r, c)
-        board[r][c] = " "
+        sim[r][c] = " "
+    
+    # 2. Блокировка игрока
+    for r, c in [(r, c) for r in range(3) for c in range(3) if sim[r][c] == " "]:
+        sim[r][c] = "X"
+        if check_winner(sim) == "X":
+            return (r, c)
+        sim[r][c] = " "
     
     # 3. Центр
-    if board[1][1] == " ":
+    if sim[1][1] == " ":
         return (1, 1)
     
     # 4. Углы
     corners = [(0,0), (0,2), (2,0), (2,2)]
-    empty_corners = [c for c in corners if board[c[0]][c[1]] == " "]
+    empty_corners = [c for c in corners if sim[c[0]][c[1]] == " "]
     if empty_corners:
         return random.choice(empty_corners)
     
-    # 5. Любая
-    empty = [(r, c) for r in range(3) for c in range(3) if board[r][c] == " "]
+    # 5. Любая свободная
+    empty = [(r, c) for r in range(3) for c in range(3) if sim[r][c] == " "]
     return random.choice(empty) if empty else None
 
 
 BOT_MOVES = {"easy": bot_move_easy, "medium": bot_move_medium, "hard": bot_move_hard}
 
 
-# ==================== ОБРАБОТЧИКИ МЕНЮ ====================
+# ==================== ОЧИСТКА СТАРЫХ ИГР ====================
+
+async def cleanup_old_games():
+    """Удаляет игры, которые не активны более 10 минут"""
+    now = time.time()
+    expired = [gid for gid, g in active_games.items() if now - g.get("last_move", 0) > GAME_TIMEOUT_SECONDS]
+    for gid in expired:
+        game = active_games.pop(gid, None)
+        if game and game.get("bet", 0) > 0 and not game.get("finished", False):
+            # Возвращаем ставки при таймауте
+            try:
+                await db.update_balance(game["player_x"], game["bet"], "Возврат ставки (таймаут)")
+                if game["player_o"] != "bot":
+                    await db.update_balance(game["player_o"], game["bet"], "Возврат ставки (таймаут)")
+                logger.info(f"⏳ Game {gid} expired. Bets refunded.")
+            except Exception as e:
+                logger.error(f"Failed to refund bets for expired game {gid}: {e}")
+
+
+# ==================== ОБРАБОТЧИКИ ====================
 
 @router.message(Command("xo"))
 async def cmd_xo(message: types.Message):
-    """Главное меню крестиков-ноликов"""
     await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    
     await message.answer(
         "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n\n"
         "Выберите режим игры:\n\n"
@@ -185,7 +210,6 @@ async def game_xo_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "xo_vs_bot")
 async def xo_vs_bot_callback(callback: types.CallbackQuery):
-    """Выбор сложности бота"""
     await callback.message.edit_text(
         "🤖 <b>ИГРА С БОТОМ</b>\n\n"
         "Выберите уровень сложности:\n\n"
@@ -201,10 +225,12 @@ async def xo_vs_bot_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("xo_diff_"))
 async def xo_start_vs_bot(callback: types.CallbackQuery):
-    """Запуск игры с ботом"""
     difficulty = callback.data.split("_")[2]
+    if difficulty not in BOT_DIFFICULTY:
+        await callback.answer("❌ Неверная сложность!", show_alert=True)
+        return
+        
     user_id = callback.from_user.id
-    
     game_id = generate_game_id()
     board = [[" ", " ", " "], [" ", " ", " "], [" ", " ", " "]]
     
@@ -217,8 +243,10 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
         "bet": 0,
         "difficulty": difficulty,
         "chat_id": callback.message.chat.id,
+        "message_id": callback.message.message_id,
         "created_at": time.time(),
         "last_move": time.time(),
+        "finished": False,
     }
     
     diff_name = BOT_DIFFICULTY[difficulty]["name"]
@@ -237,7 +265,6 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "xo_vs_player")
 async def xo_vs_player_callback(callback: types.CallbackQuery):
-    """Выбор ставки для PvP"""
     await callback.message.edit_text(
         "👤 <b>ИГРА С ИГРОКОМ</b>\n\n"
         "Выберите ставку:\n\n"
@@ -252,11 +279,13 @@ async def xo_vs_player_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("xo_bet_"))
 async def xo_bet_selected(callback: types.CallbackQuery):
-    """Выбрана ставка — просим @username"""
-    bet = int(callback.data.split("_")[2])
-    
-    # Сохраняем ставку во временное хранилище
-    active_games[f"bet_{callback.from_user.id}"] = bet
+    try:
+        bet = int(callback.data.split("_")[2])
+    except ValueError:
+        await callback.answer("❌ Неверная ставка!", show_alert=True)
+        return
+        
+    pending_challenges[callback.from_user.id] = bet
     
     await callback.message.edit_text(
         f"👤 <b>ВЫЗОВ ИГРОКА</b>\n\n"
@@ -270,13 +299,11 @@ async def xo_bet_selected(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.message(lambda m: m.text and m.text.startswith('@') and f"bet_{m.from_user.id}" in active_games)
+@router.message(lambda m: m.text and m.text.startswith('@') and m.from_user.id in pending_challenges)
 async def xo_challenge_player(message: types.Message):
-    """Обработка вызова игрока"""
     user_id = message.from_user.id
     username = message.text.replace('@', '').strip()
-    
-    bet = active_games.pop(f"bet_{user_id}", 0)
+    bet = pending_challenges.pop(user_id, 0)
     
     user = await db.get_user(user_id)
     target = await db.get_user_by_username(username)
@@ -286,7 +313,6 @@ async def xo_challenge_player(message: types.Message):
         return
     
     target_id = target["user_id"]
-    
     if target_id == user_id:
         await message.answer("❌ Нельзя вызвать самого себя!")
         return
@@ -306,9 +332,11 @@ async def xo_challenge_player(message: types.Message):
         "current_turn": "X",
         "bet": bet,
         "chat_id": message.chat.id,
+        "message_id": message.message_id,
         "created_at": time.time(),
         "last_move": time.time(),
         "pending": True,
+        "finished": False,
     }
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -318,15 +346,13 @@ async def xo_challenge_player(message: types.Message):
     
     await message.answer(
         f"⚔️ <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
-        f"👤 {message.from_user.first_name} вызывает @{username}!\n"
+        f"👤 {html.escape(message.from_user.first_name)} вызывает @{html.escape(username)}!\n"
         f"💰 Ставка: <b>{bet} NCoin</b>\n\n"
-        f"@{username}, примите вызов!",
+        f"@{html.escape(username)}, примите вызов!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
 
-
-# ==================== ПРИНЯТИЕ/ОТКЛОНЕНИЕ ВЫЗОВА ====================
 
 @router.callback_query(F.data.startswith("xo_accept_"))
 async def xo_accept_challenge(callback: types.CallbackQuery):
@@ -338,16 +364,13 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
         return
     
     game = active_games[game_id]
-    
     if user_id != game["player_o"]:
         await callback.answer("❌ Это не вам!", show_alert=True)
         return
-    
-    if game.get("pending", False) == False:
+    if not game.get("pending", False):
         await callback.answer("❌ Вызов уже принят!", show_alert=True)
         return
     
-    # Проверка баланса
     bet = game["bet"]
     if bet > 0:
         balance_o = await db.get_balance(game["player_o"])
@@ -356,37 +379,36 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
         if balance_o < bet:
             await callback.answer(f"❌ У вас недостаточно средств! Нужно {bet}", show_alert=True)
             return
-        
         if balance_x < bet:
             await callback.answer(f"❌ У противника недостаточно средств!", show_alert=True)
             return
         
-        # Списываем ставки
         await db.update_balance(game["player_x"], -bet, "Ставка в крестики-нолики")
         await db.update_balance(game["player_o"], -bet, "Ставка в крестики-нолики")
     
     game["pending"] = False
     game["last_move"] = time.time()
     
-    player_x_name = (await db.get_user(game["player_x"]))["first_name"]
-    player_o_name = callback.from_user.first_name
+    player_x_name = html.escape((await db.get_user(game["player_x"]))["first_name"])
+    player_o_name = html.escape(callback.from_user.first_name)
     
+    # Обновляем сообщение вызова
     await callback.message.edit_text(
         f"🎮 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
-        f"❌ <b>X:</b> {_escape_html(player_x_name)}\n"
-        f"⭕ <b>O:</b> {_escape_html(player_o_name)}\n"
+        f"❌ <b>X:</b> {player_x_name}\n"
+        f"⭕ <b>O:</b> {player_o_name}\n"
         f"💰 Ставка: <b>{bet} NCoin</b>\n\n"
         f"👇 Ходит <b>{player_x_name} (X)</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=xo_board_keyboard(game["board"], game_id, can_play=False)
     )
     
-    # Отправляем сообщение с полем в чат
+    # Отправляем игровое поле
     msg = await callback.bot.send_message(
         game["chat_id"],
         f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-        f"❌ {_escape_html(player_x_name)} vs ⭕ {_escape_html(player_o_name)}\n\n"
-        f"👇 Ход {_escape_html(player_x_name)}:",
+        f"❌ {player_x_name} vs ⭕ {player_o_name}\n\n"
+        f"👇 Ход {player_x_name}:",
         parse_mode=ParseMode.HTML,
         reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
     )
@@ -405,25 +427,27 @@ async def xo_reject_challenge(callback: types.CallbackQuery):
         return
     
     game = active_games.pop(game_id)
-    
     if user_id != game["player_o"]:
         await callback.answer("❌ Это не вам!", show_alert=True)
         return
     
     await callback.message.edit_text(
-        f"❌ {callback.from_user.first_name} отклонил вызов!",
+        f"❌ {html.escape(callback.from_user.first_name)} отклонил вызов!",
         parse_mode=ParseMode.HTML
     )
     await callback.answer()
 
 
-# ==================== ИГРОВОЙ ХОД ====================
-
 @router.callback_query(F.data.startswith("xo_move_"))
 async def xo_make_move(callback: types.CallbackQuery):
     parts = callback.data.split("_")
     game_id = parts[2]
-    r, c = int(parts[3]), int(parts[4])
+    try:
+        r, c = int(parts[3]), int(parts[4])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Неверный ход!", show_alert=True)
+        return
+        
     user_id = callback.from_user.id
     
     if game_id not in active_games:
@@ -431,6 +455,15 @@ async def xo_make_move(callback: types.CallbackQuery):
         return
     
     game = active_games[game_id]
+    if game.get("finished", False):
+        await callback.answer("❌ Игра уже окончена!", show_alert=True)
+        return
+        
+    # Таймаут
+    if time.time() - game["last_move"] > GAME_TIMEOUT_SECONDS:
+        await end_game(callback, game_id, game, "timeout")
+        await callback.answer("⏳ Игра завершена по таймауту.", show_alert=True)
+        return
     
     # Проверка очереди
     current_turn = game["current_turn"]
@@ -444,23 +477,20 @@ async def xo_make_move(callback: types.CallbackQuery):
         await callback.answer("❌ Клетка занята!", show_alert=True)
         return
     
-    # Делаем ход
+    # Ход
     game["board"][r][c] = current_turn
     game["last_move"] = time.time()
     
-    # Проверка победы
     winner = check_winner(game["board"])
-    
     if winner:
         await end_game(callback, game_id, game, winner)
         return
     
-    # Меняем игрока
+    # Смена хода
     game["current_turn"] = "O" if current_turn == "X" else "X"
     
-    # Обновляем сообщение
-    player_x = (await db.get_user(game["player_x"]))["first_name"]
-    player_o = (await db.get_user(game["player_o"]))["first_name"] if game["player_o"] != "bot" else "Бот"
+    player_x = html.escape((await db.get_user(game["player_x"]))["first_name"])
+    player_o = html.escape((await db.get_user(game["player_o"]))["first_name"]) if game["player_o"] != "bot" else "Бот"
     next_player = player_x if game["current_turn"] == "X" else player_o
     
     can_play = True
@@ -470,23 +500,21 @@ async def xo_make_move(callback: types.CallbackQuery):
     
     await callback.message.edit_text(
         f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-        f"❌ {_escape_html(player_x)} vs ⭕ {_escape_html(player_o)}\n"
+        f"❌ {player_x} vs ⭕ {player_o}\n"
         f"💰 Ставка: <b>{game['bet']} NCoin</b>\n\n"
-        f"👇 Ход <b>{_escape_html(next_player)} ({game['current_turn']})</b>",
+        f"👇 Ход <b>{next_player} ({game['current_turn']})</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=xo_board_keyboard(game["board"], game_id, can_play=can_play)
     )
     
-    # Ход бота
     if game["type"] == "pvb" and game["current_turn"] == "O":
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.6)
         await bot_turn(callback, game_id, game)
     
     await callback.answer()
 
 
 async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
-    """Ход бота"""
     difficulty = game.get("difficulty", "medium")
     move_func = BOT_MOVES.get(difficulty, bot_move_medium)
     
@@ -506,29 +534,44 @@ async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
         return
     
     game["current_turn"] = "X"
+    game["last_move"] = time.time()
     
-    player_x = (await db.get_user(game["player_x"]))["first_name"]
+    player_x = html.escape((await db.get_user(game["player_x"]))["first_name"])
     
     await callback.message.edit_text(
         f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-        f"❌ {_escape_html(player_x)} vs 🤖 Бот\n"
+        f"❌ {player_x} vs 🤖 Бот\n"
         f"Сложность: {BOT_DIFFICULTY[difficulty]['name']}\n\n"
-        f"👇 Ваш ход, <b>{_escape_html(player_x)} (X)</b>",
+        f"👇 Ваш ход, <b>{player_x} (X)</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
     )
 
 
-async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, winner: str):
-    """Завершение игры"""
+async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, result: str):
+    if game.get("finished", False):
+        return
+    game["finished"] = True
+    
     bet = game["bet"]
     player_x = game["player_x"]
     player_o = game["player_o"]
     
     result_text = ""
     
-    if winner == "X":
-        result_text = f"🎉 ПОБЕДИЛ {_escape_html((await db.get_user(player_x))['first_name'])} (X)!"
+    if result == "timeout":
+        result_text = "⏳ <b>ВРЕМЯ ВЫШЛО!</b>\nИгра завершена. Ставки возвращены."
+        if bet > 0:
+            await db.update_balance(player_x, bet, "Возврат ставки (таймаут)")
+            if player_o != "bot":
+                await db.update_balance(player_o, bet, "Возврат ставки (таймаут)")
+        await update_xo_stats(player_x, "draw")
+        if player_o != "bot":
+            await update_xo_stats(player_o, "draw")
+            
+    elif result == "X":
+        px_name = html.escape((await db.get_user(player_x))["first_name"])
+        result_text = f"🎉 ПОБЕДИЛ {px_name} (X)!"
         if bet > 0:
             win_amount = int(bet * 2 * (1 - COMMISSION))
             await db.update_balance(player_x, win_amount, "Выигрыш в крестики-нолики")
@@ -536,19 +579,21 @@ async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, winn
         await update_xo_stats(player_x, "win")
         if player_o != "bot":
             await update_xo_stats(player_o, "loss")
-    elif winner == "O":
+            
+    elif result == "O":
         if player_o == "bot":
             result_text = "🤖 ПОБЕДИЛ БОТ!"
             await update_xo_stats(player_x, "loss_vs_bot")
         else:
-            result_text = f"🎉 ПОБЕДИЛ {_escape_html((await db.get_user(player_o))['first_name'])} (O)!"
+            po_name = html.escape((await db.get_user(player_o))["first_name"])
+            result_text = f"🎉 ПОБЕДИЛ {po_name} (O)!"
             if bet > 0:
                 win_amount = int(bet * 2 * (1 - COMMISSION))
                 await db.update_balance(player_o, win_amount, "Выигрыш в крестики-нолики")
                 result_text += f"\n💰 Получено: <b>{win_amount} NCoin</b>"
             await update_xo_stats(player_o, "win")
             await update_xo_stats(player_x, "loss")
-    else:
+    else:  # draw
         result_text = "🤝 НИЧЬЯ!"
         if bet > 0:
             await db.update_balance(player_x, bet, "Возврат ставки (ничья)")
@@ -559,7 +604,7 @@ async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, winn
         if player_o != "bot":
             await update_xo_stats(player_o, "draw")
     
-    del active_games[game_id]
+    active_games.pop(game_id, None)
     
     await callback.message.edit_text(
         f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
@@ -581,9 +626,12 @@ async def xo_surrender(callback: types.CallbackQuery):
         return
     
     game = active_games[game_id]
-    
+    if game.get("finished", False):
+        await callback.answer("❌ Игра уже окончена!", show_alert=True)
+        return
+        
     if user_id == game["player_x"]:
-        winner = "O" if game["player_o"] != "bot" else "O"
+        winner = "O"
     elif user_id == game["player_o"]:
         winner = "X"
     else:
@@ -597,7 +645,6 @@ async def xo_surrender(callback: types.CallbackQuery):
 # ==================== СТАТИСТИКА ====================
 
 async def update_xo_stats(user_id: int, result_type: str):
-    """Обновление статистики"""
     def _sync_update():
         conn = db._get_connection()
         cursor = conn.cursor()
@@ -638,13 +685,11 @@ async def xo_stats_callback(callback: types.CallbackQuery):
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT games_played, wins, losses, draws, losses_vs_bot FROM xo_stats WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return row
+        return cursor.fetchone()
     
     row = await asyncio.to_thread(_sync_get)
     
-    if not row:
+    if not row or row[0] == 0:
         await callback.message.edit_text(
             "📊 <b>СТАТИСТИКА КРЕСТИКОВ-НОЛИКОВ</b>\n\n"
             "У вас пока нет сыгранных игр!\n\n"
@@ -696,7 +741,7 @@ async def xo_help_callback(callback: types.CallbackQuery):
         "💰 <b>Ставки:</b>\n"
         "• Победитель получает ставку ×2\n"
         "• Комиссия бота: 5%\n"
-        "• При ничьей ставка возвращается",
+        "• При ничьей или таймауте ставка возвращается",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button("game_xo")
     )
@@ -705,4 +750,5 @@ async def xo_help_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "xo_noop")
 async def xo_noop(callback: types.CallbackQuery):
-    await callback.answer("❌ Эта клетка занята!", show_alert=True)
+    await callback.answer("❌ Эта клетка занята или игра не активна!", show_alert=True)
+
