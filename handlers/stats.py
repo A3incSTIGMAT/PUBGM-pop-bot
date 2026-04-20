@@ -1,20 +1,19 @@
-"""
-Модуль статистики NEXUS Bot
-Личная статистика, глобальные топы, активность
-ПОЛНОСТЬЮ ЗАЩИЩЕНО ОТ NULL
-"""
+# ============================================
+# ФАЙЛ: handlers/stats.py
+# ОПИСАНИЕ: Модуль статистики NEXUS Bot — ОБЪЕДИНЁННАЯ ЛУЧШАЯ ВЕРСИЯ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ============================================
 
 import asyncio
 import logging
 import html
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db
-from config import START_BALANCE
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -22,11 +21,14 @@ logger = logging.getLogger(__name__)
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-def format_number(num: int) -> str:
+def format_number(num: any) -> str:
     """Форматирование числа с разделителями"""
     if num is None:
         return "0"
-    return f"{num:,}".replace(",", " ")
+    try:
+        return f"{int(num):,}".replace(",", " ")
+    except (ValueError, TypeError):
+        return "0"
 
 
 def format_date(date_str: str) -> str:
@@ -34,14 +36,17 @@ def format_date(date_str: str) -> str:
     if not date_str:
         return "Неизвестно"
     try:
-        dt = datetime.fromisoformat(date_str)
-        return dt.strftime("%d.%m.%Y")
+        if len(date_str) >= 10:
+            return date_str[:10]
+        return date_str
     except:
-        return date_str[:10] if len(date_str) >= 10 else date_str
+        return "Неизвестно"
 
 
 def get_medal(position: int) -> str:
     """Получить медаль для позиции"""
+    if position is None:
+        return "—"
     if position == 1:
         return "🥇"
     elif position == 2:
@@ -58,6 +63,22 @@ def safe_get(obj: dict, key: str, default: any = 0) -> any:
         return default
     value = obj.get(key)
     return value if value is not None else default
+
+
+def escape_name(user: dict) -> str:
+    """Безопасное получение имени пользователя"""
+    if user is None:
+        return "Пользователь"
+    
+    username = user.get("username")
+    if username:
+        return f"@{html.escape(username)}"
+    
+    first_name = user.get("first_name")
+    if first_name:
+        return html.escape(first_name[:20] if len(first_name) > 20 else first_name)
+    
+    return "Пользователь"
 
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -103,39 +124,52 @@ def back_to_tops_keyboard() -> InlineKeyboardMarkup:
 @router.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     """Показать статистику пользователя"""
-    args = message.text.strip().split()
+    if message is None:
+        return
+        
+    args = message.text.strip().split() if message.text else []
     
     # Если указан @username
     if len(args) > 1 and args[1].startswith('@'):
         username = args[1].lstrip('@')
-        target_user = await db.get_user_by_username(username)
-        if not target_user:
-            await message.answer(f"❌ Пользователь @{username} не найден!")
-            return
-        target_id = target_user.get("user_id")
-        if target_id is None:
-            await message.answer(f"❌ Пользователь не активировал бота!")
-            return
+        if username:
+            target_user = await db.get_user_by_username(username)
+            if not target_user:
+                await message.answer(f"❌ Пользователь @{username} не найден!")
+                return
+            target_id = target_user.get("user_id")
+            if target_id is None:
+                await message.answer(f"❌ Пользователь не активировал бота!")
+                return
+        else:
+            target_id = message.from_user.id
     else:
         target_id = message.from_user.id
+    
+    if target_id is None:
+        await message.answer("❌ Не удалось определить пользователя!")
+        return
     
     stats = await db.get_user_stats(target_id)
     user = await db.get_user(target_id)
     
     if not stats or not user:
-        await message.answer("❌ Статистика не найдена!")
+        await message.answer(
+            "❌ Статистика не найдена!\n\n"
+            "Используйте /start для регистрации.",
+            parse_mode=ParseMode.HTML
+        )
         return
     
     # Формируем ответ
+    name_display = escape_name(user)
     first_name = html.escape(user.get("first_name") or "Пользователь")
-    username = user.get("username")
-    name_display = f"@{username}" if username else first_name
     
     register_date = format_date(safe_get(stats, "user_register_date", ""))
     days_active = safe_get(stats, "days_active", 0)
     
     text = f"""
-📊 <b>СТАТИСТИКА {html.escape(name_display)}</b>
+📊 <b>СТАТИСТИКА {name_display}</b>
 
 👤 <b>{first_name}</b>
 📅 В боте с: {register_date} ({days_active} дней)
@@ -149,7 +183,7 @@ async def cmd_stats(message: types.Message):
 ├ За месяц: <b>{format_number(safe_get(stats, 'messages_month'))}</b>
 ├ Голосовых: <b>{format_number(safe_get(stats, 'total_voice'))}</b>
 ├ Стикеров: <b>{format_number(safe_get(stats, 'total_stickers'))}</b>
-└ Медиа: <b>{format_number(safe_get(stats, 'total_photos') + safe_get(stats, 'total_videos') + safe_get(stats, 'total_gifs'))}</b>
+└ Медиа: <b>{format_number(safe_get(stats, 'total_photos', 0) + safe_get(stats, 'total_videos', 0) + safe_get(stats, 'total_gifs', 0))}</b>
 
 🔥 <b>СТРИК АКТИВНОСТИ:</b>
 ├ Дней активности: <b>{format_number(days_active)}</b>
@@ -198,6 +232,9 @@ async def cmd_stats(message: types.Message):
 @router.message(Command("top"))
 async def cmd_top(message: types.Message):
     """Меню топов"""
+    if message is None:
+        return
+        
     await message.answer(
         "🏆 <b>ТОПЫ NEXUS</b>\n\n"
         "Выберите категорию:",
@@ -211,6 +248,9 @@ async def cmd_top(message: types.Message):
 @router.callback_query(F.data == "stats_menu")
 async def stats_menu_callback(callback: types.CallbackQuery):
     """Меню статистики"""
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "📊 <b>СТАТИСТИКА</b>\n\n"
         "Выберите действие:",
@@ -223,21 +263,29 @@ async def stats_menu_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "stats_my")
 async def stats_my_callback(callback: types.CallbackQuery):
     """Моя статистика"""
+    if callback is None or callback.message is None:
+        return
+        
     target_id = callback.from_user.id
+    if target_id is None:
+        await callback.answer("❌ Не удалось определить пользователя!", show_alert=True)
+        return
+        
     stats = await db.get_user_stats(target_id)
     user = await db.get_user(target_id)
     
     if not stats or not user:
         await callback.message.edit_text(
-            "❌ Статистика не найдена!",
+            "❌ Статистика не найдена!\n\n"
+            "Используйте /start для регистрации.",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_stats_keyboard()
         )
         await callback.answer()
         return
     
+    name_display = escape_name(user)
     first_name = html.escape(user.get("first_name") or "Пользователь")
-    username = user.get("username")
-    name_display = f"@{username}" if username else first_name
     
     register_date = format_date(safe_get(stats, "user_register_date", ""))
     days_active = safe_get(stats, "days_active", 0)
@@ -248,7 +296,7 @@ async def stats_my_callback(callback: types.CallbackQuery):
     winrate = (wins / games * 100) if games > 0 else 0
     
     text = f"""
-📊 <b>СТАТИСТИКА {html.escape(name_display)}</b>
+📊 <b>СТАТИСТИКА {name_display}</b>
 
 👤 <b>{first_name}</b>
 📅 В боте с: {register_date} ({days_active} дней)
@@ -299,6 +347,9 @@ async def stats_my_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "stats_tops")
 async def stats_tops_callback(callback: types.CallbackQuery):
     """Меню топов"""
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "🏆 <b>ТОПЫ NEXUS</b>\n\n"
         "Выберите категорию:",
@@ -313,11 +364,15 @@ async def stats_tops_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_messages")
 async def top_messages_callback(callback: types.CallbackQuery):
     """Топ по сообщениям"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_messages(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет данных!",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -326,19 +381,19 @@ async def top_messages_callback(callback: types.CallbackQuery):
     text = "💬 <b>ТОП-15 ПО СООБЩЕНИЯМ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
+        name = escape_name(u)
         messages = format_number(u.get("messages_total", 0))
         text += f"{medal} <b>{name}</b> — {messages} сообщ.\n"
     
-    # Ищем позицию пользователя
     user_id = callback.from_user.id
-    user_stats = await db.get_user_stats(user_id)
-    user_messages = safe_get(user_stats, "messages_total", 0) if user_stats else 0
-    
-    if user_messages > 0:
-        text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваши сообщения: <b>{format_number(user_messages)}</b>"
+    if user_id:
+        user_stats = await db.get_user_stats(user_id)
+        user_messages = safe_get(user_stats, "messages_total", 0) if user_stats else 0
+        if user_messages > 0:
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваши сообщения: <b>{format_number(user_messages)}</b>"
     
     await callback.message.edit_text(
         text,
@@ -351,11 +406,15 @@ async def top_messages_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_balance")
 async def top_balance_callback(callback: types.CallbackQuery):
     """Топ по балансу"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_balance(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет данных!",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -364,16 +423,19 @@ async def top_balance_callback(callback: types.CallbackQuery):
     text = "💰 <b>ТОП-15 ПО БАЛАНСУ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
+        name = escape_name(u)
         balance = format_number(u.get("balance", 0))
-        vip = " ⭐" if u.get("vip_level", 0) > 0 else ""
+        vip = " ⭐" if safe_get(u, "vip_level", 0) > 0 else ""
         text += f"{medal} <b>{name}</b>{vip} — {balance} NCoin\n"
     
-    user_balance = await db.get_balance(callback.from_user.id)
-    if user_balance > 0:
-        text += f"\n━━━━━━━━━━━━━━━━━━━━━\n💰 Ваш баланс: <b>{format_number(user_balance)} NCoin</b>"
+    user_id = callback.from_user.id
+    if user_id:
+        user_balance = await db.get_balance(user_id)
+        if user_balance > 0:
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n💰 Ваш баланс: <b>{format_number(user_balance)} NCoin</b>"
     
     await callback.message.edit_text(
         text,
@@ -386,11 +448,15 @@ async def top_balance_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_xo")
 async def top_xo_callback(callback: types.CallbackQuery):
     """Топ по крестикам-ноликам"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_xo(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет данных! Сыграйте хотя бы 3 игры.",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -399,23 +465,23 @@ async def top_xo_callback(callback: types.CallbackQuery):
     text = "🎮 <b>ТОП-15 ПО КРЕСТИКАМ-НОЛИКАМ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
-        wins = u.get("wins", 0)
-        games = u.get("games_played", 0)
-        winrate = u.get("winrate", 0)
-        text += f"{medal} <b>{name}</b> — {wins} побед ({games} игр, {winrate:.1f}%)\n"
+        name = escape_name(u)
+        wins = safe_get(u, "wins", 0)
+        games = safe_get(u, "games_played", 0)
+        text += f"{medal} <b>{name}</b> — {wins} побед ({games} игр)\n"
     
-    # Статистика пользователя
     user_id = callback.from_user.id
-    user_stats = await db.get_user_stats(user_id)
-    if user_stats:
-        user_wins = safe_get(user_stats, "wins", 0)
-        user_games = safe_get(user_stats, "games_played", 0)
-        if user_games > 0:
-            user_winrate = (user_wins / user_games * 100) if user_games > 0 else 0
-            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎮 Ваши победы: <b>{user_wins}</b> ({user_games} игр, {user_winrate:.1f}%)"
+    if user_id:
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            user_wins = safe_get(user_stats, "wins", 0)
+            user_games = safe_get(user_stats, "games_played", 0)
+            if user_games > 0:
+                user_winrate = (user_wins / user_games * 100) if user_games > 0 else 0
+                text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎮 Ваши победы: <b>{user_wins}</b> ({user_games} игр, {user_winrate:.1f}%)"
     
     await callback.message.edit_text(
         text,
@@ -428,11 +494,15 @@ async def top_xo_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_activity")
 async def top_activity_callback(callback: types.CallbackQuery):
     """Топ по активности"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_activity(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет данных!",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -441,20 +511,21 @@ async def top_activity_callback(callback: types.CallbackQuery):
     text = "🔥 <b>ТОП-15 ПО АКТИВНОСТИ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
-        days = u.get("days_active", 0)
-        streak = u.get("current_streak", 0)
+        name = escape_name(u)
+        days = safe_get(u, "days_active", 0)
+        streak = safe_get(u, "current_streak", 0)
         text += f"{medal} <b>{name}</b> — {days} дней (стрик {streak})\n"
     
-    # Статистика пользователя
     user_id = callback.from_user.id
-    user_stats = await db.get_user_stats(user_id)
-    if user_stats:
-        user_days = safe_get(user_stats, "days_active", 0)
-        user_streak = safe_get(user_stats, "current_streak", 0)
-        text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваша активность: <b>{user_days} дней (стрик {user_streak})</b>"
+    if user_id:
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            user_days = safe_get(user_stats, "days_active", 0)
+            user_streak = safe_get(user_stats, "current_streak", 0)
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваша активность: <b>{user_days} дней (стрик {user_streak})</b>"
     
     await callback.message.edit_text(
         text,
@@ -467,11 +538,15 @@ async def top_activity_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_daily")
 async def top_daily_callback(callback: types.CallbackQuery):
     """Топ по daily стрику"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_daily_streak(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет данных! Получите ежедневный бонус.",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -480,18 +555,19 @@ async def top_daily_callback(callback: types.CallbackQuery):
     text = "🎁 <b>ТОП-15 ПО DAILY СТРИКУ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
-        streak = u.get("daily_streak", 0)
+        name = escape_name(u)
+        streak = safe_get(u, "daily_streak", 0)
         text += f"{medal} <b>{name}</b> — {streak} дней\n"
     
-    # Статистика пользователя
     user_id = callback.from_user.id
-    user = await db.get_user(user_id)
-    if user:
-        user_streak = user.get("daily_streak", 0) or 0
-        text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎁 Ваш стрик: <b>{user_streak} дней</b>"
+    if user_id:
+        user = await db.get_user(user_id)
+        if user:
+            user_streak = safe_get(user, "daily_streak", 0)
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━\n🎁 Ваш стрик: <b>{user_streak} дней</b>"
     
     await callback.message.edit_text(
         text,
@@ -504,11 +580,15 @@ async def top_daily_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_donors")
 async def top_donors_callback(callback: types.CallbackQuery):
     """Топ донатеров"""
+    if callback is None or callback.message is None:
+        return
+        
     top_users = await db.get_top_donors(15)
     
     if not top_users:
         await callback.message.edit_text(
             "📊 Пока нет донатов. Будьте первым!",
+            parse_mode=ParseMode.HTML,
             reply_markup=back_to_tops_keyboard()
         )
         await callback.answer()
@@ -517,11 +597,12 @@ async def top_donors_callback(callback: types.CallbackQuery):
     text = "💎 <b>ТОП-15 ДОНАТЕРОВ</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, u in enumerate(top_users, 1):
+        if u is None:
+            continue
         medal = get_medal(i)
-        name = u.get("username") or u.get("first_name") or "Пользователь"
-        name = html.escape(name[:20])
-        donated = format_number(u.get("total_donated", 0))
-        rank = u.get("donor_rank", "💎 Поддерживающий")
+        name = escape_name(u)
+        donated = format_number(safe_get(u, "total_donated", 0))
+        rank = u.get("donor_rank", "💎 Поддерживающий") or "💎 Поддерживающий"
         text += f"{medal} <b>{name}</b> — {donated} ₽\n   {rank}\n\n"
     
     text += "━━━━━━━━━━━━━━━━━━━━━\n❤️ <i>Спасибо за поддержку проекта!</i>"
@@ -539,6 +620,9 @@ async def top_donors_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "stats")
 async def stats_main_callback(callback: types.CallbackQuery):
     """Кнопка СТАТИСТИКА из главного меню"""
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "📊 <b>СТАТИСТИКА</b>\n\n"
         "Выберите действие:",
@@ -552,7 +636,7 @@ async def stats_main_callback(callback: types.CallbackQuery):
 
 async def track_message(user_id: int, message: types.Message):
     """Отслеживание сообщения (вызывать из smart_commands)"""
-    if user_id is None:
+    if user_id is None or message is None:
         return
     
     activity_type = "message"
@@ -576,7 +660,7 @@ async def track_xo_game(user_id: int, result_type: str, bet: int = 0, won: int =
     if user_id is None:
         return
     
-    await db.update_xo_stats(user_id, result_type, bet, won)
+    await db.update_xo_stats(user_id, result_type, bet if bet is not None else 0, won if won is not None else 0)
     await db.track_user_activity(user_id, "xo_game", 1)
 
 
