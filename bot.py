@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""
-NEXUS Chat Manager v5.0 — Точка входа
-Запуск на платформе Amvera
-ПОЛНОСТЬЮ ЗАЩИЩЕНО ОТ NULL
-"""
+# ============================================
+# ФАЙЛ: bot.py
+# ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ВКЛЮЧАЕТ: Авторегистрацию, статистику, крестики-нолики, утреннюю очистку
+# ============================================
 
 import asyncio
 import logging
 import os
 import sys
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -25,13 +27,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from config import BOT_TOKEN, START_BALANCE
+from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
+try:
+    from handlers.tictactoe import set_bot
+    set_bot(bot)
+    logger.info("✅ Bot instance set for tictactoe")
+except Exception as e:
+    logger.warning(f"⚠️ Could not set bot for tictactoe: {e}")
+
+try:
+    from handlers.smart_commands import set_bot as set_smart_bot
+    set_smart_bot(bot)
+except:
+    pass
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
@@ -144,8 +160,9 @@ async def on_startup():
     # Запускаем периодическое обновление стриков
     try:
         asyncio.create_task(schedule_streak_updates())
-    except:
-        pass
+        logger.info("✅ Планировщик стриков запущен")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка запуска планировщика стриков: {e}")
     
     # Запускаем планировщик утренней очистки
     try:
@@ -155,7 +172,48 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
     
+    # Автоматическая регистрация всех участников чатов при старте
+    try:
+        await auto_register_all_chat_members()
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка авторегистрации участников: {e}")
+    
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
+
+
+async def auto_register_all_chat_members():
+    """Автоматическая регистрация всех участников чатов при старте бота"""
+    try:
+        # Получаем список всех чатов из active_chats
+        from utils.auto_delete import _active_chats, add_active_chat
+        
+        registered = 0
+        for chat_id in list(_active_chats):
+            if chat_id is None:
+                continue
+            try:
+                # Получаем список участников чата
+                members = await bot.get_chat_administrators(chat_id)
+                for member in members:
+                    if member.user.is_bot:
+                        continue
+                    user_id = member.user.id
+                    username = member.user.username
+                    first_name = member.user.first_name
+                    
+                    # Проверяем существование и создаём если нужно
+                    user = await db.get_user(user_id)
+                    if not user:
+                        await db.create_user(user_id, username, first_name, START_BALANCE)
+                        registered += 1
+                        logger.info(f"Auto-registered user {user_id} (@{username}) from chat {chat_id}")
+            except Exception as e:
+                logger.debug(f"Could not register members from chat {chat_id}: {e}")
+        
+        if registered > 0:
+            logger.info(f"✅ Auto-registered {registered} users from all chats")
+    except Exception as e:
+        logger.error(f"Error in auto_register_all_chat_members: {e}")
 
 
 async def schedule_streak_updates():
