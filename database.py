@@ -2,7 +2,7 @@ import sqlite3
 import os
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Any
 
 from config import DATABASE_PATH
@@ -73,6 +73,95 @@ class Database:
                 about TEXT,
                 created_at TEXT,
                 updated_at TEXT
+            )
+        """)
+        
+        # ==================== ТАБЛИЦЫ СТАТИСТИКИ ====================
+        
+        # Основная статистика пользователя (глобальная, не привязана к чату)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_stats (
+                user_id INTEGER PRIMARY KEY,
+                messages_total INTEGER DEFAULT 0,
+                messages_today INTEGER DEFAULT 0,
+                messages_week INTEGER DEFAULT 0,
+                messages_month INTEGER DEFAULT 0,
+                last_message_date TEXT,
+                register_date TEXT,
+                last_active TEXT,
+                total_voice INTEGER DEFAULT 0,
+                total_stickers INTEGER DEFAULT 0,
+                total_gifs INTEGER DEFAULT 0,
+                total_photos INTEGER DEFAULT 0,
+                total_videos INTEGER DEFAULT 0,
+                days_active INTEGER DEFAULT 0,
+                current_streak INTEGER DEFAULT 0,
+                max_streak INTEGER DEFAULT 0,
+                last_streak_update TEXT
+            )
+        """)
+        
+        # Лог активности по дням
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                messages INTEGER DEFAULT 0,
+                voice INTEGER DEFAULT 0,
+                stickers INTEGER DEFAULT 0,
+                gifs INTEGER DEFAULT 0,
+                photos INTEGER DEFAULT 0,
+                videos INTEGER DEFAULT 0,
+                games_played INTEGER DEFAULT 0,
+                xo_games INTEGER DEFAULT 0,
+                UNIQUE(user_id, date)
+            )
+        """)
+        
+        # Статистика крестиков-ноликов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS xo_stats (
+                user_id INTEGER PRIMARY KEY,
+                games_played INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0,
+                wins_vs_bot INTEGER DEFAULT 0,
+                losses_vs_bot INTEGER DEFAULT 0,
+                total_bet INTEGER DEFAULT 0,
+                total_won INTEGER DEFAULT 0,
+                max_win_streak INTEGER DEFAULT 0,
+                current_win_streak INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Экономическая статистика
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_economy_stats (
+                user_id INTEGER PRIMARY KEY,
+                total_earned INTEGER DEFAULT 0,
+                total_spent INTEGER DEFAULT 0,
+                total_transferred INTEGER DEFAULT 0,
+                total_received INTEGER DEFAULT 0,
+                total_donated_rub INTEGER DEFAULT 0,
+                total_donated_coins INTEGER DEFAULT 0,
+                max_balance INTEGER DEFAULT 0,
+                daily_claims INTEGER DEFAULT 0,
+                vip_purchases INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Кэш глобальных топов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS global_tops_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                top_type TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                position INTEGER,
+                value INTEGER,
+                updated_at TEXT,
+                UNIQUE(top_type, user_id)
             )
         """)
         
@@ -369,13 +458,16 @@ class Database:
         return self
     
     async def close(self):
-        """Закрытие соединения (ничего не делаем, sqlite3 сам управляет)"""
+        """Закрытие соединения"""
         pass
     
     # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        """Получить пользователя (АСИНХРОННО)"""
+        """Получить пользователя"""
+        if user_id is None:
+            return None
+            
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -389,6 +481,9 @@ class Database:
     
     async def get_user_by_username(self, username: str) -> Optional[Dict]:
         """Найти пользователя по username"""
+        if username is None:
+            return None
+            
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -401,14 +496,32 @@ class Database:
         return await asyncio.to_thread(_sync_get)
     
     async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
-        """Создать пользователя (АСИНХРОННО)"""
+        """Создать пользователя"""
+        if user_id is None:
+            return
+            
         def _sync_create():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            today = datetime.now().strftime("%Y-%m-%d")
+            
             cursor.execute("""
                 INSERT OR IGNORE INTO users (user_id, username, first_name, balance, register_date, warns)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (user_id, username, first_name, balance, datetime.now().isoformat(), '[]'))
+            """, (user_id, username, first_name, balance, now, '[]'))
+            
+            # Инициализируем статистику
+            cursor.execute("""
+                INSERT OR IGNORE INTO user_stats (user_id, register_date, last_active)
+                VALUES (?, ?, ?)
+            """, (user_id, today, now))
+            
+            cursor.execute("""
+                INSERT OR IGNORE INTO user_economy_stats (user_id, max_balance)
+                VALUES (?, ?)
+            """, (user_id, balance if balance is not None else 1000))
+            
             conn.commit()
             conn.close()
         
@@ -416,26 +529,48 @@ class Database:
     
     async def user_exists(self, user_id: int) -> bool:
         """Проверить существование пользователя"""
+        if user_id is None:
+            return False
         user = await self.get_user(user_id)
         return user is not None
     
     async def update_balance(self, user_id: int, delta: int, reason: str = ""):
-        """Обновить баланс (АТОМАРНАЯ ТРАНЗАКЦИЯ)"""
+        """Обновить баланс"""
+        if user_id is None or delta is None:
+            return
+            
         def _sync_update():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 
-                # Обновляем баланс
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
                 
-                # Записываем транзакцию если есть причина
                 if reason:
                     cursor.execute("""
                         INSERT INTO transactions (from_id, to_id, amount, reason, date)
                         VALUES (?, ?, ?, ?, ?)
                     """, (user_id, user_id, abs(delta), reason, datetime.now().isoformat()))
+                
+                # Обновляем max_balance и статистику
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    new_balance = row[0]
+                    cursor.execute("""
+                        UPDATE user_economy_stats 
+                        SET max_balance = MAX(COALESCE(max_balance, 0), ?),
+                            total_earned = COALESCE(total_earned, 0) + ? 
+                        WHERE user_id = ?
+                    """, (new_balance, max(0, delta), user_id))
+                    
+                    if delta < 0:
+                        cursor.execute("""
+                            UPDATE user_economy_stats 
+                            SET total_spent = COALESCE(total_spent, 0) + ? 
+                            WHERE user_id = ?
+                        """, (abs(delta), user_id))
                 
                 conn.commit()
             except Exception as e:
@@ -447,13 +582,17 @@ class Database:
         await asyncio.to_thread(_sync_update)
     
     async def transfer_coins(self, from_id: int, to_username: str, amount: int, reason: str = "transfer") -> bool:
-        """Перевод монет между пользователями по username"""
-        # Сначала найдём получателя
+        """Перевод монет между пользователями"""
+        if from_id is None or to_username is None or amount is None:
+            return False
+            
         target = await self.get_user_by_username(to_username)
         if not target:
             return False
         
-        to_id = target["user_id"]
+        to_id = target.get("user_id")
+        if to_id is None:
+            return False
         
         if from_id == to_id:
             raise ValueError("Нельзя перевести самому себе")
@@ -464,23 +603,31 @@ class Database:
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 
-                # Проверяем баланс отправителя
                 cursor.execute("SELECT balance FROM users WHERE user_id = ?", (from_id,))
                 row = cursor.fetchone()
-                if not row or row[0] < amount:
+                if not row or row[0] is None or row[0] < amount:
                     raise ValueError("Недостаточно средств")
                 
-                # Списываем с отправителя
                 cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, from_id))
-                
-                # Зачисляем получателю
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, to_id))
                 
-                # Записываем транзакцию
                 cursor.execute("""
                     INSERT INTO transactions (from_id, to_id, amount, reason, date)
                     VALUES (?, ?, ?, ?, ?)
                 """, (from_id, to_id, amount, reason, datetime.now().isoformat()))
+                
+                # Обновляем статистику переводов
+                cursor.execute("""
+                    UPDATE user_economy_stats 
+                    SET total_transferred = COALESCE(total_transferred, 0) + ? 
+                    WHERE user_id = ?
+                """, (amount, from_id))
+                
+                cursor.execute("""
+                    UPDATE user_economy_stats 
+                    SET total_received = COALESCE(total_received, 0) + ? 
+                    WHERE user_id = ?
+                """, (amount, to_id))
                 
                 conn.commit()
                 return True
@@ -494,11 +641,16 @@ class Database:
     
     async def get_balance(self, user_id: int) -> int:
         """Получить баланс пользователя"""
+        if user_id is None:
+            return 0
         user = await self.get_user(user_id)
-        return user["balance"] if user else 0
+        return user.get("balance", 0) if user else 0
     
     async def save_profile(self, user_id: int, full_name: str, age: int, city: str, timezone: str, about: str):
         """Сохранить анкету пользователя"""
+        if user_id is None:
+            return
+            
         def _sync_save():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -506,13 +658,13 @@ class Database:
             
             cursor.execute("SELECT created_at FROM user_profiles WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
-            created_at = row[0] if row else now
+            created_at = row[0] if row and row[0] is not None else now
             
             cursor.execute("""
                 INSERT OR REPLACE INTO user_profiles 
                 (user_id, full_name, age, city, timezone, about, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, full_name, age, city, timezone, about, created_at, now))
+            """, (user_id, full_name or "", age or 0, city or "", timezone or "", about or "", created_at, now))
             
             conn.commit()
             conn.close()
@@ -521,6 +673,9 @@ class Database:
     
     async def get_profile(self, user_id: int) -> Optional[Dict]:
         """Получить анкету пользователя"""
+        if user_id is None:
+            return None
+            
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -534,6 +689,9 @@ class Database:
     
     async def update_daily_streak(self, user_id: int, streak: int):
         """Обновить стрик ежедневного бонуса"""
+        if user_id is None:
+            return
+            
         def _sync_update():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -541,7 +699,7 @@ class Database:
                 UPDATE users 
                 SET daily_streak = ?, last_daily = ? 
                 WHERE user_id = ?
-            """, (streak, datetime.now().isoformat(), user_id))
+            """, (streak or 0, datetime.now().isoformat(), user_id))
             conn.commit()
             conn.close()
         
@@ -549,6 +707,9 @@ class Database:
     
     async def get_top_users(self, limit: int = 10) -> List[Dict]:
         """Получить топ пользователей по балансу"""
+        if limit is None:
+            limit = 10
+            
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -556,6 +717,7 @@ class Database:
             cursor.execute("""
                 SELECT user_id, username, first_name, balance, vip_level 
                 FROM users 
+                WHERE balance > 0
                 ORDER BY balance DESC 
                 LIMIT ?
             """, (limit,))
@@ -567,6 +729,9 @@ class Database:
     
     async def get_top_donors(self, limit: int = 10) -> List[Dict]:
         """Получить топ донатеров"""
+        if limit is None:
+            limit = 10
+            
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -575,6 +740,7 @@ class Database:
                 SELECT d.user_id, u.username, u.first_name, d.total_donated, d.donor_rank
                 FROM donors d
                 JOIN users u ON d.user_id = u.user_id
+                WHERE d.total_donated > 0
                 ORDER BY d.total_donated DESC
                 LIMIT ?
             """, (limit,))
@@ -586,14 +752,16 @@ class Database:
     
     async def update_donor_stats(self, user_id: int, amount_rub: int):
         """Обновить статистику донатера"""
+        if user_id is None or amount_rub is None:
+            return
+            
         def _sync_update():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Определяем ранг донатера
             cursor.execute("SELECT total_donated FROM donors WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
-            current_total = row[0] if row else 0
+            current_total = row[0] if row and row[0] is not None else 0
             new_total = current_total + amount_rub
             
             donor_rank = "💎 Поддерживающий"
@@ -622,6 +790,9 @@ class Database:
     
     async def add_warn(self, user_id: int, warn_text: str):
         """Добавить предупреждение пользователю"""
+        if user_id is None:
+            return
+            
         user = await self.get_user(user_id)
         if user:
             warns = user.get('warns', [])
@@ -632,7 +803,7 @@ class Database:
                     warns = []
             
             warns.append({
-                'text': warn_text,
+                'text': warn_text or "",
                 'date': datetime.now().isoformat()
             })
             
@@ -648,6 +819,9 @@ class Database:
     
     async def get_user_warns(self, user_id: int) -> List[Dict]:
         """Получить предупреждения пользователя"""
+        if user_id is None:
+            return []
+            
         user = await self.get_user(user_id)
         if user:
             warns = user.get('warns', [])
@@ -661,6 +835,9 @@ class Database:
     
     async def clear_warns(self, user_id: int):
         """Очистить предупреждения пользователя"""
+        if user_id is None:
+            return
+            
         def _sync_clear():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -670,29 +847,23 @@ class Database:
         
         await asyncio.to_thread(_sync_clear)
 
-    # ==================== НОВЫЙ МЕТОД ДЛЯ ЕЖЕДНЕВНОГО БОНУСА ====================
-    
     async def claim_daily_bonus(self, user_id: int, bonus_amount: int, streak: int, today_str: str, reason: str = "Ежедневный бонус") -> dict:
-        """
-        Атомарное начисление ежедневного бонуса:
-        - Обновляет баланс
-        - Обновляет daily_streak и last_daily
-        - Записывает транзакцию
-        Возвращает: {'new_balance': int, 'success': bool}
-        """
+        """Атомарное начисление ежедневного бонуса"""
+        if user_id is None or bonus_amount is None:
+            return {'new_balance': 0, 'success': False}
+            
         def _sync_claim():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 
-                # 1. Проверяем и обновляем баланс
                 cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
                 row = cursor.fetchone()
                 if not row:
                     raise ValueError(f"User {user_id} not found")
                 
-                old_balance = row[0]
+                old_balance = row[0] if row[0] is not None else 0
                 new_balance = old_balance + bonus_amount
                 
                 cursor.execute(
@@ -700,17 +871,23 @@ class Database:
                     (new_balance, user_id)
                 )
                 
-                # 2. Обновляем стрик и дату (строка формата YYYY-MM-DD)
                 cursor.execute(
                     "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-                    (streak, today_str, user_id)
+                    (streak or 0, today_str, user_id)
                 )
                 
-                # 3. Записываем транзакцию
                 cursor.execute("""
                     INSERT INTO transactions (from_id, to_id, amount, reason, date)
                     VALUES (?, ?, ?, ?, ?)
                 """, (user_id, user_id, bonus_amount, reason, datetime.now().isoformat()))
+                
+                # Обновляем статистику daily
+                cursor.execute("""
+                    UPDATE user_economy_stats 
+                    SET daily_claims = COALESCE(daily_claims, 0) + 1,
+                        total_earned = COALESCE(total_earned, 0) + ? 
+                    WHERE user_id = ?
+                """, (bonus_amount, user_id))
                 
                 conn.commit()
                 return {'new_balance': new_balance, 'success': True}
@@ -723,7 +900,407 @@ class Database:
         
         return await asyncio.to_thread(_sync_claim)
 
+    # ==================== МЕТОДЫ СТАТИСТИКИ ====================
+
+    async def track_user_activity(self, user_id: int, activity_type: str, value: int = 1):
+        """Отслеживание активности пользователя"""
+        if user_id is None or activity_type is None:
+            return
+            
+        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now().isoformat()
+        value = value if value is not None else 1
+        
+        def _sync_track():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # Инициализация статистики если нет
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_stats (user_id, register_date)
+                    VALUES (?, ?)
+                """, (user_id, today))
+                
+                # Обновление основной статистики
+                if activity_type == "message":
+                    cursor.execute("""
+                        UPDATE user_stats SET 
+                            messages_total = COALESCE(messages_total, 0) + ?,
+                            messages_today = COALESCE(messages_today, 0) + ?,
+                            messages_week = COALESCE(messages_week, 0) + ?,
+                            messages_month = COALESCE(messages_month, 0) + ?,
+                            last_message_date = ?,
+                            last_active = ?
+                        WHERE user_id = ?
+                    """, (value, value, value, value, today, now, user_id))
+                elif activity_type in ["voice", "sticker", "gif", "photo", "video"]:
+                    col = f"total_{activity_type}s"
+                    cursor.execute(f"""
+                        UPDATE user_stats SET 
+                            {col} = COALESCE({col}, 0) + ?,
+                            last_active = ?
+                        WHERE user_id = ?
+                    """, (value, now, user_id))
+                elif activity_type == "xo_game":
+                    cursor.execute("""
+                        UPDATE user_stats SET last_active = ? WHERE user_id = ?
+                    """, (now, user_id))
+                
+                # Лог по дням
+                if activity_type == "message":
+                    cursor.execute("""
+                        INSERT INTO user_activity_log (user_id, date, messages)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            messages = COALESCE(messages, 0) + ?
+                    """, (user_id, today, value, value))
+                elif activity_type in ["voice", "sticker", "gif", "photo", "video"]:
+                    col = activity_type + "s"
+                    cursor.execute(f"""
+                        INSERT INTO user_activity_log (user_id, date, {col})
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            {col} = COALESCE({col}, 0) + ?
+                    """, (user_id, today, value, value))
+                elif activity_type == "xo_game":
+                    cursor.execute("""
+                        INSERT INTO user_activity_log (user_id, date, xo_games)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            xo_games = COALESCE(xo_games, 0) + ?
+                    """, (user_id, today, value, value))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_track)
+
+    async def update_user_streaks(self, user_id: int = None):
+        """Обновление стриков активности"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                if user_id is not None:
+                    cursor.execute("""
+                        SELECT user_id, last_message_date, days_active, current_streak, max_streak 
+                        FROM user_stats WHERE user_id = ?
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT user_id, last_message_date, days_active, current_streak, max_streak 
+                        FROM user_stats WHERE last_message_date IS NOT NULL
+                    """)
+                
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    uid, last_date, days_active, current_streak, max_streak = row
+                    
+                    if last_date == today:
+                        continue
+                    
+                    new_days = (days_active or 0) + 1
+                    new_streak = (current_streak or 0) + 1 if last_date == yesterday else 1
+                    new_max = max(max_streak or 0, new_streak)
+                    
+                    cursor.execute("""
+                        UPDATE user_stats SET 
+                            days_active = ?,
+                            current_streak = ?,
+                            max_streak = ?,
+                            last_streak_update = ?
+                        WHERE user_id = ?
+                    """, (new_days, new_streak, new_max, today, uid))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+
+    async def get_user_stats(self, user_id: int) -> Optional[Dict]:
+        """Получить полную статистику пользователя"""
+        if user_id is None:
+            return None
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    s.user_id,
+                    COALESCE(s.messages_total, 0) as messages_total,
+                    COALESCE(s.messages_today, 0) as messages_today,
+                    COALESCE(s.messages_week, 0) as messages_week,
+                    COALESCE(s.messages_month, 0) as messages_month,
+                    s.last_message_date,
+                    s.register_date,
+                    s.last_active,
+                    COALESCE(s.total_voice, 0) as total_voice,
+                    COALESCE(s.total_stickers, 0) as total_stickers,
+                    COALESCE(s.total_gifs, 0) as total_gifs,
+                    COALESCE(s.total_photos, 0) as total_photos,
+                    COALESCE(s.total_videos, 0) as total_videos,
+                    COALESCE(s.days_active, 0) as days_active,
+                    COALESCE(s.current_streak, 0) as current_streak,
+                    COALESCE(s.max_streak, 0) as max_streak,
+                    COALESCE(e.total_earned, 0) as total_earned,
+                    COALESCE(e.total_spent, 0) as total_spent,
+                    COALESCE(e.total_transferred, 0) as total_transferred,
+                    COALESCE(e.total_received, 0) as total_received,
+                    COALESCE(e.total_donated_rub, 0) as total_donated_rub,
+                    COALESCE(e.total_donated_coins, 0) as total_donated_coins,
+                    COALESCE(e.max_balance, 0) as max_balance,
+                    COALESCE(e.daily_claims, 0) as daily_claims,
+                    COALESCE(x.games_played, 0) as games_played,
+                    COALESCE(x.wins, 0) as wins,
+                    COALESCE(x.losses, 0) as losses,
+                    COALESCE(x.draws, 0) as draws,
+                    COALESCE(x.wins_vs_bot, 0) as wins_vs_bot,
+                    COALESCE(x.losses_vs_bot, 0) as losses_vs_bot,
+                    COALESCE(x.total_bet, 0) as total_bet,
+                    COALESCE(x.total_won, 0) as total_won,
+                    COALESCE(x.max_win_streak, 0) as max_win_streak,
+                    COALESCE(x.current_win_streak, 0) as current_win_streak,
+                    COALESCE(u.balance, 0) as balance,
+                    COALESCE(u.daily_streak, 0) as daily_streak,
+                    COALESCE(u.vip_level, 0) as vip_level,
+                    u.register_date as user_register_date
+                FROM user_stats s
+                LEFT JOIN user_economy_stats e ON s.user_id = e.user_id
+                LEFT JOIN xo_stats x ON s.user_id = x.user_id
+                LEFT JOIN users u ON s.user_id = u.user_id
+                WHERE s.user_id = ?
+            """, (user_id,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_messages(self, limit: int = 10) -> List[Dict]:
+        """Топ по сообщениям"""
+        if limit is None:
+            limit = 10
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, COALESCE(s.messages_total, 0) as messages_total
+                FROM user_stats s
+                JOIN users u ON s.user_id = u.user_id
+                WHERE COALESCE(s.messages_total, 0) > 0
+                ORDER BY s.messages_total DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_balance(self, limit: int = 10) -> List[Dict]:
+        """Топ по балансу"""
+        return await self.get_top_users(limit)
+
+    async def get_top_xo(self, limit: int = 10) -> List[Dict]:
+        """Топ по победам в крестиках-ноликах"""
+        if limit is None:
+            limit = 10
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, 
+                       COALESCE(x.wins, 0) as wins, 
+                       COALESCE(x.games_played, 0) as games_played, 
+                       COALESCE(x.draws, 0) as draws,
+                       ROUND(CAST(COALESCE(x.wins, 0) AS FLOAT) / NULLIF(x.games_played, 0) * 100, 1) as winrate
+                FROM xo_stats x
+                JOIN users u ON x.user_id = u.user_id
+                WHERE COALESCE(x.games_played, 0) >= 3
+                ORDER BY x.wins DESC, winrate DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_activity(self, limit: int = 10) -> List[Dict]:
+        """Топ по дням активности"""
+        if limit is None:
+            limit = 10
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, 
+                       COALESCE(s.days_active, 0) as days_active, 
+                       COALESCE(s.current_streak, 0) as current_streak, 
+                       COALESCE(s.max_streak, 0) as max_streak
+                FROM user_stats s
+                JOIN users u ON s.user_id = u.user_id
+                WHERE COALESCE(s.days_active, 0) > 0
+                ORDER BY s.days_active DESC, s.current_streak DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_daily_streak(self, limit: int = 10) -> List[Dict]:
+        """Топ по стрику daily"""
+        if limit is None:
+            limit = 10
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT user_id, username, first_name, COALESCE(daily_streak, 0) as daily_streak
+                FROM users
+                WHERE COALESCE(daily_streak, 0) > 0
+                ORDER BY daily_streak DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def update_xo_stats(self, user_id: int, result_type: str, bet: int = 0, won: int = 0):
+        """Обновить статистику крестиков-ноликов"""
+        if user_id == "bot" or user_id is None:
+            return
+            
+        bet = bet if bet is not None else 0
+        won = won if won is not None else 0
+        
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                cursor.execute("INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)", (user_id,))
+                cursor.execute("UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1 WHERE user_id = ?", (user_id,))
+                
+                if result_type == "win":
+                    cursor.execute("UPDATE xo_stats SET wins = COALESCE(wins, 0) + 1, current_win_streak = COALESCE(current_win_streak, 0) + 1 WHERE user_id = ?", (user_id,))
+                elif result_type == "loss":
+                    cursor.execute("UPDATE xo_stats SET losses = COALESCE(losses, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "draw":
+                    cursor.execute("UPDATE xo_stats SET draws = COALESCE(draws, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "loss_vs_bot":
+                    cursor.execute("UPDATE xo_stats SET losses_vs_bot = COALESCE(losses_vs_bot, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "win_vs_bot":
+                    cursor.execute("UPDATE xo_stats SET wins_vs_bot = COALESCE(wins_vs_bot, 0) + 1, current_win_streak = COALESCE(current_win_streak, 0) + 1 WHERE user_id = ?", (user_id,))
+                
+                if bet > 0:
+                    cursor.execute("UPDATE xo_stats SET total_bet = COALESCE(total_bet, 0) + ? WHERE user_id = ?", (bet, user_id))
+                if won > 0:
+                    cursor.execute("UPDATE xo_stats SET total_won = COALESCE(total_won, 0) + ? WHERE user_id = ?", (won, user_id))
+                
+                cursor.execute("""
+                    UPDATE xo_stats SET max_win_streak = MAX(COALESCE(max_win_streak, 0), COALESCE(current_win_streak, 0))
+                    WHERE user_id = ?
+                """, (user_id,))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+
+    async def cleanup_old_activity_logs(self, days: int = 90):
+        """Очистка старых логов активности"""
+        if days is None:
+            days = 90
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        def _sync_cleanup():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_activity_log WHERE date < ?", (cutoff,))
+            
+            cursor.execute("""
+                UPDATE user_stats SET 
+                    messages_today = 0,
+                    messages_week = 0,
+                    messages_month = 0
+            """)
+            
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_cleanup)
+
+    async def reset_daily_counters(self):
+        """Сброс дневных счётчиков (вызывать в полночь)"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_today = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
+
+    async def reset_weekly_counters(self):
+        """Сброс недельных счётчиков (вызывать в воскресенье)"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_week = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
+
+    async def reset_monthly_counters(self):
+        """Сброс месячных счётчиков (вызывать 1 числа)"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_month = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
+
 
 # Глобальный экземпляр базы данных
 db = Database()
-
