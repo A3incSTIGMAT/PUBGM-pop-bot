@@ -1,6 +1,6 @@
 """
 Модуль VIP статусов и преимуществ
-Версия: 2.1 (Safe Strings + HTML Mode + Sync Balance)
+Версия: 2.2 (Показ статистики + HTML Mode + Sync Balance)
 """
 
 import logging
@@ -78,17 +78,24 @@ async def check_achievement_vip(user_id: int, wins: int):
     return None
 
 
-# ==================== ФОРМАТТЕРЫ ТЕКСТА (БЕЗОПАСНЫЕ) ====================
+# ==================== ФОРМАТТЕРЫ ТЕКСТА ====================
 
 def format_vip_active(user: dict, balance: int, privileges: dict, until_date: str) -> str:
-    """Формирует текст для активного VIP (использует HTML, безопасную конкатенацию)"""
+    """Формирует текст для активного VIP"""
     vip_level = user.get("vip_level", 0) or 0
+    wins = user.get("wins", 0) or 0
+    losses = user.get("losses", 0) or 0
+    
     return (
         f"{privileges['icon']} <b>ВАШ VIP СТАТУС</b> {privileges['icon']}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📛 Уровень: <b>{privileges['name']}</b> (Уровень {vip_level})\n"
         f"💰 Баланс: <b>{balance}</b> NCoins\n"
         f"📅 Действует до: {until_date}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>Ваша статистика:</b>\n"
+        f"├ 🏆 Побед: {wins}\n"
+        f"└ 📉 Поражений: {losses}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>✨ ВАШИ ПРЕИМУЩЕСТВА:</b>\n\n"
         f"├ 🎮 +{privileges['win_bonus']}% к выигрышам\n"
@@ -99,13 +106,15 @@ def format_vip_active(user: dict, balance: int, privileges: dict, until_date: st
     )
 
 
-def format_vip_catalog(balance: int, wins: int) -> str:
-    """Формирует текст каталога VIP статусов"""
+def format_vip_catalog(balance: int, wins: int, losses: int) -> str:
+    """Формирует текст каталога VIP статусов СО СТАТИСТИКОЙ"""
     return (
         "⭐ <b>VIP СТАТУСЫ NEXUS</b> ⭐\n\n"
         "Получите эксклюзивные преимущества!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Ваш баланс: {balance} NCoins</b>\n"
+        f"🏆 <b>Побед: {wins}</b>\n"
+        f"📉 <b>Поражений: {losses}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🥉 <b>БРОНЗА</b> (1 уровень) — 500 NCoins\n├ 🎮 +5% к выигрышам\n└ 🎁 +50 NCoins к бонусу\n\n"
         "🥈 <b>СЕРЕБРО</b> (2 уровень) — 1,000 NCoins\n├ 🎮 +10% к выигрышам\n└ 🎁 +100 NCoins к бонусу\n\n"
@@ -114,12 +123,12 @@ def format_vip_catalog(balance: int, wins: int) -> str:
         "💠 <b>АЛМАЗ</b> (5 уровень) — 10,000 NCoins\n├ 🎮 +30% к выигрышам\n└ 🎁 +300 NCoins к бонусу\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>БЕСПЛАТНЫЙ VIP:</b>\n├ 10 побед → Бронза\n├ 50 побед → Серебро\n├ 100 побед → Золото\n└ 200 побед → Платина\n\n"
-        f"📊 <b>Ваши победы: {wins}</b>"
+        f"📊 <b>Ваш прогресс: {wins} побед</b>"
     )
 
 
-def format_achievements(balance: int, wins: int, current_vip: int, awarded_vip: int = None) -> str:
-    """Формирует текст прогресса достижений"""
+def format_achievements(balance: int, wins: int, losses: int, current_vip: int, awarded_vip: int = None) -> str:
+    """Формирует текст прогресса достижений СО СТАТИСТИКОЙ"""
     # Расчёт прогресса
     next_level, next_wins, progress = None, 0, 0
     if wins < 10:
@@ -167,9 +176,10 @@ def format_achievements(balance: int, wins: int, current_vip: int, awarded_vip: 
     return (
         f"🏆 <b>БЕСПЛАТНЫЙ VIP ЗА ДОСТИЖЕНИЯ</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 <b>ВАШ ПРОГРЕСС:</b>\n\n"
+        f"📊 <b>ВАША СТАТИСТИКА:</b>\n\n"
         f"💰 Баланс: <b>{balance} NCoins</b>\n"
         f"🏆 Побед: <b>{wins}</b>\n"
+        f"📉 Поражений: <b>{losses}</b>\n"
         f"⭐ Текущий VIP: <b>{current_vip} уровень</b>\n\n"
         f"{status_msg}{progress_msg}"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -194,6 +204,7 @@ async def cmd_vip(message: types.Message):
     vip_level = user.get("vip_level", 0) or 0
     vip_until = user.get("vip_until", "")
     wins = user.get("wins", 0) or 0
+    losses = user.get("losses", 0) or 0  # 🔥 Получаем поражения
     
     # Проверка достижений
     achievement_vip = await check_achievement_vip(user_id, wins)
@@ -213,7 +224,7 @@ async def cmd_vip(message: types.Message):
         privileges = get_vip_privileges(vip_level)
         text = format_vip_active(user, balance, privileges, until_date)
     else:
-        text = format_vip_catalog(balance, wins)
+        text = format_vip_catalog(balance, wins, losses)  # 🔥 Передаем losses
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 КУПИТЬ VIP", callback_data="buy_vip")],
@@ -322,6 +333,7 @@ async def vip_achievements(callback: types.CallbackQuery):
     user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
     wins = user.get("wins", 0) or 0
+    losses = user.get("losses", 0) or 0  # 🔥 Получаем поражения
     current_vip = user.get("vip_level", 0) or 0
     balance = await db.get_balance(user_id)  # 🔥 Свежий баланс
     
@@ -329,7 +341,7 @@ async def vip_achievements(callback: types.CallbackQuery):
     if awarded_vip:
         balance = await db.get_balance(user_id)  # 🔥 Обновляем после выдачи достижения
     
-    text = format_achievements(balance, wins, current_vip, awarded_vip)
+    text = format_achievements(balance, wins, losses, current_vip, awarded_vip)  # 🔥 Передаем losses
     
     await callback.message.edit_text(
         text,
