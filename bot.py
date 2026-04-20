@@ -2,7 +2,7 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
-ПОЛНОСТЬЮ ОБНОВЛЁННАЯ ВЕРСИЯ СО СТАТИСТИКОЙ
+ПОЛНОСТЬЮ ЗАЩИЩЕНО ОТ NULL
 """
 
 import asyncio
@@ -71,6 +71,8 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
+    if message is None:
+        return
     await message.answer("🏓 PONG! Бот работает!")
 
 
@@ -125,8 +127,9 @@ async def on_startup():
     logger.info("🚀 Запуск NEXUS Bot v5.0...")
     
     try:
-        await db.init()
-        logger.info("✅ База данных инициализирована")
+        if db is not None:
+            await db.init()
+            logger.info("✅ База данных инициализирована")
     except Exception as e:
         logger.critical(f"❌ Ошибка инициализации БД: {e}")
         sys.exit(1)
@@ -139,7 +142,18 @@ async def on_startup():
         logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
     
     # Запускаем периодическое обновление стриков
-    asyncio.create_task(schedule_streak_updates())
+    try:
+        asyncio.create_task(schedule_streak_updates())
+    except:
+        pass
+    
+    # Запускаем планировщик утренней очистки
+    try:
+        from utils.auto_delete import schedule_morning_cleanup
+        asyncio.create_task(schedule_morning_cleanup(bot))
+        logger.info("✅ Планировщик утренней очистки запущен")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
     
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
 
@@ -147,7 +161,7 @@ async def on_startup():
 async def schedule_streak_updates():
     """Периодическое обновление стриков (раз в час)"""
     while True:
-        await asyncio.sleep(3600)  # 1 час
+        await asyncio.sleep(3600)
         try:
             from handlers.stats import update_all_streaks
             await update_all_streaks()
@@ -158,10 +172,14 @@ async def schedule_streak_updates():
 async def on_shutdown():
     logger.info("🛑 Остановка бота...")
     try:
-        await db.close()
+        if db is not None:
+            await db.close()
     except:
         pass
-    await bot.session.close()
+    try:
+        await bot.session.close()
+    except:
+        pass
     logger.info("👋 NEXUS Bot v5.0 остановлен")
 
 
