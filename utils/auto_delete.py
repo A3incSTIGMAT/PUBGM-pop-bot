@@ -1,16 +1,18 @@
 # ============================================
 # ФАЙЛ: utils/auto_delete.py
 # ОПИСАНИЕ: Утренняя очистка + приветствие с топами + итоги дня
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ (БЕЗ pytz)
 # ============================================
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiogram import Bot
-import pytz
 
 logger = logging.getLogger(__name__)
+
+# Московское время (UTC+3)
+MSK_OFFSET = timezone(timedelta(hours=3))
 
 _last_bot_messages = {}
 _pending_cleanup = set()
@@ -38,7 +40,7 @@ async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, mes
     _last_bot_messages[key] = {
         "message_id": message_id,
         "user_id": user_id if user_id is not None else 0,
-        "timestamp": datetime.now()
+        "timestamp": datetime.now(MSK_OFFSET)
     }
     
     _pending_cleanup.add((chat_id, message_id))
@@ -188,7 +190,7 @@ async def morning_cleanup_and_greeting(bot: Bot):
                 logger.debug(f"Could not send greeting to chat {chat_id}: {e}")
     
     # 5. Генерируем и отправляем итоги дня
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(MSK_OFFSET) - timedelta(days=1)).strftime("%Y-%m-%d")
     
     for chat_id in list(_active_chats):
         if chat_id is None:
@@ -213,7 +215,7 @@ async def morning_cleanup_and_greeting(bot: Bot):
                 f"🗑️ Удалено сообщений: {deleted}\n"
                 f"📨 Отправлено приветствий: {sent}/{active_count} чатов\n"
                 f"❌ Ошибок отправки: {failed}\n"
-                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}"
+                f"⏰ Время: {datetime.now(MSK_OFFSET).strftime('%H:%M:%S')}"
             )
             for admin_id in ADMIN_IDS:
                 if admin_id is None:
@@ -232,19 +234,10 @@ async def schedule_morning_cleanup(bot: Bot):
     if bot is None:
         logger.error("Bot is None in schedule_morning_cleanup")
         return
-        
-    try:
-        msk_tz = pytz.timezone("Europe/Moscow")
-    except:
-        msk_tz = None
     
     while True:
         try:
-            if msk_tz:
-                now = datetime.now(msk_tz)
-            else:
-                now = datetime.now()
-            
+            now = datetime.now(MSK_OFFSET)
             next_run = now.replace(hour=10, minute=0, second=0, microsecond=0)
             
             if now >= next_run:
