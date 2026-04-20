@@ -1,8 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер команд NEXUS Bot
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# АВТОРЕГИСТРАЦИЯ: При любом взаимодействии
+# ОПИСАНИЕ: Умный парсер — МОДУЛЬНАЯ АРХИТЕКТУРА
+# ЛЕГКО ДОБАВЛЯТЬ НОВЫЕ КОМАНДЫ БЕЗ ПЕРЕДЕЛКИ ВСЕГО ФАЙЛА
 # ============================================
 
 import re
@@ -12,6 +11,7 @@ import hashlib
 import asyncio
 import html
 import random
+from typing import Callable, Dict, Optional, Tuple
 from aiogram import Router, types, F, Bot
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -30,37 +30,34 @@ def set_bot(bot_instance: Bot):
     global bot
     bot = bot_instance
 
-# Хранилище состояний анкеты
-profile_states = {}
 
-# Словарь умных тегов
-TAG_KEYWORDS = {
-    'pubg': ['пубг', 'pubg', 'пабг', 'королевская битва', 'сквад', 'ранкед'],
-    'cs2': ['кс2', 'cs2', 'counter-strike', 'катка', 'матчмейкинг'],
-    'dota': ['дота', 'dota', 'дота 2', 'пати'],
-    'mafia': ['мафия', 'mafia', 'партия'],
-    'video_call': ['звонок', 'созвон', 'видеозвонок', 'discord'],
-    'important': ['важный вопрос', 'помогите', 'нужна помощь'],
-    'giveaway': ['розыгрыш', 'giveaway', 'конкурс'],
-    'offtopic': ['флуд', 'оффтоп', 'offtopic'],
-    'tech': ['техническое', 'баг', 'ошибка', 'bug'],
-    'urgent': ['срочно', 'urgent', 'помощь админам'],
-}
+# ==================== РЕЕСТР КОМАНД (ЛЕГКО ДОБАВЛЯТЬ НОВЫЕ) ====================
 
-# РП действия
-RP_ACTIONS = {
-    'обнять': 'hug', 'обнял': 'hug', 'обнимаю': 'hug',
-    'поцеловать': 'kiss', 'поцелуй': 'kiss', 'чмок': 'kiss',
-    'пнуть': 'kick', 'пнул': 'kick', 'пинаю': 'kick',
-    'погладить': 'pat', 'погладил': 'pat', 'глажу': 'pat',
-    'дать леща': 'slap', 'лещ': 'slap', 'шлёпнуть': 'slap',
-    'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
-    'привет': 'hello', 'здарова': 'hello', 'хай': 'hello',
-    'пока': 'bye', 'прощай': 'bye',
-    'спасибо': 'thanks', 'благодарю': 'thanks',
-    'извини': 'sorry', 'прости': 'sorry', 'сорри': 'sorry',
-    'поздравляю': 'congrats', 'с днём рождения': 'congrats',
-}
+class CommandHandler:
+    """Базовый класс для обработчика команды"""
+    def __init__(self, keywords: list, handler: Callable, need_target: bool = False):
+        self.keywords = keywords
+        self.handler = handler
+        self.need_target = need_target
+
+# Реестр команд без цели (просто текст)
+NO_TARGET_COMMANDS: Dict[str, CommandHandler] = {}
+
+# Реестр команд с целью (@user или reply)
+TARGET_COMMANDS: Dict[str, CommandHandler] = {}
+
+def register_command(keywords: list, need_target: bool = False):
+    """Декоратор для регистрации команды"""
+    def decorator(func: Callable):
+        handler = CommandHandler(keywords, func, need_target)
+        if need_target:
+            for kw in keywords:
+                TARGET_COMMANDS[kw] = handler
+        else:
+            for kw in keywords:
+                NO_TARGET_COMMANDS[kw] = handler
+        return func
+    return decorator
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -77,7 +74,7 @@ async def ensure_user_exists(user_id: int, username: str = None, first_name: str
     return user or {}
 
 
-def extract_username(text: str) -> str:
+def extract_username(text: str) -> Optional[str]:
     """Извлечь username из текста"""
     if not text:
         return None
@@ -103,7 +100,108 @@ def format_number(num: any) -> str:
         return "0"
 
 
-# ==================== РП ДЕЙСТВИЯ ====================
+def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
+    """Получить цель из сообщения (@username или reply)"""
+    text = message.text.lower() if message.text else ""
+    reply = message.reply_to_message
+    
+    target_id = None
+    target_user = None
+    target_username = None
+    
+    # Способ 1: @username в тексте
+    username = extract_username(text)
+    if username:
+        target_username = username
+        # Пытаемся найти в БД (может быть None, если пользователь не зарегистрирован)
+        target_user = asyncio.run(db.get_user_by_username(username))
+        if target_user:
+            target_id = target_user.get("user_id")
+    
+    # Способ 2: Ответ на сообщение
+    if not target_id and reply and reply.from_user and not reply.from_user.is_bot:
+        target_id = reply.from_user.id
+        target_user = asyncio.run(db.get_user(target_id))
+        if target_user:
+            target_username = target_user.get("username")
+    
+    return target_id, target_user, target_username
+
+
+# ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
+
+@register_command(['общий сбор', 'оповести всех', 'собери всех'])
+async def cmd_gather(message: types.Message, **kwargs):
+    """Общий сбор участников"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
+    ])
+    await message.answer(
+        "📢 <b>ОБЩИЙ СБОР</b>\n\nНачать?",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@register_command(['крестики', 'нолики', 'xo', 'tic', 'tac'])
+async def cmd_xo_game(message: types.Message, **kwargs):
+    """Запуск крестиков-ноликов"""
+    from handlers.tictactoe import cmd_xo
+    await cmd_xo(message)
+
+
+@register_command(['статистика', 'стата', 'stats'])
+async def cmd_show_stats(message: types.Message, **kwargs):
+    """Показать статистику"""
+    from handlers.stats import cmd_stats
+    await cmd_stats(message)
+
+
+@register_command(['помощь', 'помоги', 'help', 'что ты умеешь'])
+async def cmd_show_help(message: types.Message, **kwargs):
+    """Показать помощь"""
+    help_text = (
+        "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🗣️ УМНЫЕ КОМАНДЫ:</b>\n"
+        "• <code>Нексус, оповести всех</code> — общий сбор\n"
+        "• <code>Нексус, найди сквад в PUBG</code>\n"
+        "• <code>Нексус, крестики-нолики</code> — играть\n"
+        "• <code>Нексус, статистика</code>\n\n"
+        "<b>👤 ДЕЙСТВИЯ С ПОЛЬЗОВАТЕЛЯМИ:</b>\n"
+        "• <code>@user обнять</code> — РП действие\n"
+        "• <code>@user крестики 100</code> — вызвать на игру\n"
+        "• <code>@user анкета</code> — посмотреть анкету\n"
+        "• <code>@user 500</code> — перевести монеты\n\n"
+        "💡 <i>Также работают ответы на сообщения (reply)!</i>\n\n"
+        "<b>📌 ОСНОВНЫЕ КОМАНДЫ:</b>\n"
+        "• /start — главное меню\n"
+        "• /daily — ежедневный бонус\n"
+        "• /balance — проверить баланс\n"
+        "• /stats — статистика\n"
+        "• /top — топы"
+    )
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
+
+
+@register_command(['привет', 'здарова', 'хай', 'ку'])
+async def cmd_greet(message: types.Message, **kwargs):
+    """Приветствие"""
+    await message.answer(f"👋 Привет, {html.escape(message.from_user.first_name or '')}!")
+
+
+# ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
+
+# РП действия
+RP_ACTIONS = {
+    'обнять': 'hug', 'обнял': 'hug', 'обнимаю': 'hug',
+    'поцеловать': 'kiss', 'поцелуй': 'kiss', 'чмок': 'kiss',
+    'пнуть': 'kick', 'пнул': 'kick', 'пинаю': 'kick',
+    'погладить': 'pat', 'погладил': 'pat', 'глажу': 'pat',
+    'дать леща': 'slap', 'лещ': 'slap', 'шлёпнуть': 'slap',
+    'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
+}
 
 RP_TEXTS = {
     'hug': ["🤗 {from_name} обнимает {target_name}!"],
@@ -112,39 +210,37 @@ RP_TEXTS = {
     'pat': ["🫳 {from_name} гладит {target_name} по голове!"],
     'slap': ["👋 {from_name} даёт леща {target_name}!"],
     'punch': ["👊 {from_name} бьёт {target_name}!"],
-    'hello': ["👋 {from_name} приветствует {target_name}!"],
-    'bye': ["👋 {from_name} прощается с {target_name}!"],
-    'thanks': ["🙏 {from_name} благодарит {target_name}!"],
-    'sorry': ["😔 {from_name} извиняется перед {target_name}!"],
-    'congrats': ["🎉 {from_name} поздравляет {target_name}!"],
 }
 
+# Регистрируем все РП действия
+for rp_word, rp_action in RP_ACTIONS.items():
+    @register_command([rp_word], need_target=True)
+    async def rp_handler(message: types.Message, from_id: int, target_id: int, 
+                         target_user: dict, action=rp_action, **kwargs):
+        from_user = await db.get_user(from_id)
+        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+        
+        texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
+        text = random.choice(texts).format(
+            from_name=html.escape(from_name),
+            target_name=html.escape(target_name)
+        )
+        await message.answer(text)
 
-async def send_rp_action(message: types.Message, from_id: int, target_id: int, target_user: dict, action: str):
-    """Отправить РП действие"""
-    from_user = await db.get_user(from_id)
-    from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-    target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-    
-    texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-    text = random.choice(texts).format(
-        from_name=html.escape(from_name),
-        target_name=html.escape(target_name)
-    )
-    
-    await message.answer(text)
 
-
-async def challenge_xo(message: types.Message, from_id: int, target_id: int, target_user: dict, bet: int = 0):
+@register_command(['крестики', 'нолики', 'xo'], need_target=True)
+async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int, 
+                           target_user: dict, **kwargs):
     """Вызвать на крестики-нолики"""
     if from_id == target_id:
         await message.answer("❌ Нельзя вызвать самого себя!")
         return
     
-    # 🔥 АВТОРЕГИСТРАЦИЯ ВЫЗЫВАЮЩЕГО
+    bet = extract_number(message.text)
+    
     await ensure_user_exists(from_id, message.from_user.username, message.from_user.first_name)
     
-    # Проверяем, что цель существует
     if not target_user or not target_user.get("user_id"):
         await message.answer(
             f"❌ <b>Пользователь не активировал бота!</b>\n\n"
@@ -195,33 +291,28 @@ async def challenge_xo(message: types.Message, from_id: int, target_id: int, tar
          InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"xo_reject_{game_id}")]
     ])
     
-    from_user = await db.get_user(from_id)
-    from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-    target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-    target_username = target_user.get('username', target_name) if target_user else ''
-    
-    bet_text = f"<b>{format_number(bet)} NCoin</b>" if bet > 0 else "<b>без ставки</b>"
+    from_name = message.from_user.first_name or "Игрок"
+    target_name = target_user.get("first_name") or kwargs.get("target_username", "Игрок")
     
     msg = await message.answer(
         f"⚔️ <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
         f"👤 {html.escape(from_name)} вызывает {html.escape(target_name)}!\n"
-        f"💰 Ставка: {bet_text}\n\n"
+        f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
         f"⏰ Вызов действителен 60 секунд\n\n"
-        f"⚠️ ТОЛЬКО @{html.escape(target_username)} может принять или отклонить!",
+        f"⚠️ ТОЛЬКО {html.escape(target_name)} может принять или отклонить!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
     
-    # Автоотмена через 60 секунд
     from handlers.tictactoe import auto_cancel_challenge
     asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
 
 
-async def show_profile(message: types.Message, target_id: int, target_user: dict):
+@register_command(['анкета', 'профиль', 'profile'], need_target=True)
+async def cmd_show_profile(message: types.Message, target_id: int, target_user: dict, **kwargs):
     """Показать анкету пользователя"""
     profile = await db.get_profile(target_id)
     balance = await db.get_balance(target_id)
-    user = await db.get_user(target_id)
     
     target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
     
@@ -244,12 +335,15 @@ async def show_profile(message: types.Message, target_id: int, target_user: dict
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 Баланс: <b>{format_number(balance)}</b> NCoin"
     )
-    
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 
-async def transfer_coins(message: types.Message, from_id: int, target_id: int, target_user: dict, amount: int):
+@register_command(['перевод', 'перевести', 'transfer'], need_target=True)
+async def cmd_transfer_coins(message: types.Message, from_id: int, target_id: int, 
+                             target_user: dict, **kwargs):
     """Перевести монеты"""
+    amount = extract_number(message.text)
+    
     if from_id == target_id:
         await message.answer("❌ Нельзя перевести монеты самому себе!")
         return
@@ -258,7 +352,6 @@ async def transfer_coins(message: types.Message, from_id: int, target_id: int, t
         await message.answer("❌ Минимальная сумма перевода: 10 NCoin")
         return
     
-    # 🔥 АВТОРЕГИСТРАЦИЯ ОТПРАВИТЕЛЯ
     await ensure_user_exists(from_id, message.from_user.username, message.from_user.first_name)
     
     balance = await db.get_balance(from_id)
@@ -292,28 +385,20 @@ async def transfer_coins(message: types.Message, from_id: int, target_id: int, t
         await message.answer("❌ Ошибка перевода. Попробуйте позже.")
 
 
-async def send_help(message: types.Message):
-    """Отправить помощь"""
-    help_text = (
-        "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>🗣️ УМНЫЕ КОМАНДЫ:</b>\n"
-        "• <code>Нексус, оповести всех</code> — общий сбор\n"
-        "• <code>Нексус, найди сквад в PUBG</code>\n"
-        "• <code>Нексус, крестики-нолики</code> — играть\n"
-        "• <code>Нексус, статистика</code>\n\n"
-        "<b>👤 ДЕЙСТВИЯ:</b>\n"
-        "• <code>@user обнять</code>\n"
-        "• <code>@user крестики 100</code> — вызвать на игру\n"
-        "• <code>@user анкета</code> — посмотреть анкету\n"
-        "• <code>@user 500</code> — перевести монеты\n\n"
-        "<b>📌 КОМАНДЫ:</b>\n"
-        "• /start — меню\n"
-        "• /daily — бонус\n"
-        "• /stats — статистика\n"
-        "• /top — топы"
-    )
-    await message.answer(help_text, parse_mode=ParseMode.HTML)
+# ==================== УМНЫЕ ТЕГИ ====================
+
+TAG_KEYWORDS = {
+    'pubg': ['пубг', 'pubg', 'пабг', 'сквад', 'ранкед'],
+    'cs2': ['кс2', 'cs2', 'катка', 'матчмейкинг'],
+    'dota': ['дота', 'dota', 'пати'],
+    'mafia': ['мафия', 'mafia', 'партия'],
+    'video_call': ['звонок', 'созвон', 'видеозвонок', 'discord'],
+    'important': ['важный вопрос', 'помогите', 'нужна помощь'],
+    'giveaway': ['розыгрыш', 'giveaway', 'конкурс'],
+    'offtopic': ['флуд', 'оффтоп', 'offtopic'],
+    'tech': ['техническое', 'баг', 'ошибка', 'bug'],
+    'urgent': ['срочно', 'urgent', 'помощь админам'],
+}
 
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
@@ -327,10 +412,11 @@ async def smart_parser(message: types.Message):
     
     user_id = message.from_user.id
     text = message.text.strip().lower() if message.text else ""
-    reply = message.reply_to_message
     
     if not text:
         return
+    
+    logger.info(f"🔍 SMART PARSER: user={user_id}, text='{text[:50]}'")
     
     # 🔥 ТРЕКИНГ СТАТИСТИКИ
     try:
@@ -352,67 +438,12 @@ async def smart_parser(message: types.Message):
         await message.answer("👋 Используйте /start для регистрации")
         return
     
-    # Проверка заполнения анкеты
-    if user_id in profile_states:
-        return
+    # Проверяем, есть ли обращение к боту
+    bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
+    logger.info(f"🔍 bot_called={bot_called}")
     
-    # ==================== ОПРЕДЕЛЯЕМ ЦЕЛЕВОГО ПОЛЬЗОВАТЕЛЯ ====================
-    target_user = None
-    target_id = None
-    
-    username = extract_username(text)
-    if username:
-        target_user = await db.get_user_by_username(username)
-        if target_user:
-            target_id = target_user.get("user_id")
-    
-    if reply and reply.from_user and not reply.from_user.is_bot:
-        if reply.from_user.id != user_id:
-            target_id = reply.from_user.id
-            target_user = await db.get_user(target_id)
-    
-    # ==================== ЕСЛИ ЕСТЬ ЦЕЛЬ ====================
-    if target_id and target_user:
-        action = None
-        amount = extract_number(text)
-        
-        for word, act in RP_ACTIONS.items():
-            if word in text:
-                action = ('rp', act)
-                break
-        
-        if not action and ('крестики' in text or 'нолики' in text or 'xo' in text):
-            bet = amount if amount > 0 else 0
-            action = ('xo', bet)
-        
-        if not action and ('анкета' in text or 'профиль' in text or 'profile' in text):
-            action = ('profile', None)
-        
-        if not action and amount > 0 and username:
-            if not any(word in text for word in ['крестики', 'xo', 'анкета', 'профиль']):
-                action = ('transfer', amount)
-        
-        if action:
-            action_type, data = action
-            
-            if action_type == 'rp':
-                await send_rp_action(message, user_id, target_id, target_user, data)
-                return
-            elif action_type == 'xo':
-                await challenge_xo(message, user_id, target_id, target_user, data)
-                return
-            elif action_type == 'profile':
-                await show_profile(message, target_id, target_user)
-                return
-            elif action_type == 'transfer':
-                await transfer_coins(message, user_id, target_id, target_user, data)
-                return
-    
-    # ==================== ОБРАБОТКА БЕЗ ЦЕЛИ ====================
-    bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'бот'])
-    
+    # ==================== УМНЫЕ ТЕГИ ====================
     if bot_called:
-        # Умные теги
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in text:
@@ -430,44 +461,44 @@ async def smart_parser(message: types.Message):
                             return
                     except Exception as e:
                         logger.error(f"Tag trigger error: {e}")
+    
+    # ==================== ОПРЕДЕЛЯЕМ ЦЕЛЬ ====================
+    target_id, target_user, target_username = get_target_from_message(message)
+    
+    # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
+    if target_id and target_user:
+        for keyword, handler in TARGET_COMMANDS.items():
+            if keyword in text:
+                logger.info(f"✅ Executing TARGET command: {keyword}")
+                await handler.handler(
+                    message, 
+                    from_id=user_id, 
+                    target_id=target_id, 
+                    target_user=target_user,
+                    target_username=target_username
+                )
+                return
         
-        # Общий сбор
-        if 'оповести всех' in text or 'общий сбор' in text or 'собери всех' in text:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
-                 InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
-            ])
-            
-            await message.answer(
-                "📢 <b>ОБЩИЙ СБОР</b>\n\nНачать?",
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard
+        # 🔥 Обработка чистого перевода: "@user 500"
+        amount = extract_number(text)
+        if amount > 0 and extract_username(text):
+            await cmd_transfer_coins(
+                message, 
+                from_id=user_id, 
+                target_id=target_id, 
+                target_user=target_user
             )
             return
-        
-        # Крестики-нолики
-        if 'крестики' in text or 'нолики' in text or 'xo' in text:
-            from handlers.tictactoe import cmd_xo
-            await cmd_xo(message)
-            return
-        
-        # Статистика
-        if 'статистика' in text or 'стата' in text or 'stats' in text:
-            from handlers.stats import cmd_stats
-            await cmd_stats(message)
-            return
-        
-        # Помощь
-        if 'помоги' in text or 'помощь' in text or 'что ты умеешь' in text:
-            await send_help(message)
-            return
-        
-        # Приветствие
-        if 'привет' in text or 'здарова' in text or 'хай' in text:
-            await message.answer(f"👋 Привет, {html.escape(message.from_user.first_name or '')}!")
-            return
     
-    # ==================== РП КОМАНДЫ БЕЗ ЦЕЛИ ====================
+    # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
+    if bot_called:
+        for keyword, handler in NO_TARGET_COMMANDS.items():
+            if keyword in text:
+                logger.info(f"✅ Executing NO_TARGET command: {keyword}")
+                await handler.handler(message)
+                return
+    
+    # ==================== РП ОТВЕТЫ БЕЗ ЦЕЛИ ====================
     rp_responses = {
         'привет': 'Привет! 👋',
         'пока': 'Пока! 👋',
