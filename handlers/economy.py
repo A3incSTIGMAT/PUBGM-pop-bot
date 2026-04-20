@@ -1,8 +1,9 @@
-"""
-Модуль экономики NEXUS Bot
-Баланс, ежедневный бонус, переводы, ДОНАТ С АВТОРАСЧЁТОМ
-ПОЛНОСТЬЮ ИСПРАВЛЕН — ВСЕ БАЛАНСЫ ЧЕРЕЗ db.get_balance()
-"""
+# ============================================
+# ФАЙЛ: handlers/economy.py
+# ОПИСАНИЕ: Модуль экономики — баланс, daily, переводы, донат
+# ИСПРАВЛЕНО: Статистика XO вместо старых wins/losses, защита от NULL
+# ОБЪЕДИНЁННАЯ ЛУЧШАЯ ВЕРСИЯ
+# ============================================
 
 import asyncio
 import logging
@@ -39,6 +40,9 @@ DONATE_RATES = {
 
 def calculate_donate_coins(amount_rub: int) -> int:
     """Автоматический расчёт NCoin за любую сумму"""
+    if amount_rub is None:
+        return 0
+        
     base_coins = amount_rub * 10
     
     if amount_rub >= 10000:
@@ -77,51 +81,80 @@ except ImportError:
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
+    if user_id is None:
+        return {}
     user = await db.get_user(user_id)
     if not user:
         await db.create_user(user_id, username, first_name, START_BALANCE)
         user = await db.get_user(user_id)
-    return user
+    return user or {}
+
+
+def format_number(num: any) -> str:
+    """Форматирование числа"""
+    if num is None:
+        return "0"
+    try:
+        return f"{int(num):,}".replace(",", " ")
+    except (ValueError, TypeError):
+        return "0"
 
 
 # ==================== КОМАНДА /balance ====================
 
 @router.message(Command("balance"))
 async def cmd_balance(message: types.Message):
-    user = await get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
+    if message is None:
+        return
+        
+    user_id = message.from_user.id
+    await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
-    # 🔥 СВЕЖИЙ БАЛАНС
-    balance = await db.get_balance(message.from_user.id)
+    # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
+    balance = await db.get_balance(user_id)
+    xo_stats = await db.get_user_stats(user_id)
+    
+    xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
+    xo_losses = xo_stats.get('losses', 0) if xo_stats else 0
+    xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
     
     await message.answer(
         f"💰 <b>ВАШ БАЛАНС</b>\n\n"
-        f"└ <b>{balance}</b> NCoin\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"├ Побед: {user.get('wins', 0)}\n"
-        f"└ Поражений: {user.get('losses', 0)}",
+        f"└ <b>{format_number(balance)}</b> NCoin\n\n"
+        f"🎮 <b>КРЕСТИКИ-НОЛИКИ:</b>\n"
+        f"├ Игр: {format_number(xo_games)}\n"
+        f"├ Побед: {format_number(xo_wins)}\n"
+        f"└ Поражений: {format_number(xo_losses)}",
         parse_mode=ParseMode.HTML
     )
 
 
 @router.callback_query(F.data == "balance")
 async def balance_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     user_id = callback.from_user.id
     await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
-    # 🔥 СВЕЖИЙ БАЛАНС
+    # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
     balance = await db.get_balance(user_id)
-    user = await db.get_user(user_id)
+    xo_stats = await db.get_user_stats(user_id)
+    
+    xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
+    xo_losses = xo_stats.get('losses', 0) if xo_stats else 0
+    xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
+    
+    winrate = (xo_wins / xo_games * 100) if xo_games > 0 else 0
     
     text = (
         f"💰 <b>ВАШ БАЛАНС</b>\n\n"
-        f"└ <b>{balance}</b> NCoin\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"├ Побед: {user.get('wins', 0)}\n"
-        f"└ Поражений: {user.get('losses', 0)}\n\n"
+        f"└ <b>{format_number(balance)}</b> NCoin\n\n"
+        f"🎮 <b>КРЕСТИКИ-НОЛИКИ:</b>\n"
+        f"├ Игр: {format_number(xo_games)}\n"
+        f"├ Побед: {format_number(xo_wins)}\n"
+        f"├ Поражений: {format_number(xo_losses)}\n"
+        f"└ Винрейт: <b>{winrate:.1f}%</b>\n\n"
         f"💡 <i>Используйте /daily для получения бонуса!</i>"
     )
     
@@ -133,13 +166,15 @@ async def balance_callback(callback: types.CallbackQuery):
 
 @router.message(Command("daily"))
 async def cmd_daily(message: types.Message):
+    if message is None:
+        return
+        
     user_id = message.from_user.id
     
-    user = await get_or_create_user(
-        user_id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    if not user:
+        await message.answer("❌ Ошибка регистрации. Используйте /start")
+        return
     
     today = datetime.now().strftime("%Y-%m-%d")
     last_daily = user.get("last_daily")
@@ -147,14 +182,14 @@ async def cmd_daily(message: types.Message):
     if last_daily == today:
         await message.answer(
             f"⏰ <b>БОНУС УЖЕ ПОЛУЧЕН!</b>\n\n"
-            f"🔥 Стрик: <b>{user.get('daily_streak', 0)}</b> дней\n"
+            f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n"
             f"⏰ Следующий бонус: <b>завтра</b>",
             parse_mode=ParseMode.HTML
         )
         return
     
     try:
-        streak = user.get("daily_streak", 0)
+        streak = user.get("daily_streak", 0) or 0
         
         if last_daily:
             try:
@@ -171,24 +206,14 @@ async def cmd_daily(message: types.Message):
         vip_bonus = vip_level * 50 if vip_level > 0 else 0
         total_bonus = base_bonus + vip_bonus
         
-        def _sync_update():
-            conn = db._get_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute("BEGIN TRANSACTION")
-                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (total_bonus, user_id))
-                cursor.execute("UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?", (streak, today, user_id))
-                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-                row = cursor.fetchone()
-                conn.commit()
-                return row[0] if row else user['balance'] + total_bonus
-            except Exception as e:
-                conn.rollback()
-                raise e
-            finally:
-                conn.close()
+        # Используем атомарный метод из БД
+        result = await db.claim_daily_bonus(user_id, total_bonus, streak, today, "Ежедневный бонус")
         
-        new_balance = await asyncio.to_thread(_sync_update)
+        if not result.get("success", False):
+            await message.answer("❌ Ошибка при начислении бонуса. Попробуйте позже.")
+            return
+        
+        new_balance = result.get("new_balance", 0)
         
         if streak >= 30:
             emoji = "🔥🔥🔥"
@@ -201,15 +226,15 @@ async def cmd_daily(message: types.Message):
         
         text = (
             f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n"
-            f"💰 Начислено: <b>+{total_bonus} NCoin</b>\n"
+            f"💰 Начислено: <b>+{format_number(total_bonus)} NCoin</b>\n"
         )
         if vip_bonus > 0:
-            text += f"   ├ Базовый: {base_bonus} NCoin\n"
-            text += f"   └ VIP бонус: +{vip_bonus} NCoin\n"
+            text += f"   ├ Базовый: {format_number(base_bonus)} NCoin\n"
+            text += f"   └ VIP бонус: +{format_number(vip_bonus)} NCoin\n"
         
         text += (
             f"\n{emoji} Стрик: <b>{streak}</b> дней\n"
-            f"💎 Новый баланс: <b>{new_balance} NCoin</b>"
+            f"💎 Новый баланс: <b>{format_number(new_balance)} NCoin</b>"
         )
         
         await message.answer(text, parse_mode=ParseMode.HTML)
@@ -222,6 +247,8 @@ async def cmd_daily(message: types.Message):
 
 @router.callback_query(F.data == "daily")
 async def daily_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
     await cmd_daily(callback.message)
     await callback.answer()
 
@@ -230,7 +257,10 @@ async def daily_callback(callback: types.CallbackQuery):
 
 @router.message(Command("transfer"))
 async def cmd_transfer(message: types.Message):
-    args = message.text.strip().split()
+    if message is None:
+        return
+        
+    args = message.text.strip().split() if message.text else []
     if len(args) != 3:
         await message.answer("❌ Использование: <code>/transfer @username 100</code>", parse_mode=ParseMode.HTML)
         return
@@ -247,13 +277,13 @@ async def cmd_transfer(message: types.Message):
         return
     
     user_id = message.from_user.id
-    sender = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
+    await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
     # 🔥 СВЕЖИЙ БАЛАНС
     balance = await db.get_balance(user_id)
     
     if balance < amount:
-        await message.answer(f"❌ Недостаточно средств! Баланс: {balance} NCoin")
+        await message.answer(f"❌ Недостаточно средств! Баланс: {format_number(balance)} NCoin")
         return
     
     try:
@@ -265,8 +295,8 @@ async def cmd_transfer(message: types.Message):
         
         new_balance = await db.get_balance(user_id)
         await message.answer(
-            f"✅ Перевод {amount} NCoin для @{target_username}\n"
-            f"💰 Новый баланс: {new_balance} NCoin",
+            f"✅ Перевод {format_number(amount)} NCoin для @{target_username}\n"
+            f"💰 Новый баланс: {format_number(new_balance)} NCoin",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -278,6 +308,9 @@ async def cmd_transfer(message: types.Message):
 @router.message(Command("donate"))
 async def cmd_donate(message: types.Message):
     """Главное меню доната"""
+    if message is None:
+        return
+        
     text = (
         "❤️ <b>ПОДДЕРЖКА ПРОЕКТА NEXUS</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -312,6 +345,8 @@ async def cmd_donate(message: types.Message):
 
 @router.callback_query(F.data == "donate_menu")
 async def donate_menu_callback(callback: types.CallbackQuery):
+    if callback is None:
+        return
     await cmd_donate(callback.message)
     await callback.answer()
 
@@ -319,6 +354,9 @@ async def donate_menu_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "donate_select_amount")
 async def donate_select_amount(callback: types.CallbackQuery):
     """Выбор из фиксированных сумм"""
+    if callback is None or callback.message is None:
+        return
+        
     text = (
         "💎 <b>ВЫБЕРИТЕ СУММУ ДОНАТА</b>\n\n"
         "Нажмите на сумму ниже:\n\n"
@@ -345,7 +383,15 @@ async def donate_select_amount(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("donate_fixed_"))
 async def donate_fixed_selected(callback: types.CallbackQuery, state: FSMContext):
     """Пользователь выбрал фиксированную сумму"""
-    amount = int(callback.data.split("_")[2])
+    if callback is None:
+        return
+        
+    try:
+        amount = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка!", show_alert=True)
+        return
+        
     coins = calculate_donate_coins(amount)
     
     await state.update_data(donate_amount=amount, donate_coins=coins)
@@ -379,6 +425,9 @@ async def donate_fixed_selected(callback: types.CallbackQuery, state: FSMContext
 @router.callback_query(F.data == "donate_custom_amount")
 async def donate_custom_amount(callback: types.CallbackQuery, state: FSMContext):
     """Ввод своей суммы"""
+    if callback is None or callback.message is None:
+        return
+        
     await state.set_state(DonateState.waiting_for_amount)
     
     text = (
@@ -400,6 +449,9 @@ async def donate_custom_amount(callback: types.CallbackQuery, state: FSMContext)
 @router.message(DonateState.waiting_for_amount)
 async def process_custom_amount(message: types.Message, state: FSMContext):
     """Обработка введённой суммы"""
+    if message is None or message.text is None:
+        return
+        
     try:
         amount = int(message.text.strip())
     except ValueError:
@@ -442,6 +494,9 @@ async def process_custom_amount(message: types.Message, state: FSMContext):
 @router.message(DonateState.waiting_for_proof, F.photo | F.document)
 async def process_donate_proof(message: types.Message, state: FSMContext):
     """Получение скриншота"""
+    if message is None:
+        return
+        
     data = await state.get_data()
     amount = data.get("donate_amount", 0)
     coins = data.get("donate_coins", 0)
@@ -450,6 +505,8 @@ async def process_donate_proof(message: types.Message, state: FSMContext):
     
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
+            if admin_id is None:
+                continue
             try:
                 admin_text = (
                     f"💰 <b>НОВЫЙ ДОНАТ!</b>\n\n"
@@ -481,7 +538,7 @@ async def process_donate_proof(message: types.Message, state: FSMContext):
                         parse_mode=ParseMode.HTML,
                         reply_markup=keyboard
                     )
-                else:
+                elif message.document:
                     await message.bot.send_document(
                         admin_id,
                         document=message.document.file_id,
@@ -508,6 +565,9 @@ async def process_donate_proof(message: types.Message, state: FSMContext):
 @router.message(DonateState.waiting_for_proof)
 async def donate_waiting_for_photo(message: types.Message):
     """Напоминание, что нужен скриншот"""
+    if message is None:
+        return
+        
     await message.answer(
         "📸 <b>Прикрепите скриншот перевода!</b>\n\n"
         "Просто отправьте фото или файл.\n"
@@ -519,6 +579,9 @@ async def donate_waiting_for_photo(message: types.Message):
 @router.message(Command("cancel"))
 async def cancel_donate(message: types.Message, state: FSMContext):
     """Отмена доната"""
+    if message is None:
+        return
+        
     current_state = await state.get_state()
     if current_state in [DonateState.waiting_for_amount, DonateState.waiting_for_proof]:
         await state.clear()
@@ -530,6 +593,9 @@ async def cancel_donate(message: types.Message, state: FSMContext):
 @router.callback_query(F.data == "donate_sbp")
 async def donate_sbp_callback(callback: types.CallbackQuery):
     """Показать реквизиты СБП"""
+    if callback is None or callback.message is None:
+        return
+        
     text = (
         "💳 <b>РЕКВИЗИТЫ СБП</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -553,6 +619,9 @@ async def donate_sbp_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "donate_help")
 async def donate_help_callback(callback: types.CallbackQuery):
     """Помощь по донату"""
+    if callback is None or callback.message is None:
+        return
+        
     text = (
         "📋 <b>КАК ПОЛУЧИТЬ NCOINS ЗА ДОНАТ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -587,10 +656,21 @@ async def donate_help_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("confirm_donate_"))
 async def confirm_donate_callback(callback: types.CallbackQuery):
     """Админ подтверждает донат"""
+    if callback is None:
+        return
+        
     parts = callback.data.split("_")
-    user_id = int(parts[2])
-    amount_rub = int(parts[3])
-    coins = int(parts[4])
+    if len(parts) < 5:
+        await callback.answer("❌ Ошибка данных!", show_alert=True)
+        return
+        
+    try:
+        user_id = int(parts[2])
+        amount_rub = int(parts[3])
+        coins = int(parts[4])
+    except ValueError:
+        await callback.answer("❌ Ошибка данных!", show_alert=True)
+        return
     
     await db.update_balance(user_id, coins, f"Донат {amount_rub} ₽")
     await db.update_donor_stats(user_id, amount_rub)
@@ -619,7 +699,19 @@ async def confirm_donate_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("reject_donate_"))
 async def reject_donate_callback(callback: types.CallbackQuery):
     """Админ отклоняет донат"""
-    user_id = int(callback.data.split("_")[2])
+    if callback is None:
+        return
+        
+    parts = callback.data.split("_")
+    if len(parts) < 3:
+        await callback.answer("❌ Ошибка!", show_alert=True)
+        return
+        
+    try:
+        user_id = int(parts[2])
+    except ValueError:
+        await callback.answer("❌ Ошибка!", show_alert=True)
+        return
     
     await callback.message.edit_caption(
         f"{callback.message.caption}\n\n❌ <b>ОТКЛОНЕНО</b>",
@@ -644,6 +736,9 @@ async def reject_donate_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "finance_category")
 async def finance_category_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     user_id = callback.from_user.id
     user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
@@ -651,14 +746,15 @@ async def finance_category_callback(callback: types.CallbackQuery):
     balance = await db.get_balance(user_id)
     
     today = datetime.now().strftime("%Y-%m-%d")
-    can_claim = user.get("last_daily") != today
+    last_daily = user.get("last_daily") if user else None
+    can_claim = not last_daily or last_daily != today
     daily_status = "✅ ДОСТУПЕН" if can_claim else "⏰ УЖЕ ПОЛУЧЕН"
     
     text = (
         f"💰 <b>ФИНАНСЫ И ЭКОНОМИКА</b>\n\n"
-        f"💎 Баланс: <b>{balance} NCoin</b>\n"
-        f"⭐ VIP: <b>{user.get('vip_level', 0) or 0}</b>\n"
-        f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0}</b> дней\n"
+        f"💎 Баланс: <b>{format_number(balance)} NCoin</b>\n"
+        f"⭐ VIP: <b>{user.get('vip_level', 0) or 0 if user else 0}</b>\n"
+        f"🔥 Стрик: <b>{user.get('daily_streak', 0) or 0 if user else 0}</b> дней\n"
         f"🎁 Бонус: {daily_status}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Доступные действия:</b>\n"
@@ -674,6 +770,9 @@ async def finance_category_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "transfer_menu")
 async def transfer_menu_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
+        
     await callback.message.edit_text(
         "💸 <b>ПЕРЕВОД МОНЕТ</b>\n\n"
         "<code>/transfer @username 100</code>\n\n"
