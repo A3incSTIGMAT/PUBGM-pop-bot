@@ -2,8 +2,7 @@
 # ============================================
 # ФАЙЛ: bot.py
 # ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# ВКЛЮЧАЕТ: Авторегистрацию, статистику, крестики-нолики, утреннюю очистку
+# ИСПРАВЛЕНО: Боты не регистрируются, правильный трекинг
 # ============================================
 
 import asyncio
@@ -172,36 +171,42 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
     
-    # Автоматическая регистрация всех участников чатов при старте
+    # Автоматическая регистрация всех участников чатов (КРОМЕ БОТОВ)
     try:
         await auto_register_all_chat_members()
     except Exception as e:
         logger.warning(f"⚠️ Ошибка авторегистрации участников: {e}")
     
+    # Удаляем бота из таблиц статистики (если случайно попал)
+    try:
+        bot_id = (await bot.get_me()).id
+        await db.cleanup_bot_data(bot_id)
+        logger.info(f"✅ Данные бота {bot_id} очищены")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка очистки данных бота: {e}")
+    
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
 
 
 async def auto_register_all_chat_members():
-    """Автоматическая регистрация всех участников чатов при старте бота"""
+    """Автоматическая регистрация всех участников чатов (КРОМЕ БОТОВ)"""
     try:
-        # Получаем список всех чатов из active_chats
-        from utils.auto_delete import _active_chats, add_active_chat
+        from utils.auto_delete import _active_chats
         
         registered = 0
         for chat_id in list(_active_chats):
             if chat_id is None:
                 continue
             try:
-                # Получаем список участников чата
                 members = await bot.get_chat_administrators(chat_id)
                 for member in members:
+                    # 🔥 ПРОПУСКАЕМ БОТОВ
                     if member.user.is_bot:
                         continue
                     user_id = member.user.id
                     username = member.user.username
                     first_name = member.user.first_name
                     
-                    # Проверяем существование и создаём если нужно
                     user = await db.get_user(user_id)
                     if not user:
                         await db.create_user(user_id, username, first_name, START_BALANCE)
