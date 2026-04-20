@@ -1,8 +1,8 @@
 # ============================================
 # ФАЙЛ: database.py
-# ОПИСАНИЕ: База данных NEXUS Bot — ПОЛНАЯ ВЕРСИЯ СО ВСЕМИ МЕТОДАМИ
+# ОПИСАНИЕ: База данных NEXUS Bot — ПОЛНАЯ ВЕРСИЯ С АВТОМИГРАЦИЕЙ
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# ВКЛЮЧАЕТ: get_user_stats, get_top_*, update_xo_stats, claim_daily_bonus
+# ВКЛЮЧАЕТ: Автоматическое добавление недостающих колонок
 # ============================================
 
 import sqlite3
@@ -10,10 +10,13 @@ import os
 import json
 import asyncio
 import re
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Any
 
 from config import DATABASE_PATH
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -398,8 +401,111 @@ class Database:
         conn.commit()
         conn.close()
         
+        # Выполняем миграции
+        self._migrate_tables()
+        
         self._add_default_shop_items()
         self._add_default_tag_categories()
+    
+    def _migrate_tables(self):
+        """Автоматическое добавление недостающих колонок"""
+        if not self.db_path:
+            return
+            
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Миграция xo_stats
+        cursor.execute("PRAGMA table_info(xo_stats)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        xo_columns = {
+            'total_bet': 'INTEGER DEFAULT 0',
+            'total_won': 'INTEGER DEFAULT 0',
+            'max_win_streak': 'INTEGER DEFAULT 0',
+            'current_win_streak': 'INTEGER DEFAULT 0',
+        }
+        
+        for col_name, col_def in xo_columns.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE xo_stats ADD COLUMN {col_name} {col_def}")
+                    logger.info(f"✅ Added column {col_name} to xo_stats")
+                except Exception as e:
+                    logger.warning(f"Could not add column {col_name}: {e}")
+        
+        # Миграция user_economy_stats
+        cursor.execute("PRAGMA table_info(user_economy_stats)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        economy_columns = {
+            'total_earned': 'INTEGER DEFAULT 0',
+            'total_spent': 'INTEGER DEFAULT 0',
+            'total_transferred': 'INTEGER DEFAULT 0',
+            'total_received': 'INTEGER DEFAULT 0',
+            'total_donated_rub': 'INTEGER DEFAULT 0',
+            'total_donated_coins': 'INTEGER DEFAULT 0',
+            'max_balance': 'INTEGER DEFAULT 0',
+            'daily_claims': 'INTEGER DEFAULT 0',
+            'vip_purchases': 'INTEGER DEFAULT 0',
+        }
+        
+        for col_name, col_def in economy_columns.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE user_economy_stats ADD COLUMN {col_name} {col_def}")
+                    logger.info(f"✅ Added column {col_name} to user_economy_stats")
+                except Exception as e:
+                    logger.warning(f"Could not add column {col_name}: {e}")
+        
+        # Миграция user_stats
+        cursor.execute("PRAGMA table_info(user_stats)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        user_stats_columns = {
+            'total_voice': 'INTEGER DEFAULT 0',
+            'total_stickers': 'INTEGER DEFAULT 0',
+            'total_gifs': 'INTEGER DEFAULT 0',
+            'total_photos': 'INTEGER DEFAULT 0',
+            'total_videos': 'INTEGER DEFAULT 0',
+            'days_active': 'INTEGER DEFAULT 0',
+            'current_streak': 'INTEGER DEFAULT 0',
+            'max_streak': 'INTEGER DEFAULT 0',
+            'last_streak_update': 'TEXT',
+        }
+        
+        for col_name, col_def in user_stats_columns.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE user_stats ADD COLUMN {col_name} {col_def}")
+                    logger.info(f"✅ Added column {col_name} to user_stats")
+                except Exception as e:
+                    logger.warning(f"Could not add column {col_name}: {e}")
+        
+        # Миграция user_activity_log
+        cursor.execute("PRAGMA table_info(user_activity_log)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        activity_columns = {
+            'voice': 'INTEGER DEFAULT 0',
+            'stickers': 'INTEGER DEFAULT 0',
+            'gifs': 'INTEGER DEFAULT 0',
+            'photos': 'INTEGER DEFAULT 0',
+            'videos': 'INTEGER DEFAULT 0',
+            'games_played': 'INTEGER DEFAULT 0',
+            'xo_games': 'INTEGER DEFAULT 0',
+        }
+        
+        for col_name, col_def in activity_columns.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE user_activity_log ADD COLUMN {col_name} {col_def}")
+                    logger.info(f"✅ Added column {col_name} to user_activity_log")
+                except Exception as e:
+                    logger.warning(f"Could not add column {col_name}: {e}")
+        
+        conn.commit()
+        conn.close()
     
     def _add_default_shop_items(self):
         if not self.db_path:
@@ -1076,7 +1182,6 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_messages(self, limit: int = 10) -> List[Dict]:
-        """Топ по сообщениям"""
         if limit is None:
             limit = 10
         if not self.db_path:
@@ -1101,11 +1206,9 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_balance(self, limit: int = 10) -> List[Dict]:
-        """Топ по балансу"""
         return await self.get_top_users(limit)
 
     async def get_top_xo(self, limit: int = 10) -> List[Dict]:
-        """Топ по победам в крестиках-ноликах"""
         if limit is None:
             limit = 10
         if not self.db_path:
@@ -1132,7 +1235,6 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_activity(self, limit: int = 10) -> List[Dict]:
-        """Топ по дням активности"""
         if limit is None:
             limit = 10
         if not self.db_path:
@@ -1160,7 +1262,6 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_daily_streak(self, limit: int = 10) -> List[Dict]:
-        """Топ по стрику daily"""
         if limit is None:
             limit = 10
         if not self.db_path:
@@ -1184,7 +1285,6 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def update_xo_stats(self, user_id: int, result_type: str, bet: int = 0, won: int = 0):
-        """Обновить статистику крестиков-ноликов"""
         if user_id == "bot" or user_id is None:
             return
             
@@ -1260,7 +1360,6 @@ class Database:
     }
     
     async def log_chat_message(self, chat_id: int, user_id: int, text: str):
-        """Логирование сообщения для анализа тем"""
         if chat_id is None or user_id is None or text is None or not self.db_path:
             return
         
@@ -1295,7 +1394,6 @@ class Database:
         await asyncio.to_thread(_sync_log)
     
     async def cleanup_old_activity_logs(self, days: int = 90):
-        """Очистка старых логов активности"""
         if days is None:
             days = 90
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -1319,7 +1417,6 @@ class Database:
         await asyncio.to_thread(_sync_cleanup)
 
     async def reset_daily_counters(self):
-        """Сброс дневных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1330,7 +1427,6 @@ class Database:
         await asyncio.to_thread(_sync_reset)
 
     async def reset_weekly_counters(self):
-        """Сброс недельных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1341,7 +1437,6 @@ class Database:
         await asyncio.to_thread(_sync_reset)
 
     async def reset_monthly_counters(self):
-        """Сброс месячных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
