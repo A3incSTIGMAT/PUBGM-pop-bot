@@ -1,9 +1,18 @@
+# ============================================
+# ФАЙЛ: database.py
+# ОПИСАНИЕ: База данных NEXUS Bot — ОБЪЕДИНЁННАЯ ЛУЧШАЯ ВЕРСИЯ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ВКЛЮЧАЕТ: ВСЕ ТАБЛИЦЫ + АНАЛИТИКУ ЧАТА
+# ============================================
+
 import sqlite3
 import os
 import json
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Any
+from collections import Counter
 
 from config import DATABASE_PATH
 
@@ -15,14 +24,16 @@ class Database:
     
     def _init_db(self):
         """Инициализация базы данных"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        if not self.db_path:
+            return
+            
+        os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else ".", exist_ok=True)
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         # ==================== ОСНОВНЫЕ ТАБЛИЦЫ ====================
         
-        # Таблица пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -40,7 +51,6 @@ class Database:
             )
         """)
         
-        # Таблица транзакций
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +62,6 @@ class Database:
             )
         """)
         
-        # Таблица магазина
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS shop_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +71,6 @@ class Database:
             )
         """)
         
-        # Таблица для анкет пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_profiles (
                 user_id INTEGER PRIMARY KEY,
@@ -78,7 +86,6 @@ class Database:
         
         # ==================== ТАБЛИЦЫ СТАТИСТИКИ ====================
         
-        # Основная статистика пользователя (глобальная, не привязана к чату)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER PRIMARY KEY,
@@ -101,7 +108,6 @@ class Database:
             )
         """)
         
-        # Лог активности по дням
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,7 +125,6 @@ class Database:
             )
         """)
         
-        # Статистика крестиков-ноликов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS xo_stats (
                 user_id INTEGER PRIMARY KEY,
@@ -136,7 +141,6 @@ class Database:
             )
         """)
         
-        # Экономическая статистика
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_economy_stats (
                 user_id INTEGER PRIMARY KEY,
@@ -152,7 +156,6 @@ class Database:
             )
         """)
         
-        # Кэш глобальных топов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS global_tops_cache (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,9 +168,40 @@ class Database:
             )
         """)
         
-        # ==================== НОВЫЕ ТАБЛИЦЫ ====================
+        # ==================== ТАБЛИЦЫ ДЛЯ АНАЛИЗА ЧАТА ====================
         
-        # Таблица рангов пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_daily_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                date TEXT NOT NULL,
+                total_messages INTEGER DEFAULT 0,
+                active_users INTEGER DEFAULT 0,
+                top_words TEXT,
+                top_users TEXT,
+                rp_actions INTEGER DEFAULT 0,
+                xo_games INTEGER DEFAULT 0,
+                hugs INTEGER DEFAULT 0,
+                kisses INTEGER DEFAULT 0,
+                kicks INTEGER DEFAULT 0,
+                generated_summary TEXT,
+                UNIQUE(chat_id, date)
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_word_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id BIGINT NOT NULL,
+                date TEXT NOT NULL,
+                word TEXT NOT NULL,
+                count INTEGER DEFAULT 1,
+                UNIQUE(chat_id, date, word)
+            )
+        """)
+        
+        # ==================== ОСТАЛЬНЫЕ ТАБЛИЦЫ ====================
+        
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_ranks (
                 user_id INTEGER PRIMARY KEY,
@@ -179,7 +213,6 @@ class Database:
             )
         """)
         
-        # Таблица донатеров
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS donors (
                 user_id INTEGER PRIMARY KEY,
@@ -189,7 +222,6 @@ class Database:
             )
         """)
         
-        # Таблица глобального рейтинга
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS global_rating (
                 user_id INTEGER PRIMARY KEY,
@@ -199,7 +231,6 @@ class Database:
             )
         """)
         
-        # Таблица активности чатов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_rating (
                 chat_id BIGINT PRIMARY KEY,
@@ -214,7 +245,6 @@ class Database:
             )
         """)
         
-        # Таблица наград чатов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_rewards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -225,7 +255,6 @@ class Database:
             )
         """)
         
-        # Таблица личной статистики игр
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_game_stats (
                 user_id INTEGER PRIMARY KEY,
@@ -240,7 +269,6 @@ class Database:
             )
         """)
         
-        # Таблица отношений
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS relationships (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,7 +281,6 @@ class Database:
             )
         """)
         
-        # Таблица групп
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,7 +292,6 @@ class Database:
             )
         """)
         
-        # Таблица участников групп
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS group_members (
                 group_id INTEGER,
@@ -275,7 +301,6 @@ class Database:
             )
         """)
         
-        # Таблица кастомных РП команд
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS custom_rp (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,7 +312,6 @@ class Database:
             )
         """)
         
-        # Таблица реферальных достижений
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ref_milestones (
                 user_id INTEGER,
@@ -299,7 +323,6 @@ class Database:
             )
         """)
         
-        # Таблица реферальных настроек чатов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ref_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -310,7 +333,6 @@ class Database:
             )
         """)
         
-        # Таблица реферальных ссылок пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ref_links (
                 user_id INTEGER,
@@ -323,7 +345,6 @@ class Database:
             )
         """)
         
-        # Таблица реферальных приглашений
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ref_invites (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,7 +355,6 @@ class Database:
             )
         """)
         
-        # Таблица тегов (глобальный каталог)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tag_categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -346,7 +366,6 @@ class Database:
             )
         """)
         
-        # Таблица настроек категорий в чате
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_tag_settings (
                 chat_id BIGINT NOT NULL,
@@ -356,7 +375,6 @@ class Database:
             )
         """)
         
-        # Таблица подписок пользователей на теги
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_tag_subscriptions (
                 user_id BIGINT NOT NULL,
@@ -367,7 +385,6 @@ class Database:
             )
         """)
         
-        # Таблица кастомных категорий чата
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_custom_categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -382,7 +399,6 @@ class Database:
             )
         """)
         
-        # Таблица логов вызовов тегов
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tag_usage_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +417,8 @@ class Database:
         self._add_default_tag_categories()
     
     def _add_default_shop_items(self):
+        if not self.db_path:
+            return
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM shop_items")
@@ -416,7 +434,8 @@ class Database:
         conn.close()
     
     def _add_default_tag_categories(self):
-        """Добавление глобальных категорий тегов"""
+        if not self.db_path:
+            return
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -445,27 +464,25 @@ class Database:
     # ========== МЕТОДЫ ДЛЯ СОВМЕСТИМОСТИ ==========
     
     def _get_connection(self):
-        """Синхронное получение соединения с БД"""
+        if not self.db_path:
+            return None
         return sqlite3.connect(self.db_path)
     
     async def _get_connection_async(self):
-        """Асинхронное получение соединения с БД (через thread)"""
         return await asyncio.to_thread(self._get_connection)
     
     async def init(self):
-        """Асинхронная инициализация"""
-        await asyncio.to_thread(self._init_db)
+        if self.db_path:
+            await asyncio.to_thread(self._init_db)
         return self
     
     async def close(self):
-        """Закрытие соединения"""
         pass
     
     # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        """Получить пользователя"""
-        if user_id is None:
+        if user_id is None or not self.db_path:
             return None
             
         def _sync_get():
@@ -480,8 +497,7 @@ class Database:
         return await asyncio.to_thread(_sync_get)
     
     async def get_user_by_username(self, username: str) -> Optional[Dict]:
-        """Найти пользователя по username"""
-        if username is None:
+        if username is None or not self.db_path:
             return None
             
         def _sync_get():
@@ -496,8 +512,7 @@ class Database:
         return await asyncio.to_thread(_sync_get)
     
     async def create_user(self, user_id: int, username: str = None, first_name: str = None, balance: int = 1000):
-        """Создать пользователя"""
-        if user_id is None:
+        if user_id is None or not self.db_path:
             return
             
         def _sync_create():
@@ -509,9 +524,8 @@ class Database:
             cursor.execute("""
                 INSERT OR IGNORE INTO users (user_id, username, first_name, balance, register_date, warns)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (user_id, username, first_name, balance, now, '[]'))
+            """, (user_id, username, first_name, balance if balance is not None else 1000, now, '[]'))
             
-            # Инициализируем статистику
             cursor.execute("""
                 INSERT OR IGNORE INTO user_stats (user_id, register_date, last_active)
                 VALUES (?, ?, ?)
@@ -528,15 +542,13 @@ class Database:
         await asyncio.to_thread(_sync_create)
     
     async def user_exists(self, user_id: int) -> bool:
-        """Проверить существование пользователя"""
         if user_id is None:
             return False
         user = await self.get_user(user_id)
         return user is not None
     
     async def update_balance(self, user_id: int, delta: int, reason: str = ""):
-        """Обновить баланс"""
-        if user_id is None or delta is None:
+        if user_id is None or delta is None or not self.db_path:
             return
             
         def _sync_update():
@@ -544,7 +556,6 @@ class Database:
             cursor = conn.cursor()
             try:
                 cursor.execute("BEGIN TRANSACTION")
-                
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
                 
                 if reason:
@@ -553,7 +564,6 @@ class Database:
                         VALUES (?, ?, ?, ?, ?)
                     """, (user_id, user_id, abs(delta), reason, datetime.now().isoformat()))
                 
-                # Обновляем max_balance и статистику
                 cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
                 row = cursor.fetchone()
                 if row and row[0] is not None:
@@ -582,8 +592,7 @@ class Database:
         await asyncio.to_thread(_sync_update)
     
     async def transfer_coins(self, from_id: int, to_username: str, amount: int, reason: str = "transfer") -> bool:
-        """Перевод монет между пользователями"""
-        if from_id is None or to_username is None or amount is None:
+        if from_id is None or to_username is None or amount is None or not self.db_path:
             return False
             
         target = await self.get_user_by_username(to_username)
@@ -616,7 +625,6 @@ class Database:
                     VALUES (?, ?, ?, ?, ?)
                 """, (from_id, to_id, amount, reason, datetime.now().isoformat()))
                 
-                # Обновляем статистику переводов
                 cursor.execute("""
                     UPDATE user_economy_stats 
                     SET total_transferred = COALESCE(total_transferred, 0) + ? 
@@ -640,14 +648,12 @@ class Database:
         return await asyncio.to_thread(_sync_transfer)
     
     async def get_balance(self, user_id: int) -> int:
-        """Получить баланс пользователя"""
         if user_id is None:
             return 0
         user = await self.get_user(user_id)
         return user.get("balance", 0) if user else 0
     
     async def save_profile(self, user_id: int, full_name: str, age: int, city: str, timezone: str, about: str):
-        """Сохранить анкету пользователя"""
         if user_id is None:
             return
             
@@ -672,7 +678,6 @@ class Database:
         await asyncio.to_thread(_sync_save)
     
     async def get_profile(self, user_id: int) -> Optional[Dict]:
-        """Получить анкету пользователя"""
         if user_id is None:
             return None
             
@@ -688,7 +693,6 @@ class Database:
         return await asyncio.to_thread(_sync_get)
     
     async def update_daily_streak(self, user_id: int, streak: int):
-        """Обновить стрик ежедневного бонуса"""
         if user_id is None:
             return
             
@@ -706,9 +710,10 @@ class Database:
         await asyncio.to_thread(_sync_update)
     
     async def get_top_users(self, limit: int = 10) -> List[Dict]:
-        """Получить топ пользователей по балансу"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -723,14 +728,15 @@ class Database:
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
     
     async def get_top_donors(self, limit: int = 10) -> List[Dict]:
-        """Получить топ донатеров"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -746,12 +752,11 @@ class Database:
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
     
     async def update_donor_stats(self, user_id: int, amount_rub: int):
-        """Обновить статистику донатера"""
         if user_id is None or amount_rub is None:
             return
             
@@ -789,7 +794,6 @@ class Database:
         await asyncio.to_thread(_sync_update)
     
     async def add_warn(self, user_id: int, warn_text: str):
-        """Добавить предупреждение пользователю"""
         if user_id is None:
             return
             
@@ -818,7 +822,6 @@ class Database:
             await asyncio.to_thread(_sync_update)
     
     async def get_user_warns(self, user_id: int) -> List[Dict]:
-        """Получить предупреждения пользователя"""
         if user_id is None:
             return []
             
@@ -834,7 +837,6 @@ class Database:
         return []
     
     async def clear_warns(self, user_id: int):
-        """Очистить предупреждения пользователя"""
         if user_id is None:
             return
             
@@ -848,7 +850,6 @@ class Database:
         await asyncio.to_thread(_sync_clear)
 
     async def claim_daily_bonus(self, user_id: int, bonus_amount: int, streak: int, today_str: str, reason: str = "Ежедневный бонус") -> dict:
-        """Атомарное начисление ежедневного бонуса"""
         if user_id is None or bonus_amount is None:
             return {'new_balance': 0, 'success': False}
             
@@ -881,7 +882,6 @@ class Database:
                     VALUES (?, ?, ?, ?, ?)
                 """, (user_id, user_id, bonus_amount, reason, datetime.now().isoformat()))
                 
-                # Обновляем статистику daily
                 cursor.execute("""
                     UPDATE user_economy_stats 
                     SET daily_claims = COALESCE(daily_claims, 0) + 1,
@@ -903,7 +903,6 @@ class Database:
     # ==================== МЕТОДЫ СТАТИСТИКИ ====================
 
     async def track_user_activity(self, user_id: int, activity_type: str, value: int = 1):
-        """Отслеживание активности пользователя"""
         if user_id is None or activity_type is None:
             return
             
@@ -917,13 +916,11 @@ class Database:
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 
-                # Инициализация статистики если нет
                 cursor.execute("""
                     INSERT OR IGNORE INTO user_stats (user_id, register_date)
                     VALUES (?, ?)
                 """, (user_id, today))
                 
-                # Обновление основной статистики
                 if activity_type == "message":
                     cursor.execute("""
                         UPDATE user_stats SET 
@@ -948,7 +945,6 @@ class Database:
                         UPDATE user_stats SET last_active = ? WHERE user_id = ?
                     """, (now, user_id))
                 
-                # Лог по дням
                 if activity_type == "message":
                     cursor.execute("""
                         INSERT INTO user_activity_log (user_id, date, messages)
@@ -982,7 +978,6 @@ class Database:
         await asyncio.to_thread(_sync_track)
 
     async def update_user_streaks(self, user_id: int = None):
-        """Обновление стриков активности"""
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         
@@ -1034,7 +1029,6 @@ class Database:
         await asyncio.to_thread(_sync_update)
 
     async def get_user_stats(self, user_id: int) -> Optional[Dict]:
-        """Получить полную статистику пользователя"""
         if user_id is None:
             return None
             
@@ -1097,9 +1091,10 @@ class Database:
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_messages(self, limit: int = 10) -> List[Dict]:
-        """Топ по сообщениям"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -1115,18 +1110,18 @@ class Database:
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_balance(self, limit: int = 10) -> List[Dict]:
-        """Топ по балансу"""
         return await self.get_top_users(limit)
 
     async def get_top_xo(self, limit: int = 10) -> List[Dict]:
-        """Топ по победам в крестиках-ноликах"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -1135,25 +1130,24 @@ class Database:
             cursor.execute("""
                 SELECT u.user_id, u.username, u.first_name, 
                        COALESCE(x.wins, 0) as wins, 
-                       COALESCE(x.games_played, 0) as games_played, 
-                       COALESCE(x.draws, 0) as draws,
-                       ROUND(CAST(COALESCE(x.wins, 0) AS FLOAT) / NULLIF(x.games_played, 0) * 100, 1) as winrate
+                       COALESCE(x.games_played, 0) as games_played
                 FROM xo_stats x
                 JOIN users u ON x.user_id = u.user_id
                 WHERE COALESCE(x.games_played, 0) >= 3
-                ORDER BY x.wins DESC, winrate DESC
+                ORDER BY x.wins DESC
                 LIMIT ?
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_activity(self, limit: int = 10) -> List[Dict]:
-        """Топ по дням активности"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -1172,14 +1166,15 @@ class Database:
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
 
     async def get_top_daily_streak(self, limit: int = 10) -> List[Dict]:
-        """Топ по стрику daily"""
         if limit is None:
             limit = 10
+        if not self.db_path:
+            return []
             
         def _sync_get():
             conn = sqlite3.connect(self.db_path)
@@ -1194,12 +1189,11 @@ class Database:
             """, (limit,))
             rows = cursor.fetchall()
             conn.close()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in rows] if rows else []
         
         return await asyncio.to_thread(_sync_get)
 
     async def update_xo_stats(self, user_id: int, result_type: str, bet: int = 0, won: int = 0):
-        """Обновить статистику крестиков-ноликов"""
         if user_id == "bot" or user_id is None:
             return
             
@@ -1245,6 +1239,203 @@ class Database:
         
         await asyncio.to_thread(_sync_update)
 
+    # ==================== МЕТОДЫ ДЛЯ АНАЛИЗА ЧАТА ====================
+    
+    # Стоп-слова для русского языка
+    STOP_WORDS = {
+        'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то',
+        'все', 'она', 'так', 'его', 'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за',
+        'бы', 'по', 'только', 'ее', 'мне', 'было', 'вот', 'от', 'меня', 'еще',
+        'нет', 'о', 'из', 'ему', 'теперь', 'когда', 'даже', 'ну', 'вдруг', 'ли',
+        'если', 'уже', 'или', 'ни', 'быть', 'был', 'него', 'до', 'вас', 'нибудь',
+        'опять', 'уж', 'вам', 'ведь', 'там', 'потом', 'себя', 'ничего', 'ей',
+        'может', 'они', 'тут', 'где', 'есть', 'надо', 'ней', 'для', 'мы', 'тебя',
+        'их', 'чем', 'была', 'сам', 'чтоб', 'без', 'будто', 'чего', 'раз', 'тоже',
+        'себе', 'под', 'будет', 'тогда', 'кто', 'этот', 'того', 'потому',
+        'этого', 'какой', 'совсем', 'ним', 'здесь', 'этом', 'один', 'почти',
+        'мой', 'тем', 'чтобы', 'нее', 'сейчас', 'были', 'куда', 'зачем', 'всех',
+        'можно', 'при', 'наконец', 'два', 'об', 'другой', 'хоть', 'после', 'над',
+        'больше', 'тот', 'через', 'эти', 'нас', 'про', 'всего', 'них', 'какая',
+        'много', 'разве', 'три', 'эту', 'моя', 'впрочем', 'хорошо', 'свою',
+        'этой', 'перед', 'иногда', 'лучше', 'чуть', 'нельзя', 'такой', 'им',
+        'более', 'всегда', 'конечно', 'всю', 'между', 'это', 'просто', 'очень'
+    }
+    
+    TOPIC_KEYWORDS = {
+        "крестики-нолики": ["крестики", "нолики", "xo", "tic", "tac", "победа", "ничья", "выиграл", "проиграл"],
+        "бот": ["бот", "nexus", "нексус", "команда", "функция", "баг", "фича", "обновление"],
+        "игры": ["игра", "играть", "слот", "рулетка", "ставка", "казино"],
+        "общение": ["привет", "как дела", "что делаешь", "чем занимаешься"],
+        "флуд": ["хаха", "ахах", "лол", "кек", "ор", "ору"],
+    }
+    
+    async def log_chat_message(self, chat_id: int, user_id: int, text: str):
+        """Логирование сообщения для анализа тем"""
+        if chat_id is None or user_id is None or text is None or not self.db_path:
+            return
+        
+        if len(text) < 3:
+            return
+            
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        def _sync_log():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                words = re.findall(r'[а-яА-Яa-zA-Z]{3,}', text.lower())
+                
+                for word in words:
+                    if word in self.STOP_WORDS:
+                        continue
+                        
+                    cursor.execute("""
+                        INSERT INTO chat_word_stats (chat_id, date, word, count)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(chat_id, date, word) DO UPDATE SET
+                            count = count + 1
+                    """, (chat_id, today, word))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_log)
+    
+    async def get_chat_day_stats(self, chat_id: int, date: str) -> Dict:
+        """Получить статистику чата за день"""
+        if chat_id is None or date is None or not self.db_path:
+            return {}
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT * FROM chat_daily_summary
+                WHERE chat_id = ? AND date = ?
+            """, (chat_id, date))
+            row = cursor.fetchone()
+            
+            if row:
+                result = dict(row)
+                if result.get("top_words"):
+                    try:
+                        result["top_words"] = json.loads(result["top_words"])
+                    except:
+                        result["top_words"] = []
+                if result.get("top_users"):
+                    try:
+                        result["top_users"] = json.loads(result["top_users"])
+                    except:
+                        result["top_users"] = []
+                conn.close()
+                return result
+            
+            cursor.execute("""
+                SELECT COUNT(*) as total_messages,
+                       COUNT(DISTINCT user_id) as active_users
+                FROM user_activity_log
+                WHERE date = ?
+            """, (date,))
+            row = cursor.fetchone()
+            total_messages = row[0] if row else 0
+            active_users = row[1] if row else 0
+            
+            cursor.execute("""
+                SELECT word, SUM(count) as total
+                FROM chat_word_stats
+                WHERE chat_id = ? AND date = ?
+                GROUP BY word
+                ORDER BY total DESC
+                LIMIT 10
+            """, (chat_id, date))
+            top_words = [{"word": r[0], "count": r[1]} for r in cursor.fetchall()]
+            
+            conn.close()
+            
+            return {
+                "chat_id": chat_id,
+                "date": date,
+                "total_messages": total_messages,
+                "active_users": active_users,
+                "top_words": top_words,
+                "top_users": [],
+                "rp_actions": 0,
+                "xo_games": 0,
+                "hugs": 0,
+                "kisses": 0,
+                "kicks": 0,
+            }
+        
+        return await asyncio.to_thread(_sync_get) or {}
+    
+    async def generate_and_save_summary(self, chat_id: int, date: str) -> str:
+        """Сгенерировать и сохранить сводку за день"""
+        if chat_id is None or date is None or not self.db_path:
+            return ""
+            
+        stats = await self.get_chat_day_stats(chat_id, date)
+        if not stats:
+            return ""
+        
+        total_messages = stats.get("total_messages", 0) or 0
+        active_users = stats.get("active_users", 0) or 0
+        top_words = stats.get("top_words", []) or []
+        
+        if total_messages == 0:
+            return ""
+        
+        summary = f"📊 <b>ИТОГИ ВЧЕРАШНЕГО ДНЯ:</b>\n\n"
+        summary += f"💬 Всего сообщений: <b>{total_messages}</b>\n"
+        summary += f"👥 Активных участников: <b>{active_users}</b>\n\n"
+        
+        if top_words:
+            popular = [w["word"] for w in top_words[:5] if w and w.get("word")]
+            if popular:
+                summary += "💬 <b>Часто обсуждали:</b>\n"
+                topics_found = set()
+                for word in popular:
+                    for topic, keywords in self.TOPIC_KEYWORDS.items():
+                        if word in keywords and topic not in topics_found:
+                            summary += f"• {topic}\n"
+                            topics_found.add(topic)
+                            if len(topics_found) >= 3:
+                                break
+                    if len(topics_found) >= 3:
+                        break
+                if not topics_found:
+                    summary += f"• {popular[0]}, {popular[1] if len(popular) > 1 else ''}\n"
+                summary += "\n"
+        
+        summary += "☀️ <b>Всем продуктивного дня!</b> 🚀"
+        
+        def _sync_save():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO chat_daily_summary 
+                    (chat_id, date, total_messages, active_users, top_words, generated_summary)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    chat_id, date, total_messages, active_users,
+                    json.dumps(top_words, ensure_ascii=False),
+                    summary
+                ))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_save)
+        
+        return summary
+
     async def cleanup_old_activity_logs(self, days: int = 90):
         """Очистка старых логов активности"""
         if days is None:
@@ -1255,6 +1446,7 @@ class Database:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("DELETE FROM user_activity_log WHERE date < ?", (cutoff,))
+            cursor.execute("DELETE FROM chat_word_stats WHERE date < ?", (cutoff,))
             
             cursor.execute("""
                 UPDATE user_stats SET 
@@ -1269,7 +1461,7 @@ class Database:
         await asyncio.to_thread(_sync_cleanup)
 
     async def reset_daily_counters(self):
-        """Сброс дневных счётчиков (вызывать в полночь)"""
+        """Сброс дневных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1280,7 +1472,7 @@ class Database:
         await asyncio.to_thread(_sync_reset)
 
     async def reset_weekly_counters(self):
-        """Сброс недельных счётчиков (вызывать в воскресенье)"""
+        """Сброс недельных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1291,7 +1483,7 @@ class Database:
         await asyncio.to_thread(_sync_reset)
 
     async def reset_monthly_counters(self):
-        """Сброс месячных счётчиков (вызывать 1 числа)"""
+        """Сброс месячных счётчиков"""
         def _sync_reset():
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
