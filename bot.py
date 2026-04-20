@@ -2,7 +2,7 @@
 """
 NEXUS Chat Manager v5.0 — Точка входа
 Запуск на платформе Amvera
-ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
+ПОЛНОСТЬЮ ОБНОВЛЁННАЯ ВЕРСИЯ СО СТАТИСТИКОЙ
 """
 
 import asyncio
@@ -38,23 +38,27 @@ dp = Dispatcher()
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота"""
+    if is_admin is None:
+        is_admin = False
+        
     keyboard = [
         [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
          InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
         [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
          InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")],
         [InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo"),
-         InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats")],
+         InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="stats")],
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
          InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")],
         [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
          InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
         [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
          InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
-        [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
-         InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help")],
-        [InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate"),
-         InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")]
+        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
+         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")],
+        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
+         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")],
+        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")]
     ]
     
     if is_admin:
@@ -78,6 +82,7 @@ try:
     from handlers.profile import router as profile_router
     from handlers.economy import router as economy_router
     from handlers.tictactoe import router as tictactoe_router
+    from handlers.stats import router as stats_router
     from handlers.vip import router as vip_router
     from handlers.tag import router as tag_router
     from handlers.ai_assistant import router as ai_assistant_router
@@ -95,6 +100,7 @@ try:
         profile_router,
         economy_router,
         tictactoe_router,
+        stats_router,
         vip_router,
         tag_router,
         ai_assistant_router,
@@ -132,7 +138,21 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
     
+    # Запускаем периодическое обновление стриков
+    asyncio.create_task(schedule_streak_updates())
+    
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
+
+
+async def schedule_streak_updates():
+    """Периодическое обновление стриков (раз в час)"""
+    while True:
+        await asyncio.sleep(3600)  # 1 час
+        try:
+            from handlers.stats import update_all_streaks
+            await update_all_streaks()
+        except Exception as e:
+            logger.error(f"Ошибка обновления стриков: {e}")
 
 
 async def on_shutdown():
