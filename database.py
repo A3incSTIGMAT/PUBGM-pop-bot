@@ -1,8 +1,8 @@
 # ============================================
 # ФАЙЛ: database.py
-# ОПИСАНИЕ: База данных NEXUS Bot — ОЧИЩЕННАЯ ВЕРСИЯ
+# ОПИСАНИЕ: База данных NEXUS Bot — ПОЛНАЯ ВЕРСИЯ СО ВСЕМИ МЕТОДАМИ
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# УДАЛЕНО: старые игры (слот, рулетка, КНБ, дуэль)
+# ВКЛЮЧАЕТ: get_user_stats, get_top_*, update_xo_stats, claim_daily_bonus
 # ============================================
 
 import sqlite3
@@ -885,8 +885,471 @@ class Database:
         return await asyncio.to_thread(_sync_claim)
 
     # ==================== МЕТОДЫ СТАТИСТИКИ ====================
-    # (Все методы статистики остаются без изменений)
-    # ... (весь код методов track_user_activity, get_user_stats, get_top_* и т.д.)
+
+    async def track_user_activity(self, user_id: int, activity_type: str, value: int = 1):
+        if user_id is None or activity_type is None:
+            return
+            
+        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now().isoformat()
+        value = value if value is not None else 1
+        
+        def _sync_track():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_stats (user_id, register_date)
+                    VALUES (?, ?)
+                """, (user_id, today))
+                
+                if activity_type == "message":
+                    cursor.execute("""
+                        UPDATE user_stats SET 
+                            messages_total = COALESCE(messages_total, 0) + ?,
+                            messages_today = COALESCE(messages_today, 0) + ?,
+                            messages_week = COALESCE(messages_week, 0) + ?,
+                            messages_month = COALESCE(messages_month, 0) + ?,
+                            last_message_date = ?,
+                            last_active = ?
+                        WHERE user_id = ?
+                    """, (value, value, value, value, today, now, user_id))
+                elif activity_type in ["voice", "sticker", "gif", "photo", "video"]:
+                    col = f"total_{activity_type}s"
+                    cursor.execute(f"""
+                        UPDATE user_stats SET 
+                            {col} = COALESCE({col}, 0) + ?,
+                            last_active = ?
+                        WHERE user_id = ?
+                    """, (value, now, user_id))
+                elif activity_type == "xo_game":
+                    cursor.execute("""
+                        UPDATE user_stats SET last_active = ? WHERE user_id = ?
+                    """, (now, user_id))
+                
+                if activity_type == "message":
+                    cursor.execute("""
+                        INSERT INTO user_activity_log (user_id, date, messages)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            messages = COALESCE(messages, 0) + ?
+                    """, (user_id, today, value, value))
+                elif activity_type in ["voice", "sticker", "gif", "photo", "video"]:
+                    col = activity_type + "s"
+                    cursor.execute(f"""
+                        INSERT INTO user_activity_log (user_id, date, {col})
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            {col} = COALESCE({col}, 0) + ?
+                    """, (user_id, today, value, value))
+                elif activity_type == "xo_game":
+                    cursor.execute("""
+                        INSERT INTO user_activity_log (user_id, date, xo_games)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, date) DO UPDATE SET
+                            xo_games = COALESCE(xo_games, 0) + ?
+                    """, (user_id, today, value, value))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_track)
+
+    async def update_user_streaks(self, user_id: int = None):
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                if user_id is not None:
+                    cursor.execute("""
+                        SELECT user_id, last_message_date, days_active, current_streak, max_streak 
+                        FROM user_stats WHERE user_id = ?
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT user_id, last_message_date, days_active, current_streak, max_streak 
+                        FROM user_stats WHERE last_message_date IS NOT NULL
+                    """)
+                
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    uid, last_date, days_active, current_streak, max_streak = row
+                    
+                    if last_date == today:
+                        continue
+                    
+                    new_days = (days_active or 0) + 1
+                    new_streak = (current_streak or 0) + 1 if last_date == yesterday else 1
+                    new_max = max(max_streak or 0, new_streak)
+                    
+                    cursor.execute("""
+                        UPDATE user_stats SET 
+                            days_active = ?,
+                            current_streak = ?,
+                            max_streak = ?,
+                            last_streak_update = ?
+                        WHERE user_id = ?
+                    """, (new_days, new_streak, new_max, today, uid))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+
+    async def get_user_stats(self, user_id: int) -> Optional[Dict]:
+        """Получить полную статистику пользователя"""
+        if user_id is None or not self.db_path:
+            return None
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    s.user_id,
+                    COALESCE(s.messages_total, 0) as messages_total,
+                    COALESCE(s.messages_today, 0) as messages_today,
+                    COALESCE(s.messages_week, 0) as messages_week,
+                    COALESCE(s.messages_month, 0) as messages_month,
+                    s.last_message_date,
+                    s.register_date,
+                    s.last_active,
+                    COALESCE(s.total_voice, 0) as total_voice,
+                    COALESCE(s.total_stickers, 0) as total_stickers,
+                    COALESCE(s.total_gifs, 0) as total_gifs,
+                    COALESCE(s.total_photos, 0) as total_photos,
+                    COALESCE(s.total_videos, 0) as total_videos,
+                    COALESCE(s.days_active, 0) as days_active,
+                    COALESCE(s.current_streak, 0) as current_streak,
+                    COALESCE(s.max_streak, 0) as max_streak,
+                    COALESCE(e.total_earned, 0) as total_earned,
+                    COALESCE(e.total_spent, 0) as total_spent,
+                    COALESCE(e.total_transferred, 0) as total_transferred,
+                    COALESCE(e.total_received, 0) as total_received,
+                    COALESCE(e.total_donated_rub, 0) as total_donated_rub,
+                    COALESCE(e.total_donated_coins, 0) as total_donated_coins,
+                    COALESCE(e.max_balance, 0) as max_balance,
+                    COALESCE(e.daily_claims, 0) as daily_claims,
+                    COALESCE(x.games_played, 0) as games_played,
+                    COALESCE(x.wins, 0) as wins,
+                    COALESCE(x.losses, 0) as losses,
+                    COALESCE(x.draws, 0) as draws,
+                    COALESCE(x.wins_vs_bot, 0) as wins_vs_bot,
+                    COALESCE(x.losses_vs_bot, 0) as losses_vs_bot,
+                    COALESCE(x.total_bet, 0) as total_bet,
+                    COALESCE(x.total_won, 0) as total_won,
+                    COALESCE(x.max_win_streak, 0) as max_win_streak,
+                    COALESCE(x.current_win_streak, 0) as current_win_streak,
+                    COALESCE(u.balance, 0) as balance,
+                    COALESCE(u.daily_streak, 0) as daily_streak,
+                    COALESCE(u.vip_level, 0) as vip_level,
+                    u.register_date as user_register_date
+                FROM user_stats s
+                LEFT JOIN user_economy_stats e ON s.user_id = e.user_id
+                LEFT JOIN xo_stats x ON s.user_id = x.user_id
+                LEFT JOIN users u ON s.user_id = u.user_id
+                WHERE s.user_id = ?
+            """, (user_id,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_messages(self, limit: int = 10) -> List[Dict]:
+        """Топ по сообщениям"""
+        if limit is None:
+            limit = 10
+        if not self.db_path:
+            return []
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, COALESCE(s.messages_total, 0) as messages_total
+                FROM user_stats s
+                JOIN users u ON s.user_id = u.user_id
+                WHERE COALESCE(s.messages_total, 0) > 0
+                ORDER BY s.messages_total DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows] if rows else []
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_balance(self, limit: int = 10) -> List[Dict]:
+        """Топ по балансу"""
+        return await self.get_top_users(limit)
+
+    async def get_top_xo(self, limit: int = 10) -> List[Dict]:
+        """Топ по победам в крестиках-ноликах"""
+        if limit is None:
+            limit = 10
+        if not self.db_path:
+            return []
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, 
+                       COALESCE(x.wins, 0) as wins, 
+                       COALESCE(x.games_played, 0) as games_played
+                FROM xo_stats x
+                JOIN users u ON x.user_id = u.user_id
+                WHERE COALESCE(x.games_played, 0) >= 3
+                ORDER BY x.wins DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows] if rows else []
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_activity(self, limit: int = 10) -> List[Dict]:
+        """Топ по дням активности"""
+        if limit is None:
+            limit = 10
+        if not self.db_path:
+            return []
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.username, u.first_name, 
+                       COALESCE(s.days_active, 0) as days_active, 
+                       COALESCE(s.current_streak, 0) as current_streak, 
+                       COALESCE(s.max_streak, 0) as max_streak
+                FROM user_stats s
+                JOIN users u ON s.user_id = u.user_id
+                WHERE COALESCE(s.days_active, 0) > 0
+                ORDER BY s.days_active DESC, s.current_streak DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows] if rows else []
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def get_top_daily_streak(self, limit: int = 10) -> List[Dict]:
+        """Топ по стрику daily"""
+        if limit is None:
+            limit = 10
+        if not self.db_path:
+            return []
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT user_id, username, first_name, COALESCE(daily_streak, 0) as daily_streak
+                FROM users
+                WHERE COALESCE(daily_streak, 0) > 0
+                ORDER BY daily_streak DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows] if rows else []
+        
+        return await asyncio.to_thread(_sync_get)
+
+    async def update_xo_stats(self, user_id: int, result_type: str, bet: int = 0, won: int = 0):
+        """Обновить статистику крестиков-ноликов"""
+        if user_id == "bot" or user_id is None:
+            return
+            
+        bet = bet if bet is not None else 0
+        won = won if won is not None else 0
+        
+        def _sync_update():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN TRANSACTION")
+                
+                cursor.execute("INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)", (user_id,))
+                cursor.execute("UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1 WHERE user_id = ?", (user_id,))
+                
+                if result_type == "win":
+                    cursor.execute("UPDATE xo_stats SET wins = COALESCE(wins, 0) + 1, current_win_streak = COALESCE(current_win_streak, 0) + 1 WHERE user_id = ?", (user_id,))
+                elif result_type == "loss":
+                    cursor.execute("UPDATE xo_stats SET losses = COALESCE(losses, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "draw":
+                    cursor.execute("UPDATE xo_stats SET draws = COALESCE(draws, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "loss_vs_bot":
+                    cursor.execute("UPDATE xo_stats SET losses_vs_bot = COALESCE(losses_vs_bot, 0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,))
+                elif result_type == "win_vs_bot":
+                    cursor.execute("UPDATE xo_stats SET wins_vs_bot = COALESCE(wins_vs_bot, 0) + 1, current_win_streak = COALESCE(current_win_streak, 0) + 1 WHERE user_id = ?", (user_id,))
+                
+                if bet > 0:
+                    cursor.execute("UPDATE xo_stats SET total_bet = COALESCE(total_bet, 0) + ? WHERE user_id = ?", (bet, user_id))
+                if won > 0:
+                    cursor.execute("UPDATE xo_stats SET total_won = COALESCE(total_won, 0) + ? WHERE user_id = ?", (won, user_id))
+                
+                cursor.execute("""
+                    UPDATE xo_stats SET max_win_streak = MAX(COALESCE(max_win_streak, 0), COALESCE(current_win_streak, 0))
+                    WHERE user_id = ?
+                """, (user_id,))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_update)
+
+    # ==================== МЕТОДЫ ДЛЯ АНАЛИЗА ЧАТА ====================
+    
+    STOP_WORDS = {
+        'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то',
+        'все', 'она', 'так', 'его', 'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за',
+        'бы', 'по', 'только', 'ее', 'мне', 'было', 'вот', 'от', 'меня', 'еще',
+        'нет', 'о', 'из', 'ему', 'теперь', 'когда', 'даже', 'ну', 'вдруг', 'ли',
+        'если', 'уже', 'или', 'ни', 'быть', 'был', 'него', 'до', 'вас', 'нибудь',
+        'опять', 'уж', 'вам', 'ведь', 'там', 'потом', 'себя', 'ничего', 'ей',
+        'может', 'они', 'тут', 'где', 'есть', 'надо', 'ней', 'для', 'мы', 'тебя',
+        'их', 'чем', 'была', 'сам', 'чтоб', 'без', 'будто', 'чего', 'раз', 'тоже',
+        'себе', 'под', 'будет', 'тогда', 'кто', 'этот', 'того', 'потому',
+        'этого', 'какой', 'совсем', 'ним', 'здесь', 'этом', 'один', 'почти',
+        'мой', 'тем', 'чтобы', 'нее', 'сейчас', 'были', 'куда', 'зачем', 'всех',
+        'можно', 'при', 'наконец', 'два', 'об', 'другой', 'хоть', 'после', 'над',
+        'больше', 'тот', 'через', 'эти', 'нас', 'про', 'всего', 'них', 'какая',
+        'много', 'разве', 'три', 'эту', 'моя', 'впрочем', 'хорошо', 'свою',
+        'этой', 'перед', 'иногда', 'лучше', 'чуть', 'нельзя', 'такой', 'им',
+        'более', 'всегда', 'конечно', 'всю', 'между', 'это', 'просто', 'очень'
+    }
+    
+    TOPIC_KEYWORDS = {
+        "крестики-нолики": ["крестики", "нолики", "xo", "tic", "tac", "победа", "ничья", "выиграл", "проиграл"],
+        "бот": ["бот", "nexus", "нексус", "команда", "функция", "баг", "фича", "обновление"],
+        "игры": ["игра", "играть", "слот", "рулетка", "ставка", "казино"],
+        "общение": ["привет", "как дела", "что делаешь", "чем занимаешься"],
+        "флуд": ["хаха", "ахах", "лол", "кек", "ор", "ору"],
+    }
+    
+    async def log_chat_message(self, chat_id: int, user_id: int, text: str):
+        """Логирование сообщения для анализа тем"""
+        if chat_id is None or user_id is None or text is None or not self.db_path:
+            return
+        
+        if len(text) < 3:
+            return
+            
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        def _sync_log():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                words = re.findall(r'[а-яА-Яa-zA-Z]{3,}', text.lower())
+                
+                for word in words:
+                    if word in self.STOP_WORDS:
+                        continue
+                        
+                    cursor.execute("""
+                        INSERT INTO chat_word_stats (chat_id, date, word, count)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(chat_id, date, word) DO UPDATE SET
+                            count = count + 1
+                    """, (chat_id, today, word))
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+            finally:
+                conn.close()
+        
+        await asyncio.to_thread(_sync_log)
+    
+    async def cleanup_old_activity_logs(self, days: int = 90):
+        """Очистка старых логов активности"""
+        if days is None:
+            days = 90
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        def _sync_cleanup():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_activity_log WHERE date < ?", (cutoff,))
+            cursor.execute("DELETE FROM chat_word_stats WHERE date < ?", (cutoff,))
+            
+            cursor.execute("""
+                UPDATE user_stats SET 
+                    messages_today = 0,
+                    messages_week = 0,
+                    messages_month = 0
+            """)
+            
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_cleanup)
+
+    async def reset_daily_counters(self):
+        """Сброс дневных счётчиков"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_today = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
+
+    async def reset_weekly_counters(self):
+        """Сброс недельных счётчиков"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_week = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
+
+    async def reset_monthly_counters(self):
+        """Сброс месячных счётчиков"""
+        def _sync_reset():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE user_stats SET messages_month = 0")
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_reset)
 
 
 # Глобальный экземпляр базы данных
