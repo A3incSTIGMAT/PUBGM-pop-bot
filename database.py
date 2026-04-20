@@ -1,8 +1,8 @@
 # ============================================
 # ФАЙЛ: database.py
-# ОПИСАНИЕ: База данных NEXUS Bot — ПОЛНАЯ ВЕРСИЯ С АВТОМИГРАЦИЕЙ
+# ОПИСАНИЕ: База данных NEXUS Bot — ПОЛНАЯ ВЕРСИЯ
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# ВКЛЮЧАЕТ: Автоматическое добавление недостающих колонок
+# ВКЛЮЧАЕТ: Все таблицы, миграции, очистку бота
 # ============================================
 
 import sqlite3
@@ -258,6 +258,20 @@ class Database:
         """)
         
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_game_stats (
+                user_id INTEGER PRIMARY KEY,
+                total_games INTEGER DEFAULT 0,
+                total_wins INTEGER DEFAULT 0,
+                total_coins INTEGER DEFAULT 0,
+                slot_played INTEGER DEFAULT 0,
+                roulette_played INTEGER DEFAULT 0,
+                rps_played INTEGER DEFAULT 0,
+                duel_played INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS relationships (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user1_id INTEGER NOT NULL,
@@ -401,9 +415,7 @@ class Database:
         conn.commit()
         conn.close()
         
-        # Выполняем миграции
         self._migrate_tables()
-        
         self._add_default_shop_items()
         self._add_default_tag_categories()
     
@@ -430,9 +442,8 @@ class Database:
             if col_name not in existing_columns:
                 try:
                     cursor.execute(f"ALTER TABLE xo_stats ADD COLUMN {col_name} {col_def}")
-                    logger.info(f"✅ Added column {col_name} to xo_stats")
-                except Exception as e:
-                    logger.warning(f"Could not add column {col_name}: {e}")
+                except:
+                    pass
         
         # Миграция user_economy_stats
         cursor.execute("PRAGMA table_info(user_economy_stats)")
@@ -454,9 +465,8 @@ class Database:
             if col_name not in existing_columns:
                 try:
                     cursor.execute(f"ALTER TABLE user_economy_stats ADD COLUMN {col_name} {col_def}")
-                    logger.info(f"✅ Added column {col_name} to user_economy_stats")
-                except Exception as e:
-                    logger.warning(f"Could not add column {col_name}: {e}")
+                except:
+                    pass
         
         # Миграция user_stats
         cursor.execute("PRAGMA table_info(user_stats)")
@@ -478,9 +488,8 @@ class Database:
             if col_name not in existing_columns:
                 try:
                     cursor.execute(f"ALTER TABLE user_stats ADD COLUMN {col_name} {col_def}")
-                    logger.info(f"✅ Added column {col_name} to user_stats")
-                except Exception as e:
-                    logger.warning(f"Could not add column {col_name}: {e}")
+                except:
+                    pass
         
         # Миграция user_activity_log
         cursor.execute("PRAGMA table_info(user_activity_log)")
@@ -500,9 +509,8 @@ class Database:
             if col_name not in existing_columns:
                 try:
                     cursor.execute(f"ALTER TABLE user_activity_log ADD COLUMN {col_name} {col_def}")
-                    logger.info(f"✅ Added column {col_name} to user_activity_log")
-                except Exception as e:
-                    logger.warning(f"Could not add column {col_name}: {e}")
+                except:
+                    pass
         
         conn.commit()
         conn.close()
@@ -1119,7 +1127,6 @@ class Database:
         await asyncio.to_thread(_sync_update)
 
     async def get_user_stats(self, user_id: int) -> Optional[Dict]:
-        """Получить полную статистику пользователя"""
         if user_id is None or not self.db_path:
             return None
             
@@ -1446,31 +1453,44 @@ class Database:
         
         await asyncio.to_thread(_sync_reset)
 
-    async def cleanup_bot_from_all_tables(self, bot_id: int):
-    """Полностью удалить бота из всех таблиц"""
-        if bot_id is None:
-        return    
-    def _sync_cleanup():
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        tables = [
-            'users', 'user_stats', 'user_economy_stats', 'xo_stats',
-            'user_ranks', 'donors', 'user_profiles', 'user_game_stats',
-            'relationships', 'group_members', 'custom_rp'
-        ]
-        
-        for table in tables:
-            try:
-                cursor.execute(f"DELETE FROM {table} WHERE user_id = ?", (bot_id,))
-            except:
-                pass
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"✅ Bot {bot_id} cleaned from all tables")
+    # ==================== МЕТОДЫ ОЧИСТКИ БОТА ====================
     
-    await asyncio.to_thread(_sync_cleanup)
+    async def cleanup_bot_from_all_tables(self, bot_id: int):
+        """Полностью удалить бота из всех таблиц"""
+        if bot_id is None or not self.db_path:
+            return
+            
+        def _sync_cleanup():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            tables = [
+                'users', 'user_stats', 'user_economy_stats', 'xo_stats',
+                'user_ranks', 'donors', 'user_profiles', 'user_game_stats',
+                'relationships', 'group_members', 'custom_rp',
+                'user_activity_log', 'user_tag_subscriptions',
+                'ref_links', 'ref_invites', 'transactions'
+            ]
+            
+            for table in tables:
+                try:
+                    if table == 'transactions':
+                        cursor.execute(f"DELETE FROM {table} WHERE from_id = ? OR to_id = ?", (bot_id, bot_id))
+                    elif table == 'relationships':
+                        cursor.execute(f"DELETE FROM {table} WHERE user1_id = ? OR user2_id = ?", (bot_id, bot_id))
+                    else:
+                        cursor.execute(f"DELETE FROM {table} WHERE user_id = ?", (bot_id,))
+                except:
+                    pass
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"✅ Bot {bot_id} completely removed from database")
+        
+        await asyncio.to_thread(_sync_cleanup)
 
-# Глобальный экземпляр базы данных
+
+# ============================================================
+# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР БАЗЫ ДАННЫХ
+# ============================================================
 db = Database()
