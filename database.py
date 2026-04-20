@@ -1446,6 +1446,32 @@ class Database:
         
         await asyncio.to_thread(_sync_reset)
 
+    async def cleanup_bot_from_all_tables(self, bot_id: int):
+    """Полностью удалить бота из всех таблиц"""
+    if bot_id is None:
+        return
+        
+    def _sync_cleanup():
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        tables = [
+            'users', 'user_stats', 'user_economy_stats', 'xo_stats',
+            'user_ranks', 'donors', 'user_profiles', 'user_game_stats',
+            'relationships', 'group_members', 'custom_rp'
+        ]
+        
+        for table in tables:
+            try:
+                cursor.execute(f"DELETE FROM {table} WHERE user_id = ?", (bot_id,))
+            except:
+                pass
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Bot {bot_id} cleaned from all tables")
+    
+    await asyncio.to_thread(_sync_cleanup)
 
 # Глобальный экземпляр базы данных
 db = Database()
