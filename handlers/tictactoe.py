@@ -1,8 +1,8 @@
 # ============================================
 # ФАЙЛ: handlers/tictactoe.py
-# ОПИСАНИЕ: Крестики-нолики — ИГРА В ЛИЧНЫХ СООБЩЕНИЯХ
+# ОПИСАНИЕ: Крестики-нолики — ИГРА В ЛС + ПОНЯТНЫЕ ОШИБКИ
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
-# ИСПРАВЛЕНО: Игра перенесена в ЛС, нет спама в чате
+# ИСПРАВЛЕНО: Понятные инструкции при ошибках отправки в ЛС
 # ============================================
 
 import random
@@ -452,28 +452,45 @@ async def xo_start_vs_bot(callback: types.CallbackQuery):
     is_user_turn = (current_turn == player_side)
     
     # 🔥 ОТПРАВЛЯЕМ ИГРУ В ЛС
-    msg = await bot.send_message(
-        user_id,
-        f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
-        f"Сложность: {diff_name}\n"
-        f"Вы играете за {user_symbol} <b>{player_side}</b>\n"
-        f"Бот играет за {bot_symbol} <b>{'O' if player_side == 'X' else 'X'}</b>\n\n"
-        f"👇 {'Ваш ход' if is_user_turn else 'Ход бота'}...",
-        parse_mode=ParseMode.HTML,
-        reply_markup=xo_board_keyboard(board, game_id, can_play=is_user_turn)
-    )
-    active_games[game_id]["private_msg_user"] = msg.message_id
-    
-    await callback.message.edit_text(
-        f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
-        f"📩 <b>Игра началась в личных сообщениях!</b>\n"
-        f"Проверьте ЛС от бота.",
-        parse_mode=ParseMode.HTML
-    )
-    
-    if not is_user_turn:
-        await asyncio.sleep(0.8)
-        await bot_turn(game_id, active_games[game_id])
+    try:
+        msg = await bot.send_message(
+            user_id,
+            f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
+            f"Сложность: {diff_name}\n"
+            f"Вы играете за {user_symbol} <b>{player_side}</b>\n"
+            f"Бот играет за {bot_symbol} <b>{'O' if player_side == 'X' else 'X'}</b>\n\n"
+            f"👇 {'Ваш ход' if is_user_turn else 'Ход бота'}...",
+            parse_mode=ParseMode.HTML,
+            reply_markup=xo_board_keyboard(board, game_id, can_play=is_user_turn)
+        )
+        active_games[game_id]["private_msg_user"] = msg.message_id
+        
+        await callback.message.edit_text(
+            f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
+            f"📩 <b>Игра началась в личных сообщениях!</b>\n"
+            f"Проверьте ЛС от бота.",
+            parse_mode=ParseMode.HTML
+        )
+        
+        if not is_user_turn:
+            await asyncio.sleep(0.8)
+            await bot_turn(game_id, active_games[game_id])
+        
+    except Exception as e:
+        logger.error(f"Error starting bot game in private: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>НЕ УДАЛОСЬ НАЧАТЬ ИГРУ!</b>\n\n"
+            f"Вы должны активировать бота:\n\n"
+            f"1️⃣ Перейти в @NEXUS_Manager_Official_bot\n"
+            f"2️⃣ Нажать <b>START</b> (или написать /start)\n"
+            f"3️⃣ Убедиться, что бот не заблокирован\n\n"
+            f"💡 <i>После этого игра заработает!</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔗 ОТКРЫТЬ БОТА", url="https://t.me/NEXUS_Manager_Official_bot")]
+            ])
+        )
+        active_games.pop(game_id, None)
     
     await callback.answer()
 
@@ -686,20 +703,26 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
         game["private_msg_x"] = msg_x.message_id
     except Exception as e:
         logger.error(f"Error sending private message to X: {e}")
+        
         await callback.message.edit_text(
-            f"❌ <b>Ошибка!</b>\n\n"
-            f"Не удалось отправить игру в ЛС игроку {player_x_name}.\n"
-            f"Возможно, бот заблокирован или пользователь не запускал бота.",
-            parse_mode=ParseMode.HTML
+            f"❌ <b>НЕ УДАЛОСЬ НАЧАТЬ ИГРУ!</b>\n\n"
+            f"Игрок <b>{player_x_name}</b> должен активировать бота:\n\n"
+            f"1️⃣ Перейти в @NEXUS_Manager_Official_bot\n"
+            f"2️⃣ Нажать <b>START</b> (или написать /start)\n"
+            f"3️⃣ Убедиться, что бот не заблокирован\n\n"
+            f"💡 <i>После этого вызов сработает!</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔗 ОТКРЫТЬ БОТА", url="https://t.me/NEXUS_Manager_Official_bot")]
+            ])
         )
-        # Возвращаем ставки
         if bet > 0:
-            await db.update_balance(player_x, bet, "Возврат ставки (ошибка)")
-            await db.update_balance(player_o, bet, "Возврат ставки (ошибка)")
+            await db.update_balance(player_x, bet, "Возврат ставки (ошибка ЛС)")
+            await db.update_balance(player_o, bet, "Возврат ставки (ошибка ЛС)")
         active_games.pop(game_id, None)
-        await callback.answer("❌ Ошибка отправки игры в ЛС", show_alert=True)
+        await callback.answer("❌ Игрок не активировал бота", show_alert=True)
         return
-    
+
     try:
         msg_o = await bot.send_message(
             player_o,
@@ -714,23 +737,29 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
         game["private_msg_o"] = msg_o.message_id
     except Exception as e:
         logger.error(f"Error sending private message to O: {e}")
-        # Пытаемся удалить сообщение у X
+        
         try:
             await bot.delete_message(player_x, game["private_msg_x"])
         except:
             pass
+        
         await callback.message.edit_text(
-            f"❌ <b>Ошибка!</b>\n\n"
-            f"Не удалось отправить игру в ЛС игроку {player_o_name}.\n"
-            f"Возможно, бот заблокирован или пользователь не запускал бота.",
-            parse_mode=ParseMode.HTML
+            f"❌ <b>НЕ УДАЛОСЬ НАЧАТЬ ИГРУ!</b>\n\n"
+            f"Игрок <b>{player_o_name}</b> должен активировать бота:\n\n"
+            f"1️⃣ Перейти в @NEXUS_Manager_Official_bot\n"
+            f"2️⃣ Нажать <b>START</b> (или написать /start)\n"
+            f"3️⃣ Убедиться, что бот не заблокирован\n\n"
+            f"💡 <i>После этого вызов сработает!</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔗 ОТКРЫТЬ БОТА", url="https://t.me/NEXUS_Manager_Official_bot")]
+            ])
         )
-        # Возвращаем ставки
         if bet > 0:
-            await db.update_balance(player_x, bet, "Возврат ставки (ошибка)")
-            await db.update_balance(player_o, bet, "Возврат ставки (ошибка)")
+            await db.update_balance(player_x, bet, "Возврат ставки (ошибка ЛС)")
+            await db.update_balance(player_o, bet, "Возврат ставки (ошибка ЛС)")
         active_games.pop(game_id, None)
-        await callback.answer("❌ Ошибка отправки игры в ЛС", show_alert=True)
+        await callback.answer("❌ Игрок не активировал бота", show_alert=True)
         return
     
     await callback.answer("✅ Игра началась! Проверьте ЛС.")
