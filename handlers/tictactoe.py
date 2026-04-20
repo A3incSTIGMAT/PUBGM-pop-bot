@@ -1,7 +1,7 @@
 """
 Крестики-нолики для NEXUS Bot
 Игра против бота и против других игроков
-Версия: 2.0 (Fixed AI, Memory Leak, State Safety)
+ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import random
@@ -18,46 +18,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import db
 from config import START_BALANCE
 
-# Импорт клавиатур (с защитой от отсутствия файла)
-try:
-    from utils.keyboards import (
-        xo_menu_keyboard, xo_difficulty_keyboard, xo_board_keyboard,
-        xo_bet_keyboard, back_button
-    )
-except ImportError:
-    # Заглушки на случай, если utils.keyboards ещё не создан
-    def xo_menu_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 С ботом", callback_data="xo_vs_bot")],
-        [InlineKeyboardButton(text="👤 С игроком", callback_data="xo_vs_player")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-    ])
-    def xo_difficulty_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="😊 Лёгкий", callback_data="xo_diff_easy")],
-        [InlineKeyboardButton(text="🤔 Средний", callback_data="xo_diff_medium")],
-        [InlineKeyboardButton(text="🤖 Сложный", callback_data="xo_diff_hard")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="xo_vs_bot")]
-    ])
-    def xo_board_keyboard(board, game_id, can_play=True): 
-        # Простая заглушка. Замените на вашу реализацию в utils.keyboards
-        kb = []
-        for r in range(3):
-            row = []
-            for c in range(3):
-                cell = board[r][c]
-                cb_data = f"xo_move_{game_id}_{r}_{c}" if cell == " " and can_play else "xo_noop"
-                text = cell if cell != " " else "⬜"
-                row.append(InlineKeyboardButton(text=text, callback_data=cb_data))
-            kb.append(row)
-        return InlineKeyboardMarkup(inline_keyboard=kb)
-    def xo_bet_keyboard(): return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Без ставки", callback_data="xo_bet_0")],
-        [InlineKeyboardButton(text="💰 50 NCoin", callback_data="xo_bet_50")],
-        [InlineKeyboardButton(text="💰 100 NCoin", callback_data="xo_bet_100")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="xo_vs_player")]
-    ])
-    def back_button(cb_data="back_to_menu"): return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data=cb_data)]
-    ])
+# Импорт клавиатур
+from utils.keyboards import (
+    xo_menu_keyboard, xo_difficulty_keyboard, xo_board_keyboard,
+    xo_bet_keyboard, back_button
+)
 
 router = Router()
 logger = __import__('logging').getLogger(__name__)
@@ -65,8 +30,8 @@ logger = __import__('logging').getLogger(__name__)
 # ==================== КОНФИГУРАЦИЯ ====================
 
 # Хранилище активных игр и временных состояний
-active_games = {}          # game_id -> game_state
-pending_challenges = {}    # user_id -> bet_amount
+active_games = {}
+pending_challenges = {}
 
 # Комбинации победы
 WIN_COMBINATIONS = [
@@ -82,7 +47,7 @@ BOT_DIFFICULTY = {
 }
 
 COMMISSION = 0.05
-GAME_TIMEOUT_SECONDS = 600  # 10 минут на игру
+GAME_TIMEOUT_SECONDS = 600
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -110,7 +75,6 @@ def generate_game_id() -> str:
 
 
 def copy_board(board: list) -> list:
-    """Безопасная копия поля для симуляции ходов ИИ"""
     return [row[:] for row in board]
 
 
@@ -165,23 +129,141 @@ def bot_move_hard(board: list) -> tuple:
 BOT_MOVES = {"easy": bot_move_easy, "medium": bot_move_medium, "hard": bot_move_hard}
 
 
-# ==================== ОЧИСТКА СТАРЫХ ИГР ====================
+# ==================== СТАТИСТИКА ====================
 
-async def cleanup_old_games():
-    """Удаляет игры, которые не активны более 10 минут"""
-    now = time.time()
-    expired = [gid for gid, g in active_games.items() if now - g.get("last_move", 0) > GAME_TIMEOUT_SECONDS]
-    for gid in expired:
-        game = active_games.pop(gid, None)
-        if game and game.get("bet", 0) > 0 and not game.get("finished", False):
-            # Возвращаем ставки при таймауте
-            try:
-                await db.update_balance(game["player_x"], game["bet"], "Возврат ставки (таймаут)")
-                if game["player_o"] != "bot":
-                    await db.update_balance(game["player_o"], game["bet"], "Возврат ставки (таймаут)")
-                logger.info(f"⏳ Game {gid} expired. Bets refunded.")
-            except Exception as e:
-                logger.error(f"Failed to refund bets for expired game {gid}: {e}")
+async def update_xo_stats(user_id: int, result_type: str):
+    def _sync_update():
+        conn = db._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS xo_stats (
+                user_id INTEGER PRIMARY KEY,
+                games_played INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0,
+                wins_vs_bot INTEGER DEFAULT 0,
+                losses_vs_bot INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)", (user_id,))
+        cursor.execute("UPDATE xo_stats SET games_played = games_played + 1 WHERE user_id = ?", (user_id,))
+        
+        if result_type == "win":
+            cursor.execute("UPDATE xo_stats SET wins = wins + 1 WHERE user_id = ?", (user_id,))
+        elif result_type == "loss":
+            cursor.execute("UPDATE xo_stats SET losses = losses + 1 WHERE user_id = ?", (user_id,))
+        elif result_type == "draw":
+            cursor.execute("UPDATE xo_stats SET draws = draws + 1 WHERE user_id = ?", (user_id,))
+        elif result_type == "loss_vs_bot":
+            cursor.execute("UPDATE xo_stats SET losses_vs_bot = losses_vs_bot + 1 WHERE user_id = ?", (user_id,))
+        
+        conn.commit()
+        conn.close()
+    
+    await asyncio.to_thread(_sync_update)
+
+
+async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, result: str):
+    if game.get("finished", False):
+        return
+    game["finished"] = True
+    
+    bet = game["bet"]
+    player_x = game["player_x"]
+    player_o = game["player_o"]
+    
+    result_text = ""
+    
+    if result == "timeout":
+        result_text = "⏳ <b>ВРЕМЯ ВЫШЛО!</b>\nИгра завершена. Ставки возвращены."
+        if bet > 0:
+            await db.update_balance(player_x, bet, "Возврат ставки (таймаут)")
+            if player_o != "bot":
+                await db.update_balance(player_o, bet, "Возврат ставки (таймаут)")
+        await update_xo_stats(player_x, "draw")
+        if player_o != "bot":
+            await update_xo_stats(player_o, "draw")
+            
+    elif result == "X":
+        px_name = html.escape((await db.get_user(player_x))["first_name"])
+        result_text = f"🎉 ПОБЕДИЛ {px_name} (X)!"
+        if bet > 0:
+            win_amount = int(bet * 2 * (1 - COMMISSION))
+            await db.update_balance(player_x, win_amount, "Выигрыш в крестики-нолики")
+            result_text += f"\n💰 Получено: <b>{win_amount} NCoin</b>"
+        await update_xo_stats(player_x, "win")
+        if player_o != "bot":
+            await update_xo_stats(player_o, "loss")
+            
+    elif result == "O":
+        if player_o == "bot":
+            result_text = "🤖 ПОБЕДИЛ БОТ!"
+            await update_xo_stats(player_x, "loss_vs_bot")
+        else:
+            po_name = html.escape((await db.get_user(player_o))["first_name"])
+            result_text = f"🎉 ПОБЕДИЛ {po_name} (O)!"
+            if bet > 0:
+                win_amount = int(bet * 2 * (1 - COMMISSION))
+                await db.update_balance(player_o, win_amount, "Выигрыш в крестики-нолики")
+                result_text += f"\n💰 Получено: <b>{win_amount} NCoin</b>"
+            await update_xo_stats(player_o, "win")
+            await update_xo_stats(player_x, "loss")
+    else:  # draw
+        result_text = "🤝 НИЧЬЯ!"
+        if bet > 0:
+            await db.update_balance(player_x, bet, "Возврат ставки (ничья)")
+            if player_o != "bot":
+                await db.update_balance(player_o, bet, "Возврат ставки (ничья)")
+            result_text += f"\n💰 Ставка возвращена"
+        await update_xo_stats(player_x, "draw")
+        if player_o != "bot":
+            await update_xo_stats(player_o, "draw")
+    
+    active_games.pop(game_id, None)
+    
+    await callback.message.edit_text(
+        f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
+            [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
+        ])
+    )
+
+
+async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
+    difficulty = game.get("difficulty", "medium")
+    move_func = BOT_MOVES.get(difficulty, bot_move_medium)
+    
+    move = move_func(game["board"])
+    if not move:
+        winner = check_winner(game["board"])
+        if winner:
+            await end_game(callback, game_id, game, winner)
+        return
+    
+    r, c = move
+    game["board"][r][c] = "O"
+    
+    winner = check_winner(game["board"])
+    if winner:
+        await end_game(callback, game_id, game, winner)
+        return
+    
+    game["current_turn"] = "X"
+    game["last_move"] = time.time()
+    
+    player_x = html.escape((await db.get_user(game["player_x"]))["first_name"])
+    
+    await callback.message.edit_text(
+        f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+        f"❌ {player_x} vs 🤖 Бот\n"
+        f"Сложность: {BOT_DIFFICULTY[difficulty]['name']}\n\n"
+        f"👇 Ваш ход, <b>{player_x} (X)</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
+    )
 
 
 # ==================== ОБРАБОТЧИКИ ====================
@@ -202,7 +284,6 @@ async def cmd_xo(message: types.Message):
 
 
 @router.callback_query(F.data == "game_xo")
-@router.callback_query(F.data == "games")
 async def game_xo_callback(callback: types.CallbackQuery):
     await cmd_xo(callback.message)
     await callback.answer()
@@ -392,7 +473,6 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
     player_x_name = html.escape((await db.get_user(game["player_x"]))["first_name"])
     player_o_name = html.escape(callback.from_user.first_name)
     
-    # Обновляем сообщение вызова
     await callback.message.edit_text(
         f"🎮 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
         f"❌ <b>X:</b> {player_x_name}\n"
@@ -403,7 +483,6 @@ async def xo_accept_challenge(callback: types.CallbackQuery):
         reply_markup=xo_board_keyboard(game["board"], game_id, can_play=False)
     )
     
-    # Отправляем игровое поле
     msg = await callback.bot.send_message(
         game["chat_id"],
         f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
@@ -459,25 +538,21 @@ async def xo_make_move(callback: types.CallbackQuery):
         await callback.answer("❌ Игра уже окончена!", show_alert=True)
         return
         
-    # Таймаут
     if time.time() - game["last_move"] > GAME_TIMEOUT_SECONDS:
         await end_game(callback, game_id, game, "timeout")
         await callback.answer("⏳ Игра завершена по таймауту.", show_alert=True)
         return
     
-    # Проверка очереди
     current_turn = game["current_turn"]
     if (current_turn == "X" and user_id != game["player_x"]) or \
        (current_turn == "O" and user_id != game["player_o"]):
         await callback.answer("❌ Сейчас не ваш ход!", show_alert=True)
         return
     
-    # Проверка клетки
     if game["board"][r][c] != " ":
         await callback.answer("❌ Клетка занята!", show_alert=True)
         return
     
-    # Ход
     game["board"][r][c] = current_turn
     game["last_move"] = time.time()
     
@@ -486,7 +561,6 @@ async def xo_make_move(callback: types.CallbackQuery):
         await end_game(callback, game_id, game, winner)
         return
     
-    # Смена хода
     game["current_turn"] = "O" if current_turn == "X" else "X"
     
     player_x = html.escape((await db.get_user(game["player_x"]))["first_name"])
@@ -511,109 +585,7 @@ async def xo_make_move(callback: types.CallbackQuery):
         await asyncio.sleep(0.6)
         await bot_turn(callback, game_id, game)
     
-    await callback.answer()
-
-
-async def bot_turn(callback: types.CallbackQuery, game_id: str, game: dict):
-    difficulty = game.get("difficulty", "medium")
-    move_func = BOT_MOVES.get(difficulty, bot_move_medium)
-    
-    move = move_func(game["board"])
-    if not move:
-        winner = check_winner(game["board"])
-        if winner:
-            await end_game(callback, game_id, game, winner)
-        return
-    
-    r, c = move
-    game["board"][r][c] = "O"
-    
-    winner = check_winner(game["board"])
-    if winner:
-        await end_game(callback, game_id, game, winner)
-        return
-    
-    game["current_turn"] = "X"
-    game["last_move"] = time.time()
-    
-    player_x = html.escape((await db.get_user(game["player_x"]))["first_name"])
-    
-    await callback.message.edit_text(
-        f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-        f"❌ {player_x} vs 🤖 Бот\n"
-        f"Сложность: {BOT_DIFFICULTY[difficulty]['name']}\n\n"
-        f"👇 Ваш ход, <b>{player_x} (X)</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=xo_board_keyboard(game["board"], game_id, can_play=True)
-    )
-
-
-async def end_game(callback: types.CallbackQuery, game_id: str, game: dict, result: str):
-    if game.get("finished", False):
-        return
-    game["finished"] = True
-    
-    bet = game["bet"]
-    player_x = game["player_x"]
-    player_o = game["player_o"]
-    
-    result_text = ""
-    
-    if result == "timeout":
-        result_text = "⏳ <b>ВРЕМЯ ВЫШЛО!</b>\nИгра завершена. Ставки возвращены."
-        if bet > 0:
-            await db.update_balance(player_x, bet, "Возврат ставки (таймаут)")
-            if player_o != "bot":
-                await db.update_balance(player_o, bet, "Возврат ставки (таймаут)")
-        await update_xo_stats(player_x, "draw")
-        if player_o != "bot":
-            await update_xo_stats(player_o, "draw")
-            
-    elif result == "X":
-        px_name = html.escape((await db.get_user(player_x))["first_name"])
-        result_text = f"🎉 ПОБЕДИЛ {px_name} (X)!"
-        if bet > 0:
-            win_amount = int(bet * 2 * (1 - COMMISSION))
-            await db.update_balance(player_x, win_amount, "Выигрыш в крестики-нолики")
-            result_text += f"\n💰 Получено: <b>{win_amount} NCoin</b>"
-        await update_xo_stats(player_x, "win")
-        if player_o != "bot":
-            await update_xo_stats(player_o, "loss")
-            
-    elif result == "O":
-        if player_o == "bot":
-            result_text = "🤖 ПОБЕДИЛ БОТ!"
-            await update_xo_stats(player_x, "loss_vs_bot")
-        else:
-            po_name = html.escape((await db.get_user(player_o))["first_name"])
-            result_text = f"🎉 ПОБЕДИЛ {po_name} (O)!"
-            if bet > 0:
-                win_amount = int(bet * 2 * (1 - COMMISSION))
-                await db.update_balance(player_o, win_amount, "Выигрыш в крестики-нолики")
-                result_text += f"\n💰 Получено: <b>{win_amount} NCoin</b>"
-            await update_xo_stats(player_o, "win")
-            await update_xo_stats(player_x, "loss")
-    else:  # draw
-        result_text = "🤝 НИЧЬЯ!"
-        if bet > 0:
-            await db.update_balance(player_x, bet, "Возврат ставки (ничья)")
-            if player_o != "bot":
-                await db.update_balance(player_o, bet, "Возврат ставки (ничья)")
-            result_text += f"\n💰 Ставка возвращена"
-        await update_xo_stats(player_x, "draw")
-        if player_o != "bot":
-            await update_xo_stats(player_o, "draw")
-    
-    active_games.pop(game_id, None)
-    
-    await callback.message.edit_text(
-        f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
-            [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
-        ])
-    )
+    await callback.answer(f"✅ Ход на ({r+1}, {c+1})")
 
 
 @router.callback_query(F.data.startswith("xo_surrender_"))
@@ -640,41 +612,6 @@ async def xo_surrender(callback: types.CallbackQuery):
     
     await end_game(callback, game_id, game, winner)
     await callback.answer("🏳️ Вы сдались!")
-
-
-# ==================== СТАТИСТИКА ====================
-
-async def update_xo_stats(user_id: int, result_type: str):
-    def _sync_update():
-        conn = db._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS xo_stats (
-                user_id INTEGER PRIMARY KEY,
-                games_played INTEGER DEFAULT 0,
-                wins INTEGER DEFAULT 0,
-                losses INTEGER DEFAULT 0,
-                draws INTEGER DEFAULT 0,
-                wins_vs_bot INTEGER DEFAULT 0,
-                losses_vs_bot INTEGER DEFAULT 0
-            )
-        """)
-        cursor.execute("INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)", (user_id,))
-        cursor.execute("UPDATE xo_stats SET games_played = games_played + 1 WHERE user_id = ?", (user_id,))
-        
-        if result_type == "win":
-            cursor.execute("UPDATE xo_stats SET wins = wins + 1 WHERE user_id = ?", (user_id,))
-        elif result_type == "loss":
-            cursor.execute("UPDATE xo_stats SET losses = losses + 1 WHERE user_id = ?", (user_id,))
-        elif result_type == "draw":
-            cursor.execute("UPDATE xo_stats SET draws = draws + 1 WHERE user_id = ?", (user_id,))
-        elif result_type == "loss_vs_bot":
-            cursor.execute("UPDATE xo_stats SET losses_vs_bot = losses_vs_bot + 1 WHERE user_id = ?", (user_id,))
-        
-        conn.commit()
-        conn.close()
-    
-    await asyncio.to_thread(_sync_update)
 
 
 @router.callback_query(F.data == "xo_stats")
@@ -751,4 +688,3 @@ async def xo_help_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "xo_noop")
 async def xo_noop(callback: types.CallbackQuery):
     await callback.answer("❌ Эта клетка занята или игра не активна!", show_alert=True)
-
