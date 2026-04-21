@@ -1,7 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ (ИДЕАЛЬНЫЙ КОД)
-# ИСПРАВЛЕНО: Ответы только при обращении, защита от NULL, синтаксис
+# ОПИСАНИЕ: Умный парсер + ДИНАМИЧЕСКАЯ РЕГИСТРАЦИЯ КАСТОМНЫХ РП
+# ИСПРАВЛЕНО: Кастомные команды работают сразу после добавления
 # ============================================
 
 import re
@@ -532,7 +532,58 @@ TAG_KEYWORDS: Dict[str, list] = {
 }
 
 
-# ==================== КАСТОМНЫЕ РП КОМАНДЫ (СЛЕШ) ====================
+# ==================== ДИНАМИЧЕСКАЯ РЕГИСТРАЦИЯ КАСТОМНЫХ РП ====================
+
+async def register_custom_command(command: str, action: str) -> None:
+    """Динамически зарегистрировать кастомную РП команду"""
+    if not command or not action:
+        return
+    
+    command = command.strip().lower()
+    action = action.strip()
+    
+    # Добавляем в словари
+    RP_ACTIONS[command] = command
+    RP_TEXTS[command] = [action]
+    
+    # 🔥 СОЗДАЁМ ОБРАБОТЧИК
+    async def custom_handler(message: types.Message, from_id: int, target_id: int,
+                             target_user: dict, cmd: str = command, act: str = action) -> None:
+        if message is None:
+            return
+        try:
+            from_user = await db.get_user(from_id)
+            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+            await message.answer(
+                f"✨ {html.escape(from_name) if from_name else 'Пользователь'} "
+                f"{act} {html.escape(target_name) if target_name else 'Пользователь'}!"
+            )
+        except Exception as e:
+            logger.error(f"Error in custom RP handler '{cmd}': {e}")
+    
+    # 🔥 РЕГИСТРИРУЕМ В РЕЕСТРЕ
+    handler = CommandHandler([command], custom_handler, need_target=True)
+    TARGET_COMMANDS[command] = handler
+    logger.info(f"✅ Registered custom command: {command}")
+
+
+async def unregister_custom_command(command: str) -> None:
+    """Удалить кастомную РП команду из реестра"""
+    if not command:
+        return
+    
+    command = command.strip().lower()
+    
+    if command in RP_ACTIONS:
+        del RP_ACTIONS[command]
+    if command in RP_TEXTS:
+        del RP_TEXTS[command]
+    if command in TARGET_COMMANDS:
+        del TARGET_COMMANDS[command]
+    
+    logger.info(f"🗑️ Unregistered custom command: {command}")
+
 
 async def load_custom_rp_commands() -> None:
     """Загрузить все кастомные РП команды из БД при старте"""
@@ -542,32 +593,16 @@ async def load_custom_rp_commands() -> None:
         loaded = 0
         for user_id, commands in all_custom.items():
             for cmd, action in commands.items():
-                if cmd and cmd not in RP_ACTIONS:
-                    RP_ACTIONS[cmd] = cmd
-                    RP_TEXTS[cmd] = [action]
-                    
-                    @register_command([cmd], need_target=True)
-                    async def dynamic_handler(message: types.Message, from_id: int, target_id: int,
-                                             target_user: dict, c: str = cmd, a: str = action) -> None:
-                        if message is None:
-                            return
-                        try:
-                            from_user = await db.get_user(from_id)
-                            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-                            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-                            await message.answer(
-                                f"✨ {html.escape(from_name) if from_name else 'Пользователь'} "
-                                f"{a} {html.escape(target_name) if target_name else 'Пользователь'}!"
-                            )
-                        except Exception as e:
-                            logger.error(f"Error in dynamic RP handler: {e}")
-                    
+                if cmd and cmd.strip() and action:
+                    await register_custom_command(cmd, action)
                     loaded += 1
         
         logger.info(f"✅ Loaded {loaded} custom RP commands from database")
     except Exception as e:
         logger.error(f"Error loading custom RP commands: {e}")
 
+
+# ==================== КАСТОМНЫЕ РП КОМАНДЫ (СЛЕШ) ====================
 
 @router.message(Command("add_rp"))
 async def cmd_add_custom_rp(message: types.Message) -> None:
@@ -622,26 +657,8 @@ async def cmd_add_custom_rp(message: types.Message) -> None:
         
         await db.add_custom_rp(user_id, command, action)
         
-        # Добавляем в реестр
-        if command not in RP_ACTIONS:
-            RP_ACTIONS[command] = command
-            RP_TEXTS[command] = [action]
-            
-            @register_command([command], need_target=True)
-            async def dynamic_rp_handler(message: types.Message, from_id: int, target_id: int,
-                                         target_user: dict, cmd: str = command, act: str = action) -> None:
-                if message is None:
-                    return
-                try:
-                    from_user = await db.get_user(from_id)
-                    from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-                    target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-                    await message.answer(
-                        f"✨ {html.escape(from_name) if from_name else 'Пользователь'} "
-                        f"{act} {html.escape(target_name) if target_name else 'Пользователь'}!"
-                    )
-                except Exception as e:
-                    logger.error(f"Error in dynamic RP handler: {e}")
+        # 🔥 ДИНАМИЧЕСКАЯ РЕГИСТРАЦИЯ
+        await register_custom_command(command, action)
         
         await message.answer(
             f"✅ <b>Команда добавлена!</b>\n\n"
@@ -682,13 +699,8 @@ async def cmd_del_custom_rp(message: types.Message) -> None:
         deleted = await db.delete_custom_rp(user_id, command)
         
         if deleted:
-            if command in RP_ACTIONS:
-                del RP_ACTIONS[command]
-            if command in RP_TEXTS:
-                del RP_TEXTS[command]
-            if command in TARGET_COMMANDS:
-                del TARGET_COMMANDS[command]
-                
+            # 🔥 УДАЛЯЕМ ИЗ РЕЕСТРА
+            await unregister_custom_command(command)
             await message.answer(f"✅ Команда <code>{command}</code> удалена!", parse_mode=ParseMode.HTML)
         else:
             await message.answer(f"❌ Команда <code>{command}</code> не найдена!", parse_mode=ParseMode.HTML)
