@@ -1489,7 +1489,111 @@ class Database:
         
         await asyncio.to_thread(_sync_cleanup)
 
+# ==================== КАСТОМНЫЕ РП КОМАНДЫ ====================
 
+    async def count_custom_rp(self, user_id: int) -> int:
+        """Посчитать количество кастомных РП команд пользователя"""
+        if user_id is None or not self.db_path:
+            return 0
+            
+        def _sync_count():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM custom_rp WHERE user_id = ?", (user_id,))
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        
+        return await asyncio.to_thread(_sync_count)
+
+
+    async def check_custom_rp_exists(self, user_id: int, command: str) -> bool:
+        """Проверить существование кастомной РП команды"""
+        if user_id is None or command is None or not self.db_path:
+            return False
+            
+        def _sync_check():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM custom_rp WHERE user_id = ? AND command = ?", (user_id, command))
+            exists = cursor.fetchone() is not None
+            conn.close()
+            return exists
+        
+        return await asyncio.to_thread(_sync_check)
+
+
+    async def add_custom_rp(self, user_id: int, command: str, action_text: str):
+        """Добавить кастомную РП команду"""
+        if user_id is None or command is None or action_text is None or not self.db_path:
+            return
+            
+        def _sync_add():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO custom_rp (user_id, command, action_text)
+                VALUES (?, ?, ?)
+            """, (user_id, command, action_text))
+            conn.commit()
+            conn.close()
+        
+        await asyncio.to_thread(_sync_add)
+
+
+    async def delete_custom_rp(self, user_id: int, command: str) -> bool:
+        """Удалить кастомную РП команду"""
+        if user_id is None or command is None or not self.db_path:
+            return False
+            
+        def _sync_delete():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM custom_rp WHERE user_id = ? AND command = ?", (user_id, command))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+            return deleted
+        
+        return await asyncio.to_thread(_sync_delete)
+
+
+    async def get_custom_rp(self, user_id: int) -> dict:
+        """Получить все кастомные РП команды пользователя"""
+        if user_id is None or not self.db_path:
+            return {}
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT command, action_text FROM custom_rp WHERE user_id = ?", (user_id,))
+            rows = cursor.fetchall()
+            conn.close()
+            return {row[0]: row[1] for row in rows}
+        
+        return await asyncio.to_thread(_sync_get)
+
+
+    async def get_all_custom_rp(self) -> dict:
+        """Получить ВСЕ кастомные РП команды (для загрузки при старте)"""
+        if not self.db_path:
+            return {}
+            
+        def _sync_get():
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, command, action_text FROM custom_rp")
+            rows = cursor.fetchall()
+            conn.close()
+            
+            result = {}
+            for user_id, cmd, action in rows:
+                if user_id not in result:
+                    result[user_id] = {}
+                result[user_id][cmd] = action
+            return result
+        
+        return await asyncio.to_thread(_sync_get)
 # ============================================================
 # ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР БАЗЫ ДАННЫХ
 # ============================================================
