@@ -1,7 +1,6 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер — МОДУЛЬНАЯ АРХИТЕКТУРА + ПРАВИЛЬНЫЙ ТРЕКИНГ
-# ЛЕГКО ДОБАВЛЯТЬ НОВЫЕ КОМАНДЫ БЕЗ ПЕРЕДЕЛКИ ВСЕГО ФАЙЛА
+# ОПИСАНИЕ: Умный парсер — ИСПРАВЛЕННЫЙ + ЗАЩИТА ОТ NULL
 # ============================================
 
 import re
@@ -31,24 +30,19 @@ def set_bot(bot_instance: Bot):
     bot = bot_instance
 
 
-# ==================== РЕЕСТР КОМАНД (ЛЕГКО ДОБАВЛЯТЬ НОВЫЕ) ====================
+# ==================== РЕЕСТР КОМАНД ====================
 
 class CommandHandler:
-    """Базовый класс для обработчика команды"""
     def __init__(self, keywords: list, handler: Callable, need_target: bool = False):
         self.keywords = keywords
         self.handler = handler
         self.need_target = need_target
 
 
-# Реестр команд без цели (просто текст)
 NO_TARGET_COMMANDS: Dict[str, CommandHandler] = {}
-
-# Реестр команд с целью (@user или reply)
 TARGET_COMMANDS: Dict[str, CommandHandler] = {}
 
 def register_command(keywords: list, need_target: bool = False):
-    """Декоратор для регистрации команды"""
     def decorator(func: Callable):
         handler = CommandHandler(keywords, func, need_target)
         if need_target:
@@ -64,7 +58,6 @@ def register_command(keywords: list, need_target: bool = False):
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 async def ensure_user_exists(user_id: int, username: str = None, first_name: str = None) -> dict:
-    """Гарантирует, что пользователь существует в БД"""
     if user_id is None:
         return {}
     user = await db.get_user(user_id)
@@ -76,7 +69,6 @@ async def ensure_user_exists(user_id: int, username: str = None, first_name: str
 
 
 def extract_username(text: str) -> Optional[str]:
-    """Извлечь username из текста"""
     if not text:
         return None
     match = re.search(r'@([a-zA-Z0-9_]+)', text)
@@ -84,7 +76,6 @@ def extract_username(text: str) -> Optional[str]:
 
 
 def extract_number(text: str) -> int:
-    """Извлечь число из текста"""
     if not text:
         return 0
     match = re.search(r'\b\d+\b', text)
@@ -92,7 +83,6 @@ def extract_number(text: str) -> int:
 
 
 def format_number(num: any) -> str:
-    """Форматирование числа"""
     if num is None:
         return "0"
     try:
@@ -101,8 +91,13 @@ def format_number(num: any) -> str:
         return "0"
 
 
-def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
-    """Получить цель из сообщения (@username или reply)"""
+# ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ ЦЕЛИ ====================
+
+async def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
+    """Получить цель из сообщения (@username или reply) — АСИНХРОННАЯ ВЕРСИЯ"""
+    if message is None:
+        return None, None, None
+        
     text = message.text.lower() if message.text else ""
     reply = message.reply_to_message
     
@@ -114,23 +109,14 @@ def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Opti
     username = extract_username(text)
     if username:
         target_username = username
-        # Пытаемся найти в БД (может быть None, если пользователь не зарегистрирован)
-        # Используем asyncio.run только если нужно, но лучше await
-        # Здесь упрощаем — если не найден, то target_user останется None
-        try:
-            target_user = asyncio.get_event_loop().run_until_complete(db.get_user_by_username(username))
-        except:
-            pass
+        target_user = await db.get_user_by_username(username)
         if target_user:
             target_id = target_user.get("user_id")
     
-    # Способ 2: Ответ на сообщение
+    # Способ 2: Ответ на сообщение (reply)
     if not target_id and reply and reply.from_user and not reply.from_user.is_bot:
         target_id = reply.from_user.id
-        try:
-            target_user = asyncio.get_event_loop().run_until_complete(db.get_user(target_id))
-        except:
-            pass
+        target_user = await db.get_user(target_id)
         if target_user:
             target_username = target_user.get("username")
     
@@ -141,7 +127,8 @@ def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Opti
 
 @register_command(['общий сбор', 'оповести всех', 'собери всех'])
 async def cmd_gather(message: types.Message, **kwargs):
-    """Общий сбор участников"""
+    if message is None:
+        return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ НАЧАТЬ", callback_data="start_all"),
          InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
@@ -155,21 +142,24 @@ async def cmd_gather(message: types.Message, **kwargs):
 
 @register_command(['крестики', 'нолики', 'xo', 'tic', 'tac'])
 async def cmd_xo_game(message: types.Message, **kwargs):
-    """Запуск крестиков-ноликов"""
+    if message is None:
+        return
     from handlers.tictactoe import cmd_xo
     await cmd_xo(message)
 
 
 @register_command(['статистика', 'стата', 'stats'])
 async def cmd_show_stats(message: types.Message, **kwargs):
-    """Показать статистику"""
+    if message is None:
+        return
     from handlers.stats import cmd_stats
     await cmd_stats(message)
 
 
 @register_command(['помощь', 'помоги', 'help', 'что ты умеешь'])
 async def cmd_show_help(message: types.Message, **kwargs):
-    """Показать помощь"""
+    if message is None:
+        return
     help_text = (
         "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -196,8 +186,10 @@ async def cmd_show_help(message: types.Message, **kwargs):
 
 @register_command(['привет', 'здарова', 'хай', 'ку'])
 async def cmd_greet(message: types.Message, **kwargs):
-    """Приветствие"""
-    await message.answer(f"👋 Привет, {html.escape(message.from_user.first_name or '')}!")
+    if message is None:
+        return
+    name = message.from_user.first_name or ""
+    await message.answer(f"👋 Привет, {html.escape(name)}!")
 
 
 # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
@@ -210,6 +202,8 @@ RP_ACTIONS = {
     'погладить': 'pat', 'погладил': 'pat', 'глажу': 'pat',
     'дать леща': 'slap', 'лещ': 'slap', 'шлёпнуть': 'slap',
     'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
+    'шмальнуть': 'shoot', 'застрелить': 'shoot', 'выстрелить': 'shoot',
+    'трахнуть': 'fuck', 'выебать': 'fuck', 'отодрать': 'fuck',
 }
 
 RP_TEXTS = {
@@ -219,6 +213,8 @@ RP_TEXTS = {
     'pat': ["🫳 {from_name} гладит {target_name} по голове!"],
     'slap': ["👋 {from_name} даёт леща {target_name}!"],
     'punch': ["👊 {from_name} бьёт {target_name}!"],
+    'shoot': ["🔫 {from_name} шмальнул из 9мм ПМ в ногу {target_name} в воспитательных целях!"],
+    'fuck': ["🍆 {from_name} трахнул {target_name}!"],
 }
 
 # Регистрируем все РП действия
@@ -226,6 +222,10 @@ for rp_word, rp_action in RP_ACTIONS.items():
     @register_command([rp_word], need_target=True)
     async def rp_handler(message: types.Message, from_id: int, target_id: int, 
                          target_user: dict, action=rp_action, **kwargs):
+        if message is None:
+            return
+            
+        # 🔥 ЗАЩИТА ОТ NULL
         from_user = await db.get_user(from_id)
         from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
         target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
@@ -241,7 +241,9 @@ for rp_word, rp_action in RP_ACTIONS.items():
 @register_command(['крестики', 'нолики', 'xo'], need_target=True)
 async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int, 
                            target_user: dict, **kwargs):
-    """Вызвать на крестики-нолики"""
+    if message is None:
+        return
+        
     if from_id == target_id:
         await message.answer("❌ Нельзя вызвать самого себя!")
         return
@@ -272,7 +274,6 @@ async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
         await message.answer("❌ Игра временно недоступна")
         return
     
-    # Проверяем, нет ли уже активного вызова
     for gid, game in active_games.items():
         if game.get("pending", False):
             if (game.get("player_x") == from_id and game.get("player_o") == target_id) or \
@@ -319,7 +320,9 @@ async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
 
 @register_command(['анкета', 'профиль', 'profile'], need_target=True)
 async def cmd_show_profile(message: types.Message, target_id: int, target_user: dict, **kwargs):
-    """Показать анкету пользователя"""
+    if message is None:
+        return
+        
     profile = await db.get_profile(target_id)
     balance = await db.get_balance(target_id)
     
@@ -350,7 +353,9 @@ async def cmd_show_profile(message: types.Message, target_id: int, target_user: 
 @register_command(['перевод', 'перевести', 'transfer'], need_target=True)
 async def cmd_transfer_coins(message: types.Message, from_id: int, target_id: int, 
                              target_user: dict, **kwargs):
-    """Перевести монеты"""
+    if message is None:
+        return
+        
     amount = extract_number(message.text)
     
     if from_id == target_id:
@@ -414,9 +419,7 @@ TAG_KEYWORDS = {
 
 @router.message(F.text, lambda message: not message.text.startswith('/'))
 async def smart_parser(message: types.Message):
-    """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
-    
-    if message.from_user.is_bot:
+    if message is None or message.from_user.is_bot:
         return
     
     user_id = message.from_user.id
@@ -427,7 +430,7 @@ async def smart_parser(message: types.Message):
     
     logger.info(f"🔍 SMART PARSER: user={user_id}, text='{text[:50]}'")
     
-    # 🔥 ТРЕКИНГ СТАТИСТИКИ (ИСПРАВЛЕНО)
+    # Трекинг статистики
     try:
         activity_type = "message"
         if message.sticker:
@@ -446,24 +449,23 @@ async def smart_parser(message: types.Message):
     except Exception as e:
         logger.error(f"Stats tracking error: {e}")
     
-    # 🔥 ЛОГИРОВАНИЕ СЛОВ ДЛЯ АНАЛИТИКИ ЧАТА
+    # Логирование слов для аналитики
     try:
         if message.chat and message.chat.id:
             await db.log_chat_message(message.chat.id, user_id, text)
     except Exception as e:
         logger.error(f"Chat word logging error: {e}")
     
-    # 🔥 АВТОРЕГИСТРАЦИЯ
+    # Авторегистрация
     user = await ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
     if not user:
         await message.answer("👋 Используйте /start для регистрации")
         return
     
-    # Проверяем, есть ли обращение к боту
     bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
     logger.info(f"🔍 bot_called={bot_called}")
     
-    # ==================== УМНЫЕ ТЕГИ ====================
+    # Умные теги
     if bot_called:
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
@@ -483,10 +485,10 @@ async def smart_parser(message: types.Message):
                     except Exception as e:
                         logger.error(f"Tag trigger error: {e}")
     
-    # ==================== ОПРЕДЕЛЯЕМ ЦЕЛЬ ====================
-    target_id, target_user, target_username = get_target_from_message(message)
+    # 🔥 ИСПРАВЛЕНО: АСИНХРОННОЕ ПОЛУЧЕНИЕ ЦЕЛИ
+    target_id, target_user, target_username = await get_target_from_message(message)
     
-    # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
+    # Команды с целью
     if target_id and target_user:
         for keyword, handler in TARGET_COMMANDS.items():
             if keyword in text:
@@ -500,7 +502,7 @@ async def smart_parser(message: types.Message):
                 )
                 return
         
-        # 🔥 Обработка чистого перевода: "@user 500"
+        # Чистый перевод: "@user 500"
         amount = extract_number(text)
         if amount > 0 and extract_username(text):
             await cmd_transfer_coins(
@@ -511,7 +513,7 @@ async def smart_parser(message: types.Message):
             )
             return
     
-    # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
+    # Команды без цели
     if bot_called:
         for keyword, handler in NO_TARGET_COMMANDS.items():
             if keyword in text:
@@ -519,7 +521,7 @@ async def smart_parser(message: types.Message):
                 await handler.handler(message)
                 return
     
-    # ==================== РП ОТВЕТЫ БЕЗ ЦЕЛИ ====================
+    # РП ответы без цели
     rp_responses = {
         'привет': 'Привет! 👋',
         'пока': 'Пока! 👋',
@@ -557,12 +559,3 @@ async def cancel_all_callback(callback: types.CallbackQuery):
 # ============================================================
 # ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ (ДОБАВЛЯЙТЕ СЮДА)
 # ============================================================
-
-# Примеры:
-# @register_command(['погода', 'weather'])
-# async def cmd_weather(message: types.Message, **kwargs):
-#     await message.answer("🌤 Сегодня солнечно!")
-#
-# @register_command(['пнуть', 'кикнуть'], need_target=True)
-# async def cmd_kick_user(message: types.Message, from_id: int, target_id: int, target_user: dict, **kwargs):
-#     await message.answer(f"👢 {message.from_user.first_name} пинает {target_user.get('first_name')}!")
