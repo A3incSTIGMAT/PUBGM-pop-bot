@@ -774,4 +774,4 @@ async def cancel_all_callback(callback: types.CallbackQuery):
 
 
 # ==================== ЗАГРУЗКА КАСТОМНЫХ КОМАНД ПРИ СТАРТЕ ====================
-asyncio.create_task(load_custom_rp_commands())
+async
