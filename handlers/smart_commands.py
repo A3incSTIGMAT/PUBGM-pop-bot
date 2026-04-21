@@ -1,6 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
 # ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ
+# ИСПРАВЛЕНО: Синтаксическая ошибка, удалён asyncio.create_task
 # ЗАЩИТА ОТ NULL: ПОЛНАЯ
 # ============================================
 
@@ -222,7 +223,7 @@ async def cmd_xo_game(message: types.Message, **kwargs):
     await cmd_xo(message)
 
 
-@register_command(['статистика', 'стата', 'stats', 'статистика сутки', 'стата неделя', 'стата сутки'])
+@register_command(['статистика', 'стата', 'stats'])
 async def cmd_show_stats(message: types.Message, **kwargs):
     if message is None:
         return
@@ -771,7 +772,3 @@ async def cancel_all_callback(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("❌ Общий сбор отменён.")
     await callback.answer()
-
-
-# ==================== ЗАГРУЗКА КАСТОМНЫХ КОМАНД ПРИ СТАРТЕ ====================
-async
