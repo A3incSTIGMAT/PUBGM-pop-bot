@@ -1,8 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/start.py
 # ОПИСАНИЕ: Модуль навигации, старта, помощи
-# ИСПРАВЛЕНО: Статистика побед из xo_stats вместо users.wins/losses
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ИСПРАВЛЕНО: Статистика побед из xo_stats, кнопка РП, защита от NULL
 # ============================================
 
 import asyncio
@@ -36,13 +35,15 @@ class FeedbackState(StatesGroup):
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def _escape_html(text: str | None) -> str:
-    if not text:
+    """Безопасное экранирование HTML"""
+    if text is None:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _escape_markdown(text: str | None) -> str:
-    if not text:
+    """Экранирование для MarkdownV2"""
+    if text is None:
         return ""
     chars = "_*[]()~`>#+-=|{}.!"
     for char in chars:
@@ -51,6 +52,9 @@ def _escape_markdown(text: str | None) -> str:
 
 
 async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
+    """Проверка прав администратора"""
+    if bot is None or user_id is None or chat_id is None:
+        return False
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
@@ -60,24 +64,27 @@ async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
 
 
 async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
+    """Получить или создать пользователя"""
+    if user_id is None:
+        return {}
     user = await db.get_user(user_id)
     if not user:
         await db.create_user(user_id, username, first_name, START_BALANCE)
         user = await db.get_user(user_id)
-    return user
+    return user or {}
 
 
 # ==================== КОМАНДА /start ====================
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if message is None:
+    if message is None or message.from_user is None:
         return
         
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
-    chat_id = message.chat.id
+    chat_id = message.chat.id if message.chat else user_id
     
     # Рефералка
     args = message.text.split() if message.text else []
@@ -93,7 +100,10 @@ async def cmd_start(message: types.Message):
                 logger.error(f"Referral processing error: {e}")
     
     user = await db.get_user(user_id)
-    is_admin = await is_admin_in_chat(message.bot, user_id, chat_id) if message.chat.type in ['group', 'supergroup'] else False
+    
+    is_admin = False
+    if message.chat and message.chat.type in ['group', 'supergroup']:
+        is_admin = await is_admin_in_chat(message.bot, user_id, chat_id)
     
     if not user:
         await db.create_user(user_id, username, first_name, START_BALANCE)
@@ -134,7 +144,7 @@ async def cmd_start(message: types.Message):
         )
         await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=60)
     else:
-        # 🔥 ПОЛУЧАЕМ СВЕЖИЙ БАЛАНС И СТАТИСТИКУ XO
+        # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
         balance = await db.get_balance(user_id)
         xo_stats = await db.get_user_stats(user_id)
         
@@ -178,25 +188,25 @@ async def cmd_help(message: types.Message):
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>📌 ОСНОВНЫЕ КОМАНДЫ (с /):</b>\n\n"
         "<code>/start</code> — главное меню с кнопками\n"
-        "<code>/daily</code> — ежедневный бонус (+100-500 NCoin)\n"
+        "<code>/daily</code> — ежедневный бонус\n"
         "<code>/balance</code> — проверить баланс\n"
         "<code>/help</code> — эта помощь\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>🎮 КРЕСТИКИ-НОЛИКИ (через меню):</b>\n"
+        "<b>🎮 КРЕСТИКИ-НОЛИКИ:</b>\n"
         "├ Игра с ботом (3 уровня сложности)\n"
         "├ Игра с игроком (дуэли)\n"
         "├ Ставки на NCoin\n"
         "└ Статистика и топы\n\n"
-        "<b>👤 ПРОФИЛЬ (через меню):</b>\n"
+        "<b>👤 ПРОФИЛЬ:</b>\n"
         "├ Анкета\n"
         "├ VIP статус\n"
         "├ Ранг и прогресс\n"
         "└ Статистика игр\n\n"
-        "<b>📢 ОПОВЕЩЕНИЯ (через меню):</b>\n"
+        "<b>📢 ОПОВЕЩЕНИЯ:</b>\n"
         "├ Общий сбор (для админов)\n"
         "├ Мои теги — управление подписками\n"
         "└ Топ чатов\n\n"
-        "<b>💕 СОЦИАЛКА (через меню):</b>\n"
+        "<b>💕 СОЦИАЛКА:</b>\n"
         "├ Отношения (пары)\n"
         "├ Группы\n"
         "└ РП команды\n\n"
@@ -281,10 +291,10 @@ async def back_to_menu_callback(callback: types.CallbackQuery):
         return
         
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
+    chat_id = callback.message.chat.id if callback.message.chat else user_id
     
     is_admin = False
-    if callback.message.chat.type in ['group', 'supergroup']:
+    if callback.message.chat and callback.message.chat.type in ['group', 'supergroup']:
         is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
     
     await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
@@ -318,7 +328,7 @@ async def admin_panel_callback(callback: types.CallbackQuery):
         return
         
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
+    chat_id = callback.message.chat.id if callback.message.chat else user_id
     
     if not await is_admin_in_chat(callback.bot, user_id, chat_id):
         await callback.answer("❌ Только администраторы имеют доступ!", show_alert=True)
@@ -543,11 +553,12 @@ async def confirm_delete(callback: types.CallbackQuery):
     
     try:
         await asyncio.to_thread(_delete_user_data)
-        await callback.message.edit_text(
-            "✅ <b>ВАШИ ДАННЫЕ УДАЛЕНЫ!</b>\n\n"
-            "Вы можете начать заново с /start",
-            parse_mode=ParseMode.HTML
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                "✅ <b>ВАШИ ДАННЫЕ УДАЛЕНЫ!</b>\n\n"
+                "Вы можете начать заново с /start",
+                parse_mode=ParseMode.HTML
+            )
     except Exception as e:
         logger.error(f"Data deletion failed: {e}")
         await callback.answer("❌ Ошибка при удалении", show_alert=True)
@@ -647,7 +658,7 @@ async def top_chats_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "relationships_menu")
 async def relationships_menu_callback(callback: types.CallbackQuery):
-    if callback is None:
+    if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
         "💕 <b>ОТНОШЕНИЯ</b>\n\n"
@@ -661,7 +672,7 @@ async def relationships_menu_callback(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "groups_menu")
 async def groups_menu_callback(callback: types.CallbackQuery):
-    if callback is None:
+    if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
         "👥 <b>ГРУППЫ</b>\n\n"
@@ -676,7 +687,7 @@ async def groups_menu_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "rp_menu")
 async def rp_menu_callback(callback: types.CallbackQuery):
     """Кнопка РП КОМАНДЫ — показывает кастомные РП команды"""
-    if callback is None:
+    if callback is None or callback.message is None:
         return
     from handlers.smart_commands import cmd_my_custom_rp
     await cmd_my_custom_rp(callback.message)
@@ -692,11 +703,12 @@ async def my_tags_menu_callback(callback: types.CallbackQuery):
         await cmd_mytags(callback.message)
     except Exception as e:
         logger.error(f"Error in my_tags_menu: {e}")
-        await callback.message.edit_text(
-            "❌ <b>Ошибка загрузки тегов</b>\n\nИспользуйте /mytags",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_button()
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                "❌ <b>Ошибка загрузки тегов</b>\n\nИспользуйте /mytags",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_button()
+            )
     await callback.answer()
 
 
