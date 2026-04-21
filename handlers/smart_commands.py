@@ -1,8 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
 # ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ
-# ИСПРАВЛЕНО: Синтаксическая ошибка, удалён asyncio.create_task
-# ЗАЩИТА ОТ NULL: ПОЛНАЯ
+# ИСПРАВЛЕНО: Команды без слеша, защита от NULL, синтаксис
 # ============================================
 
 import re
@@ -27,17 +26,19 @@ router = Router()
 # Глобальный экземпляр бота
 bot: Bot = None
 
+
 def set_bot(bot_instance: Bot):
     """Установка экземпляра бота"""
     global bot
-    bot = bot_instance
+    if bot_instance is not None:
+        bot = bot_instance
 
 
 # ==================== РЕЕСТР КОМАНД ====================
 
 class CommandHandler:
     def __init__(self, keywords: list, handler: Callable, need_target: bool = False):
-        self.keywords = keywords
+        self.keywords = keywords if keywords is not None else []
         self.handler = handler
         self.need_target = need_target
 
@@ -45,15 +46,22 @@ class CommandHandler:
 NO_TARGET_COMMANDS: Dict[str, CommandHandler] = {}
 TARGET_COMMANDS: Dict[str, CommandHandler] = {}
 
+
 def register_command(keywords: list, need_target: bool = False):
+    """Декоратор для регистрации команды"""
+    if keywords is None:
+        keywords = []
+        
     def decorator(func: Callable):
         handler = CommandHandler(keywords, func, need_target)
         if need_target:
             for kw in keywords:
-                TARGET_COMMANDS[kw] = handler
+                if kw is not None:
+                    TARGET_COMMANDS[kw] = handler
         else:
             for kw in keywords:
-                NO_TARGET_COMMANDS[kw] = handler
+                if kw is not None:
+                    NO_TARGET_COMMANDS[kw] = handler
         return func
     return decorator
 
@@ -174,28 +182,34 @@ RP_TEXTS = {
     'feed': ["🍲 {from_name} накормил {target_name} вкусной едой!"],
 }
 
+
 # Регистрируем все РП действия
-for rp_word, rp_action in RP_ACTIONS.items():
-    @register_command([rp_word], need_target=True)
-    async def rp_handler(message: types.Message, from_id: int, target_id: int, 
-                         target_user: dict, action=rp_action, **kwargs):
-        if message is None:
-            return
+def _register_rp_actions():
+    """Вспомогательная функция для регистрации РП действий"""
+    for rp_word, rp_action in RP_ACTIONS.items():
+        @register_command([rp_word], need_target=True)
+        async def rp_handler(message: types.Message, from_id: int, target_id: int, 
+                             target_user: dict, action=rp_action):
+            if message is None:
+                return
+                
+            from_user = await db.get_user(from_id)
+            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
             
-        from_user = await db.get_user(from_id)
-        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-        
-        texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-        if texts:
-            text = random.choice(texts).format(
-                from_name=html.escape(from_name),
-                target_name=html.escape(target_name)
-            )
-        else:
-            text = f"{from_name} взаимодействует с {target_name}"
-            
-        await message.answer(text)
+            texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
+            if texts:
+                text = random.choice(texts).format(
+                    from_name=html.escape(from_name) if from_name else "Пользователь",
+                    target_name=html.escape(target_name) if target_name else "Пользователь"
+                )
+            else:
+                text = f"{from_name} взаимодействует с {target_name}"
+                
+            await message.answer(text)
+
+
+_register_rp_actions()
 
 
 # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
@@ -250,9 +264,9 @@ async def cmd_show_help(message: types.Message, **kwargs):
         "• Ответь на сообщение + <code>анкета</code>\n"
         "• Ответь на сообщение + <code>500</code> — перевод\n\n"
         "<b>✨ КАСТОМНЫЕ РП КОМАНДЫ:</b>\n"
-        "• <code>/add_rp команда действие</code> — добавить свою команду\n"
-        "• <code>/my_rp</code> — мои команды\n"
-        "• <code>/del_rp команда</code> — удалить команду\n\n"
+        "• <code>add_rp команда действие</code> — добавить свою команду\n"
+        "• <code>my_rp</code> — мои команды\n"
+        "• <code>del_rp команда</code> — удалить команду\n\n"
         "<b>📌 ОСНОВНЫЕ КОМАНДЫ:</b>\n"
         "• /start — главное меню\n"
         "• /daily — ежедневный бонус\n"
@@ -269,6 +283,31 @@ async def cmd_greet(message: types.Message, **kwargs):
         return
     name = message.from_user.first_name or ""
     await message.answer(f"👋 Привет, {html.escape(name)}!")
+
+
+# 🔥 КАСТОМНЫЕ РП КОМАНДЫ БЕЗ СЛЕША
+@register_command(['add_rp', 'добавить рп', 'add rp'])
+async def cmd_add_rp_smart(message: types.Message, **kwargs):
+    """Добавить кастомную РП команду через умный парсер"""
+    if message is None:
+        return
+    await cmd_add_custom_rp(message)
+
+
+@register_command(['del_rp', 'удалить рп', 'delete rp'])
+async def cmd_del_rp_smart(message: types.Message, **kwargs):
+    """Удалить кастомную РП команду через умный парсер"""
+    if message is None:
+        return
+    await cmd_del_custom_rp(message)
+
+
+@register_command(['my_rp', 'мои рп', 'my rp'])
+async def cmd_my_rp_smart(message: types.Message, **kwargs):
+    """Показать мои РП команды через умный парсер"""
+    if message is None:
+        return
+    await cmd_my_custom_rp(message)
 
 
 # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
@@ -453,7 +492,7 @@ TAG_KEYWORDS = {
 }
 
 
-# ==================== КАСТОМНЫЕ РП КОМАНДЫ ====================
+# ==================== КАСТОМНЫЕ РП КОМАНДЫ (СЛЕШ) ====================
 
 async def load_custom_rp_commands():
     """Загрузить все кастомные РП команды из БД при старте"""
@@ -463,19 +502,19 @@ async def load_custom_rp_commands():
         loaded = 0
         for user_id, commands in all_custom.items():
             for cmd, action in commands.items():
-                if cmd not in RP_ACTIONS:
+                if cmd and cmd not in RP_ACTIONS:
                     RP_ACTIONS[cmd] = cmd
                     RP_TEXTS[cmd] = [action]
                     
                     @register_command([cmd], need_target=True)
                     async def dynamic_handler(message: types.Message, from_id: int, target_id: int,
-                                             target_user: dict, c=cmd, a=action, **kwargs):
+                                             target_user: dict, c=cmd, a=action):
                         if message is None:
                             return
                         from_user = await db.get_user(from_id)
                         from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
                         target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-                        await message.answer(f"✨ {html.escape(from_name)} {a} {html.escape(target_name)}!")
+                        await message.answer(f"✨ {html.escape(from_name) if from_name else 'Пользователь'} {a} {html.escape(target_name) if target_name else 'Пользователь'}!")
                     
                     loaded += 1
         
@@ -490,7 +529,7 @@ async def cmd_add_custom_rp(message: types.Message):
     if message is None:
         return
         
-    args = message.text.split(maxsplit=2)
+    args = message.text.split(maxsplit=2) if message.text else []
     
     if len(args) < 3:
         await message.answer(
@@ -540,13 +579,13 @@ async def cmd_add_custom_rp(message: types.Message):
         
         @register_command([command], need_target=True)
         async def dynamic_rp_handler(message: types.Message, from_id: int, target_id: int,
-                                     target_user: dict, cmd=command, act=action, **kwargs):
+                                     target_user: dict, cmd=command, act=action):
             if message is None:
                 return
             from_user = await db.get_user(from_id)
             from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
             target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-            await message.answer(f"✨ {html.escape(from_name)} {act} {html.escape(target_name)}!")
+            await message.answer(f"✨ {html.escape(from_name) if from_name else 'Пользователь'} {act} {html.escape(target_name) if target_name else 'Пользователь'}!")
     
     await message.answer(
         f"✅ <b>Команда добавлена!</b>\n\n"
@@ -565,7 +604,7 @@ async def cmd_del_custom_rp(message: types.Message):
     if message is None:
         return
         
-    args = message.text.split()
+    args = message.text.split() if message.text else []
     
     if len(args) < 2:
         await message.answer(
@@ -686,7 +725,7 @@ async def smart_parser(message: types.Message):
     if bot_called:
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
-                if keyword in text:
+                if keyword and keyword in text:
                     try:
                         from handlers.tag_categories import get_chat_enabled_slugs
                         chat_id = message.chat.id if message.chat else None
@@ -709,7 +748,7 @@ async def smart_parser(message: types.Message):
     # Команды с целью
     if target_id and target_user:
         for keyword, handler in TARGET_COMMANDS.items():
-            if keyword in text:
+            if keyword and keyword in text:
                 logger.info(f"✅ Executing TARGET command: {keyword}")
                 await handler.handler(
                     message, 
@@ -731,10 +770,15 @@ async def smart_parser(message: types.Message):
             )
             return
     
-    # Команды без цели (только при обращении к боту)
-    if bot_called:
-        for keyword, handler in NO_TARGET_COMMANDS.items():
-            if keyword in text:
+    # Команды без цели (только при обращении к боту ИЛИ кастомные РП)
+    for keyword, handler in NO_TARGET_COMMANDS.items():
+        if keyword and keyword in text:
+            # Для кастомных РП команд не требуем bot_called
+            if keyword in ['add_rp', 'добавить рп', 'add rp', 'del_rp', 'удалить рп', 'delete rp', 'my_rp', 'мои рп', 'my rp']:
+                logger.info(f"✅ Executing NO_TARGET command (custom RP): {keyword}")
+                await handler.handler(message)
+                return
+            elif bot_called:
                 logger.info(f"✅ Executing NO_TARGET command: {keyword}")
                 await handler.handler(message)
                 return
@@ -750,7 +794,7 @@ async def smart_parser(message: types.Message):
     }
     
     for key, response in rp_responses.items():
-        if key in text:
+        if key and key in text:
             await message.answer(response)
             return
 
