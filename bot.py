@@ -2,7 +2,7 @@
 # ============================================
 # ФАЙЛ: bot.py
 # ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
-# ИСПРАВЛЕНО: Удалён rp_commands_router, защита от NULL
+# ИСПРАВЛЕНО: Загрузка кастомных РП команд, защита от NULL
 # ============================================
 
 import asyncio
@@ -112,7 +112,6 @@ try:
     from handlers.tag_trigger import router as tag_trigger_router
     from handlers.ranks import router as ranks_router
     from handlers.rating import router as rating_router
-    # rp_commands_router УДАЛЁН — весь функционал в smart_commands.py
     from handlers.smart_commands import router as smart_commands_router
     
     dp.include_routers(
@@ -130,10 +129,9 @@ try:
         tag_trigger_router,
         ranks_router,
         rating_router,
-        # rp_commands_router УДАЛЁН
         smart_commands_router,
     )
-    logger.info("✅ Все роутеры загружены (rp_commands отключен)")
+    logger.info("✅ Все роутеры загружены")
 except Exception as e:
     logger.error(f"❌ Ошибка загрузки роутеров: {e}")
     sys.exit(1)
@@ -178,13 +176,13 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
     
-    # 5. Авторегистрация участников чатов (кроме ботов)
+    # 5. Авторегистрация участников чатов
     try:
         await auto_register_all_chat_members()
     except Exception as e:
         logger.warning(f"⚠️ Ошибка авторегистрации участников: {e}")
     
-    # 6. Очистка данных бота из таблиц
+    # 6. Очистка данных бота
     try:
         if bot is not None:
             bot_me = await bot.get_me()
@@ -196,7 +194,7 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка очистки данных бота: {e}")
     
-    # 7. Инициализация РП таблиц (только если нужны отношения/группы)
+    # 7. Инициализация РП таблиц
     try:
         from handlers.rp_tables import init_rp_tables
         if init_rp_tables is not None:
@@ -206,6 +204,24 @@ async def on_startup():
         logger.debug("rp_tables module not found, skipping")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации РП таблиц: {e}")
+    
+    # 8. 🔥 ЗАГРУЗКА КАСТОМНЫХ РП КОМАНД
+    try:
+        from handlers.smart_commands import load_custom_rp_commands
+        if load_custom_rp_commands is not None:
+            await load_custom_rp_commands()
+            logger.info("✅ Кастомные РП команды загружены")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка загрузки кастомных РП команд: {e}")
+    
+    # 9. 🔥 ЗАГРУЗКА СТАТИСТИКИ
+    try:
+        from handlers.stats import update_all_streaks
+        if update_all_streaks is not None:
+            await update_all_streaks()
+            logger.info("✅ Стрики активности обновлены при старте")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка обновления стриков при старте: {e}")
     
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
 
