@@ -614,7 +614,6 @@ async def donate_callback(callback: types.CallbackQuery):
 async def my_stats_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.profile import my_stats_callback as target
     await target(callback)
 
@@ -623,7 +622,6 @@ async def my_stats_callback(callback: types.CallbackQuery):
 async def rank_menu_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.ranks import cmd_rank
     await cmd_rank(callback.message)
     await callback.answer()
@@ -633,8 +631,6 @@ async def rank_menu_callback(callback: types.CallbackQuery):
 async def private_games_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
-    # Перенаправляем на крестики-нолики
     from handlers.tictactoe import cmd_xo
     await cmd_xo(callback.message)
     await callback.answer()
@@ -644,7 +640,6 @@ async def private_games_callback(callback: types.CallbackQuery):
 async def top_chats_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.rating import cmd_top_chats
     await cmd_top_chats(callback.message)
     await callback.answer()
@@ -654,9 +649,13 @@ async def top_chats_callback(callback: types.CallbackQuery):
 async def relationships_menu_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
-    from handlers.rp_commands import cmd_my_relationships
-    await cmd_my_relationships(callback.message)
+    await callback.message.edit_text(
+        "💕 <b>ОТНОШЕНИЯ</b>\n\n"
+        "Этот раздел в разработке.\n"
+        "Скоро здесь можно будет создавать пары и семьи!",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_button()
+    )
     await callback.answer()
 
 
@@ -664,19 +663,23 @@ async def relationships_menu_callback(callback: types.CallbackQuery):
 async def groups_menu_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
-    from handlers.rp_commands import cmd_my_groups
-    await cmd_my_groups(callback.message)
+    await callback.message.edit_text(
+        "👥 <b>ГРУППЫ</b>\n\n"
+        "Этот раздел в разработке.\n"
+        "Скоро здесь можно будет создавать группы!",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_button()
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data == "rp_menu")
 async def rp_menu_callback(callback: types.CallbackQuery):
+    """Кнопка РП КОМАНДЫ — показывает кастомные РП команды"""
     if callback is None:
         return
-        
-    from handlers.rp_commands import cmd_my_rp
-    await cmd_my_rp(callback.message)
+    from handlers.smart_commands import cmd_my_custom_rp
+    await cmd_my_custom_rp(callback.message)
     await callback.answer()
 
 
@@ -684,7 +687,6 @@ async def rp_menu_callback(callback: types.CallbackQuery):
 async def my_tags_menu_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.tag_user import cmd_mytags
     try:
         await cmd_mytags(callback.message)
@@ -702,7 +704,6 @@ async def my_tags_menu_callback(callback: types.CallbackQuery):
 async def start_all_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.tag import cmd_all
     await cmd_all(callback.message)
     await callback.answer()
@@ -712,7 +713,6 @@ async def start_all_callback(callback: types.CallbackQuery):
 async def my_ref_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.referral import my_referral_link
     await my_referral_link(callback.message)
     await callback.answer()
@@ -722,6 +722,5 @@ async def my_ref_callback(callback: types.CallbackQuery):
 async def ref_menu_callback(callback: types.CallbackQuery):
     if callback is None:
         return
-        
     from handlers.referral import ref_menu_callback
     await ref_menu_callback(callback)
