@@ -1,6 +1,6 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер — ИСПРАВЛЕННЫЙ + ЗАЩИТА ОТ NULL
+# ОПИСАНИЕ: Умный парсер — ИСПРАВЛЕННЫЙ REPLY + ЗАЩИТА ОТ NULL
 # ============================================
 
 import re
@@ -58,6 +58,7 @@ def register_command(keywords: list, need_target: bool = False):
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 async def ensure_user_exists(user_id: int, username: str = None, first_name: str = None) -> dict:
+    """Гарантирует, что пользователь существует в БД"""
     if user_id is None:
         return {}
     user = await db.get_user(user_id)
@@ -69,6 +70,7 @@ async def ensure_user_exists(user_id: int, username: str = None, first_name: str
 
 
 def extract_username(text: str) -> Optional[str]:
+    """Извлечь username из текста"""
     if not text:
         return None
     match = re.search(r'@([a-zA-Z0-9_]+)', text)
@@ -76,6 +78,7 @@ def extract_username(text: str) -> Optional[str]:
 
 
 def extract_number(text: str) -> int:
+    """Извлечь число из текста"""
     if not text:
         return 0
     match = re.search(r'\b\d+\b', text)
@@ -83,6 +86,7 @@ def extract_number(text: str) -> int:
 
 
 def format_number(num: any) -> str:
+    """Форматирование числа"""
     if num is None:
         return "0"
     try:
@@ -94,7 +98,7 @@ def format_number(num: any) -> str:
 # ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ ЦЕЛИ ====================
 
 async def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
-    """Получить цель из сообщения (@username или reply) — АСИНХРОННАЯ ВЕРСИЯ"""
+    """Получить цель из сообщения (@username или reply) — с авторегистрацией"""
     if message is None:
         return None, None, None
         
@@ -112,13 +116,29 @@ async def get_target_from_message(message: types.Message) -> Tuple[Optional[int]
         target_user = await db.get_user_by_username(username)
         if target_user:
             target_id = target_user.get("user_id")
+            logger.info(f"🔍 Target found by @username: {username} -> id={target_id}")
+        else:
+            logger.info(f"🔍 Target @{username} not found in DB")
     
-    # Способ 2: Ответ на сообщение (reply)
-    if not target_id and reply and reply.from_user and not reply.from_user.is_bot:
-        target_id = reply.from_user.id
-        target_user = await db.get_user(target_id)
-        if target_user:
-            target_username = target_user.get("username")
+    # Способ 2: Ответ на сообщение (reply) — ИГНОРИРУЕМ БОТОВ
+    if not target_id and reply and reply.from_user:
+        if not reply.from_user.is_bot:
+            target_id = reply.from_user.id
+            target_user = await db.get_user(target_id)
+            if target_user:
+                target_username = target_user.get("username")
+                logger.info(f"🔍 Target found by reply: id={target_id}, username={target_username}")
+            else:
+                # 🔥 АВТОРЕГИСТРАЦИЯ ЦЕЛИ
+                logger.info(f"🔍 Target not registered, auto-creating user {target_id}")
+                await ensure_user_exists(
+                    target_id, 
+                    reply.from_user.username, 
+                    reply.from_user.first_name
+                )
+                target_user = await db.get_user(target_id)
+                if target_user:
+                    target_username = target_user.get("username")
     
     return target_id, target_user, target_username
 
@@ -148,7 +168,7 @@ async def cmd_xo_game(message: types.Message, **kwargs):
     await cmd_xo(message)
 
 
-@register_command(['статистика', 'стата', 'stats'])
+@register_command(['статистика', 'стата', 'stats', 'статистика сутки', 'стата неделя', 'стата сутки'])
 async def cmd_show_stats(message: types.Message, **kwargs):
     if message is None:
         return
@@ -168,12 +188,12 @@ async def cmd_show_help(message: types.Message, **kwargs):
         "• <code>Нексус, найди сквад в PUBG</code>\n"
         "• <code>Нексус, крестики-нолики</code> — играть\n"
         "• <code>Нексус, статистика</code>\n\n"
-        "<b>👤 ДЕЙСТВИЯ С ПОЛЬЗОВАТЕЛЯМИ:</b>\n"
-        "• <code>@user обнять</code> — РП действие\n"
-        "• <code>@user крестики 100</code> — вызвать на игру\n"
-        "• <code>@user анкета</code> — посмотреть анкету\n"
-        "• <code>@user 500</code> — перевести монеты\n\n"
-        "💡 <i>Также работают ответы на сообщения (reply)!</i>\n\n"
+        "<b>👤 ДЕЙСТВИЯ (reply + слово):</b>\n"
+        "• Ответь на сообщение + <code>обнять</code>\n"
+        "• Ответь на сообщение + <code>шмальнуть</code>\n"
+        "• Ответь на сообщение + <code>крестики 100</code>\n"
+        "• Ответь на сообщение + <code>анкета</code>\n"
+        "• Ответь на сообщение + <code>500</code> — перевод\n\n"
         "<b>📌 ОСНОВНЫЕ КОМАНДЫ:</b>\n"
         "• /start — главное меню\n"
         "• /daily — ежедневный бонус\n"
@@ -204,17 +224,23 @@ RP_ACTIONS = {
     'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
     'шмальнуть': 'shoot', 'застрелить': 'shoot', 'выстрелить': 'shoot',
     'трахнуть': 'fuck', 'выебать': 'fuck', 'отодрать': 'fuck',
+    'убить': 'kill', 'прикончить': 'kill', 'замочить': 'kill',
+    'обоссать': 'piss', 'обоссал': 'piss', 'ссать': 'piss',
+    'накормить': 'feed', 'покормить': 'feed', 'кормить': 'feed',
 }
 
 RP_TEXTS = {
-    'hug': ["🤗 {from_name} обнимает {target_name}!"],
-    'kiss': ["💋 {from_name} целует {target_name}!"],
+    'hug': ["🤗 {from_name} крепко обнимает {target_name}!"],
+    'kiss': ["💋 {from_name} страстно целует {target_name}!"],
     'kick': ["👢 {from_name} пинает {target_name}!"],
-    'pat': ["🫳 {from_name} гладит {target_name} по голове!"],
+    'pat': ["🫳 {from_name} нежно гладит {target_name} по голове!"],
     'slap': ["👋 {from_name} даёт леща {target_name}!"],
-    'punch': ["👊 {from_name} бьёт {target_name}!"],
+    'punch': ["👊 {from_name} бьёт {target_name} с вертухи!"],
     'shoot': ["🔫 {from_name} шмальнул из 9мм ПМ в ногу {target_name} в воспитательных целях!"],
     'fuck': ["🍆 {from_name} трахнул {target_name}!"],
+    'kill': ["💀 {from_name} убил {target_name}!"],
+    'piss': ["💦 {from_name} обоссал {target_name}!"],
+    'feed': ["🍲 {from_name} накормил {target_name} вкусной едой!"],
 }
 
 # Регистрируем все РП действия
@@ -225,16 +251,19 @@ for rp_word, rp_action in RP_ACTIONS.items():
         if message is None:
             return
             
-        # 🔥 ЗАЩИТА ОТ NULL
         from_user = await db.get_user(from_id)
         from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
         target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
         
         texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-        text = random.choice(texts).format(
-            from_name=html.escape(from_name),
-            target_name=html.escape(target_name)
-        )
+        if texts:
+            text = random.choice(texts).format(
+                from_name=html.escape(from_name),
+                target_name=html.escape(target_name)
+            )
+        else:
+            text = f"{from_name} взаимодействует с {target_name}"
+            
         await message.answer(text)
 
 
@@ -288,7 +317,7 @@ async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
         "player_o": target_id,
         "current_turn": "X",
         "bet": bet if bet is not None else 0,
-        "chat_id": message.chat.id,
+        "chat_id": message.chat.id if message.chat else None,
         "created_at": time.time(),
         "last_move": time.time(),
         "pending": True,
@@ -314,8 +343,11 @@ async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
         reply_markup=keyboard
     )
     
-    from handlers.tictactoe import auto_cancel_challenge
-    asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
+    try:
+        from handlers.tictactoe import auto_cancel_challenge
+        asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
+    except:
+        pass
 
 
 @register_command(['анкета', 'профиль', 'profile'], need_target=True)
@@ -419,7 +451,9 @@ TAG_KEYWORDS = {
 
 @router.message(F.text, lambda message: not message.text.startswith('/'))
 async def smart_parser(message: types.Message):
-    if message is None or message.from_user.is_bot:
+    """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
+    
+    if message is None or message.from_user is None or message.from_user.is_bot:
         return
     
     user_id = message.from_user.id
@@ -427,6 +461,12 @@ async def smart_parser(message: types.Message):
     
     if not text:
         return
+    
+    # 🔥 ОТЛАДКА REPLY
+    if message.reply_to_message:
+        reply_user = message.reply_to_message.from_user
+        if reply_user:
+            logger.info(f"🔍 REPLY DETECTED! reply_to={reply_user.id} (@{reply_user.username}), text='{text[:50]}'")
     
     logger.info(f"🔍 SMART PARSER: user={user_id}, text='{text[:50]}'")
     
@@ -445,7 +485,6 @@ async def smart_parser(message: types.Message):
             activity_type = "gif"
         
         await db.track_user_activity(user_id, activity_type, 1)
-        logger.debug(f"📊 Tracked: user={user_id}, type={activity_type}")
     except Exception as e:
         logger.error(f"Stats tracking error: {e}")
     
@@ -463,7 +502,6 @@ async def smart_parser(message: types.Message):
         return
     
     bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
-    logger.info(f"🔍 bot_called={bot_called}")
     
     # Умные теги
     if bot_called:
@@ -472,7 +510,7 @@ async def smart_parser(message: types.Message):
                 if keyword in text:
                     try:
                         from handlers.tag_categories import get_chat_enabled_slugs
-                        chat_id = message.chat.id
+                        chat_id = message.chat.id if message.chat else None
                         enabled_slugs = await get_chat_enabled_slugs(chat_id) if chat_id else set()
                         
                         if slug in enabled_slugs:
@@ -485,8 +523,9 @@ async def smart_parser(message: types.Message):
                     except Exception as e:
                         logger.error(f"Tag trigger error: {e}")
     
-    # 🔥 ИСПРАВЛЕНО: АСИНХРОННОЕ ПОЛУЧЕНИЕ ЦЕЛИ
+    # 🔥 ПОЛУЧАЕМ ЦЕЛЬ (С АВТОРЕГИСТРАЦИЕЙ)
     target_id, target_user, target_username = await get_target_from_message(message)
+    logger.info(f"🔍 TARGET RESULT: id={target_id}, user_exists={target_user is not None}")
     
     # Команды с целью
     if target_id and target_user:
@@ -502,9 +541,9 @@ async def smart_parser(message: types.Message):
                 )
                 return
         
-        # Чистый перевод: "@user 500"
+        # Чистый перевод: "500" в ответ на сообщение
         amount = extract_number(text)
-        if amount > 0 and extract_username(text):
+        if amount > 0:
             await cmd_transfer_coins(
                 message, 
                 from_id=user_id, 
@@ -513,7 +552,7 @@ async def smart_parser(message: types.Message):
             )
             return
     
-    # Команды без цели
+    # Команды без цели (только при обращении к боту)
     if bot_called:
         for keyword, handler in NO_TARGET_COMMANDS.items():
             if keyword in text:
@@ -554,8 +593,3 @@ async def cancel_all_callback(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("❌ Общий сбор отменён.")
     await callback.answer()
-
-
-# ============================================================
-# ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ (ДОБАВЛЯЙТЕ СЮДА)
-# ============================================================
