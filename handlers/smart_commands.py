@@ -1,6 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер — ИСПРАВЛЕННЫЙ REPLY + ЗАЩИТА ОТ NULL
+# ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ
+# ЗАЩИТА ОТ NULL: ПОЛНАЯ
 # ============================================
 
 import re
@@ -12,6 +13,7 @@ import html
 import random
 from typing import Callable, Dict, Optional, Tuple
 from aiogram import Router, types, F, Bot
+from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -95,8 +97,6 @@ def format_number(num: any) -> str:
         return "0"
 
 
-# ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ ЦЕЛИ ====================
-
 async def get_target_from_message(message: types.Message) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
     """Получить цель из сообщения (@username или reply) — с авторегистрацией"""
     if message is None:
@@ -141,6 +141,60 @@ async def get_target_from_message(message: types.Message) -> Tuple[Optional[int]
                     target_username = target_user.get("username")
     
     return target_id, target_user, target_username
+
+
+# ==================== РП ДЕЙСТВИЯ ====================
+
+RP_ACTIONS = {
+    'обнять': 'hug', 'обнял': 'hug', 'обнимаю': 'hug',
+    'поцеловать': 'kiss', 'поцелуй': 'kiss', 'чмок': 'kiss',
+    'пнуть': 'kick', 'пнул': 'kick', 'пинаю': 'kick',
+    'погладить': 'pat', 'погладил': 'pat', 'глажу': 'pat',
+    'дать леща': 'slap', 'лещ': 'slap', 'шлёпнуть': 'slap',
+    'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
+    'шмальнуть': 'shoot', 'застрелить': 'shoot', 'выстрелить': 'shoot',
+    'трахнуть': 'fuck', 'выебать': 'fuck', 'отодрать': 'fuck',
+    'убить': 'kill', 'прикончить': 'kill', 'замочить': 'kill',
+    'обоссать': 'piss', 'обоссал': 'piss', 'ссать': 'piss',
+    'накормить': 'feed', 'покормить': 'feed', 'кормить': 'feed',
+}
+
+RP_TEXTS = {
+    'hug': ["🤗 {from_name} крепко обнимает {target_name}!"],
+    'kiss': ["💋 {from_name} страстно целует {target_name}!"],
+    'kick': ["👢 {from_name} пинает {target_name}!"],
+    'pat': ["🫳 {from_name} нежно гладит {target_name} по голове!"],
+    'slap': ["👋 {from_name} даёт леща {target_name}!"],
+    'punch': ["👊 {from_name} бьёт {target_name} с вертухи!"],
+    'shoot': ["🔫 {from_name} шмальнул из 9мм ПМ в ногу {target_name} в воспитательных целях!"],
+    'fuck': ["🍆 {from_name} трахнул {target_name}!"],
+    'kill': ["💀 {from_name} убил {target_name}!"],
+    'piss': ["💦 {from_name} обоссал {target_name}!"],
+    'feed': ["🍲 {from_name} накормил {target_name} вкусной едой!"],
+}
+
+# Регистрируем все РП действия
+for rp_word, rp_action in RP_ACTIONS.items():
+    @register_command([rp_word], need_target=True)
+    async def rp_handler(message: types.Message, from_id: int, target_id: int, 
+                         target_user: dict, action=rp_action, **kwargs):
+        if message is None:
+            return
+            
+        from_user = await db.get_user(from_id)
+        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+        
+        texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
+        if texts:
+            text = random.choice(texts).format(
+                from_name=html.escape(from_name),
+                target_name=html.escape(target_name)
+            )
+        else:
+            text = f"{from_name} взаимодействует с {target_name}"
+            
+        await message.answer(text)
 
 
 # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
@@ -194,6 +248,10 @@ async def cmd_show_help(message: types.Message, **kwargs):
         "• Ответь на сообщение + <code>крестики 100</code>\n"
         "• Ответь на сообщение + <code>анкета</code>\n"
         "• Ответь на сообщение + <code>500</code> — перевод\n\n"
+        "<b>✨ КАСТОМНЫЕ РП КОМАНДЫ:</b>\n"
+        "• <code>/add_rp команда действие</code> — добавить свою команду\n"
+        "• <code>/my_rp</code> — мои команды\n"
+        "• <code>/del_rp команда</code> — удалить команду\n\n"
         "<b>📌 ОСНОВНЫЕ КОМАНДЫ:</b>\n"
         "• /start — главное меню\n"
         "• /daily — ежедневный бонус\n"
@@ -213,59 +271,6 @@ async def cmd_greet(message: types.Message, **kwargs):
 
 
 # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
-
-# РП действия
-RP_ACTIONS = {
-    'обнять': 'hug', 'обнял': 'hug', 'обнимаю': 'hug',
-    'поцеловать': 'kiss', 'поцелуй': 'kiss', 'чмок': 'kiss',
-    'пнуть': 'kick', 'пнул': 'kick', 'пинаю': 'kick',
-    'погладить': 'pat', 'погладил': 'pat', 'глажу': 'pat',
-    'дать леща': 'slap', 'лещ': 'slap', 'шлёпнуть': 'slap',
-    'ударить': 'punch', 'врезать': 'punch', 'стукнуть': 'punch',
-    'шмальнуть': 'shoot', 'застрелить': 'shoot', 'выстрелить': 'shoot',
-    'трахнуть': 'fuck', 'выебать': 'fuck', 'отодрать': 'fuck',
-    'убить': 'kill', 'прикончить': 'kill', 'замочить': 'kill',
-    'обоссать': 'piss', 'обоссал': 'piss', 'ссать': 'piss',
-    'накормить': 'feed', 'покормить': 'feed', 'кормить': 'feed',
-}
-
-RP_TEXTS = {
-    'hug': ["🤗 {from_name} крепко обнимает {target_name}!"],
-    'kiss': ["💋 {from_name} страстно целует {target_name}!"],
-    'kick': ["👢 {from_name} пинает {target_name}!"],
-    'pat': ["🫳 {from_name} нежно гладит {target_name} по голове!"],
-    'slap': ["👋 {from_name} даёт леща {target_name}!"],
-    'punch': ["👊 {from_name} бьёт {target_name} с вертухи!"],
-    'shoot': ["🔫 {from_name} шмальнул из 9мм ПМ в ногу {target_name} в воспитательных целях!"],
-    'fuck': ["🍆 {from_name} трахнул {target_name}!"],
-    'kill': ["💀 {from_name} убил {target_name}!"],
-    'piss': ["💦 {from_name} обоссал {target_name}!"],
-    'feed': ["🍲 {from_name} накормил {target_name} вкусной едой!"],
-}
-
-# Регистрируем все РП действия
-for rp_word, rp_action in RP_ACTIONS.items():
-    @register_command([rp_word], need_target=True)
-    async def rp_handler(message: types.Message, from_id: int, target_id: int, 
-                         target_user: dict, action=rp_action, **kwargs):
-        if message is None:
-            return
-            
-        from_user = await db.get_user(from_id)
-        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-        
-        texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-        if texts:
-            text = random.choice(texts).format(
-                from_name=html.escape(from_name),
-                target_name=html.escape(target_name)
-            )
-        else:
-            text = f"{from_name} взаимодействует с {target_name}"
-            
-        await message.answer(text)
-
 
 @register_command(['крестики', 'нолики', 'xo'], need_target=True)
 async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int, 
@@ -447,6 +452,180 @@ TAG_KEYWORDS = {
 }
 
 
+# ==================== КАСТОМНЫЕ РП КОМАНДЫ ====================
+
+async def load_custom_rp_commands():
+    """Загрузить все кастомные РП команды из БД при старте"""
+    try:
+        all_custom = await db.get_all_custom_rp()
+        
+        loaded = 0
+        for user_id, commands in all_custom.items():
+            for cmd, action in commands.items():
+                if cmd not in RP_ACTIONS:
+                    RP_ACTIONS[cmd] = cmd
+                    RP_TEXTS[cmd] = [action]
+                    
+                    @register_command([cmd], need_target=True)
+                    async def dynamic_handler(message: types.Message, from_id: int, target_id: int,
+                                             target_user: dict, c=cmd, a=action, **kwargs):
+                        if message is None:
+                            return
+                        from_user = await db.get_user(from_id)
+                        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+                        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+                        await message.answer(f"✨ {html.escape(from_name)} {a} {html.escape(target_name)}!")
+                    
+                    loaded += 1
+        
+        logger.info(f"✅ Loaded {loaded} custom RP commands from database")
+    except Exception as e:
+        logger.error(f"Error loading custom RP commands: {e}")
+
+
+@router.message(Command("add_rp"))
+async def cmd_add_custom_rp(message: types.Message):
+    """Добавить кастомную РП команду: /add_rp команда действие"""
+    if message is None:
+        return
+        
+    args = message.text.split(maxsplit=2)
+    
+    if len(args) < 3:
+        await message.answer(
+            "✨ <b>ДОБАВЛЕНИЕ РП КОМАНДЫ</b>\n\n"
+            "<code>/add_rp команда действие</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_rp шмальнуть шмальнул из 9мм ПМ в ногу</code>\n\n"
+            "После добавления используйте:\n"
+            "• Ответьте на сообщение + <code>шмальнуть</code>\n"
+            "• Или <code>@user шмальнуть</code>\n\n"
+            "⚠️ Максимум 10 команд. Удалить: <code>/del_rp команда</code>\n"
+            "📋 Мои команды: <code>/my_rp</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    command = args[1].lower().strip()
+    action = args[2].strip()
+    
+    if len(command) < 2:
+        await message.answer("❌ Команда должна быть не короче 2 символов!")
+        return
+    
+    if len(action) < 3:
+        await message.answer("❌ Действие должно быть не короче 3 символов!")
+        return
+    
+    user_id = message.from_user.id
+    
+    count = await db.count_custom_rp(user_id)
+    
+    if count >= 10:
+        await message.answer("❌ Вы уже добавили максимум 10 команд! Удалите ненужные через /del_rp")
+        return
+    
+    exists = await db.check_custom_rp_exists(user_id, command)
+    if exists:
+        await message.answer(f"❌ Команда <code>{command}</code> уже существует! Используйте /del_rp {command}", parse_mode=ParseMode.HTML)
+        return
+    
+    await db.add_custom_rp(user_id, command, action)
+    
+    # Добавляем в реестр
+    if command not in RP_ACTIONS:
+        RP_ACTIONS[command] = command
+        RP_TEXTS[command] = [action]
+        
+        @register_command([command], need_target=True)
+        async def dynamic_rp_handler(message: types.Message, from_id: int, target_id: int,
+                                     target_user: dict, cmd=command, act=action, **kwargs):
+            if message is None:
+                return
+            from_user = await db.get_user(from_id)
+            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+            await message.answer(f"✨ {html.escape(from_name)} {act} {html.escape(target_name)}!")
+    
+    await message.answer(
+        f"✅ <b>Команда добавлена!</b>\n\n"
+        f"Команда: <code>{command}</code>\n"
+        f"Действие: {action}\n\n"
+        f"Теперь можно использовать:\n"
+        f"• Ответ на сообщение + <code>{command}</code>\n"
+        f"• <code>@user {command}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@router.message(Command("del_rp"))
+async def cmd_del_custom_rp(message: types.Message):
+    """Удалить кастомную РП команду: /del_rp команда"""
+    if message is None:
+        return
+        
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.answer(
+            "🗑️ <b>УДАЛЕНИЕ РП КОМАНДЫ</b>\n\n"
+            "<code>/del_rp команда</code>\n\n"
+            "Пример: <code>/del_rp шмальнуть</code>\n\n"
+            "📋 Посмотреть свои команды: <code>/my_rp</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    command = args[1].lower().strip()
+    user_id = message.from_user.id
+    
+    deleted = await db.delete_custom_rp(user_id, command)
+    
+    if deleted:
+        if command in RP_ACTIONS:
+            del RP_ACTIONS[command]
+        if command in RP_TEXTS:
+            del RP_TEXTS[command]
+        if command in TARGET_COMMANDS:
+            del TARGET_COMMANDS[command]
+            
+        await message.answer(f"✅ Команда <code>{command}</code> удалена!", parse_mode=ParseMode.HTML)
+    else:
+        await message.answer(f"❌ Команда <code>{command}</code> не найдена!", parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("my_rp"))
+async def cmd_my_custom_rp(message: types.Message):
+    """Показать мои кастомные РП команды"""
+    if message is None:
+        return
+        
+    user_id = message.from_user.id
+    
+    commands = await db.get_custom_rp(user_id)
+    
+    if not commands:
+        await message.answer(
+            "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
+            "У вас пока нет кастомных команд.\n\n"
+            "<b>Добавьте:</b>\n"
+            "<code>/add_rp команда действие</code>\n\n"
+            "Пример:\n"
+            "<code>/add_rp шмальнуть шмальнул из 9мм ПМ в ногу</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    text = "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
+    for cmd, action in commands.items():
+        text += f"• <code>{cmd}</code> — {action}\n"
+    
+    text += f"\n📊 Всего: {len(commands)}/10\n"
+    text += "🗑️ Удалить: <code>/del_rp команда</code>"
+    
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 
 @router.message(F.text, lambda message: not message.text.startswith('/'))
@@ -462,7 +641,6 @@ async def smart_parser(message: types.Message):
     if not text:
         return
     
-    # 🔥 ОТЛАДКА REPLY
     if message.reply_to_message:
         reply_user = message.reply_to_message.from_user
         if reply_user:
@@ -488,7 +666,7 @@ async def smart_parser(message: types.Message):
     except Exception as e:
         logger.error(f"Stats tracking error: {e}")
     
-    # Логирование слов для аналитики
+    # Логирование слов
     try:
         if message.chat and message.chat.id:
             await db.log_chat_message(message.chat.id, user_id, text)
@@ -523,7 +701,7 @@ async def smart_parser(message: types.Message):
                     except Exception as e:
                         logger.error(f"Tag trigger error: {e}")
     
-    # 🔥 ПОЛУЧАЕМ ЦЕЛЬ (С АВТОРЕГИСТРАЦИЕЙ)
+    # Получаем цель
     target_id, target_user, target_username = await get_target_from_message(message)
     logger.info(f"🔍 TARGET RESULT: id={target_id}, user_exists={target_user is not None}")
     
@@ -541,7 +719,7 @@ async def smart_parser(message: types.Message):
                 )
                 return
         
-        # Чистый перевод: "500" в ответ на сообщение
+        # Чистый перевод
         amount = extract_number(text)
         if amount > 0:
             await cmd_transfer_coins(
@@ -593,3 +771,7 @@ async def cancel_all_callback(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("❌ Общий сбор отменён.")
     await callback.answer()
+
+
+# ==================== ЗАГРУЗКА КАСТОМНЫХ КОМАНД ПРИ СТАРТЕ ====================
+asyncio.create_task(load_custom_rp_commands())
