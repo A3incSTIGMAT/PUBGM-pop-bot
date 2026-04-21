@@ -2,7 +2,7 @@
 # ============================================
 # ФАЙЛ: bot.py
 # ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
-# ИСПРАВЛЕНО: Боты не регистрируются, правильный трекинг
+# ПРОВЕРКА НА NULL: ПОЛНАЯ
 # ============================================
 
 import asyncio
@@ -37,16 +37,19 @@ dp = Dispatcher()
 # ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 try:
     from handlers.tictactoe import set_bot
-    set_bot(bot)
-    logger.info("✅ Bot instance set for tictactoe")
+    if bot is not None:
+        set_bot(bot)
+        logger.info("✅ Bot instance set for tictactoe")
 except Exception as e:
     logger.warning(f"⚠️ Could not set bot for tictactoe: {e}")
 
 try:
     from handlers.smart_commands import set_bot as set_smart_bot
-    set_smart_bot(bot)
-except:
-    pass
+    if bot is not None:
+        set_smart_bot(bot)
+        logger.info("✅ Bot instance set for smart_commands")
+except Exception as e:
+    logger.warning(f"⚠️ Could not set bot for smart_commands: {e}")
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
@@ -141,6 +144,7 @@ except Exception as e:
 async def on_startup():
     logger.info("🚀 Запуск NEXUS Bot v5.0...")
     
+    # 1. Инициализация БД
     try:
         if db is not None:
             await db.init()
@@ -149,39 +153,46 @@ async def on_startup():
         logger.critical(f"❌ Ошибка инициализации БД: {e}")
         sys.exit(1)
     
+    # 2. Инициализация категорий тегов
     try:
         from handlers.tag_categories import init_categories
-        await init_categories()
-        logger.info("✅ Категории тегов инициализированы")
+        if init_categories is not None:
+            await init_categories()
+            logger.info("✅ Категории тегов инициализированы")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
     
-    # Запускаем периодическое обновление стриков
+    # 3. Запуск планировщика стриков
     try:
         asyncio.create_task(schedule_streak_updates())
         logger.info("✅ Планировщик стриков запущен")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка запуска планировщика стриков: {e}")
     
-    # Запускаем планировщик утренней очистки
+    # 4. Запуск планировщика утренней очистки
     try:
         from utils.auto_delete import schedule_morning_cleanup
-        asyncio.create_task(schedule_morning_cleanup(bot))
-        logger.info("✅ Планировщик утренней очистки запущен")
+        if schedule_morning_cleanup is not None and bot is not None:
+            asyncio.create_task(schedule_morning_cleanup(bot))
+            logger.info("✅ Планировщик утренней очистки запущен")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
     
-    # Автоматическая регистрация всех участников чатов (КРОМЕ БОТОВ)
+    # 5. Авторегистрация участников чатов (кроме ботов)
     try:
         await auto_register_all_chat_members()
     except Exception as e:
         logger.warning(f"⚠️ Ошибка авторегистрации участников: {e}")
     
-    # Удаляем бота из таблиц статистики (если случайно попал)
+    # 6. Очистка данных бота из таблиц
     try:
-        bot_id = (await bot.get_me()).id
-        await db.cleanup_bot_data(bot_id)
-        logger.info(f"✅ Данные бота {bot_id} очищены")
+        if bot is not None:
+            bot_me = await bot.get_me()
+            if bot_me is not None:
+                bot_id = bot_me.id
+                if db is not None:
+                    await db.cleanup_bot_from_all_tables(bot_id)
+                    logger.info(f"✅ Данные бота {bot_id} очищены")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка очистки данных бота: {e}")
     
@@ -193,20 +204,33 @@ async def auto_register_all_chat_members():
     try:
         from utils.auto_delete import _active_chats
         
+        if _active_chats is None:
+            logger.debug("No active chats to register")
+            return
+            
         registered = 0
         for chat_id in list(_active_chats):
             if chat_id is None:
                 continue
             try:
+                if bot is None:
+                    continue
                 members = await bot.get_chat_administrators(chat_id)
+                if members is None:
+                    continue
+                    
                 for member in members:
-                    # 🔥 ПРОПУСКАЕМ БОТОВ
+                    if member is None or member.user is None:
+                        continue
                     if member.user.is_bot:
                         continue
+                        
                     user_id = member.user.id
                     username = member.user.username
                     first_name = member.user.first_name
                     
+                    if db is None:
+                        continue
                     user = await db.get_user(user_id)
                     if not user:
                         await db.create_user(user_id, username, first_name, START_BALANCE)
@@ -227,7 +251,9 @@ async def schedule_streak_updates():
         await asyncio.sleep(3600)
         try:
             from handlers.stats import update_all_streaks
-            await update_all_streaks()
+            if update_all_streaks is not None:
+                await update_all_streaks()
+                logger.debug("✅ Стрики обновлены")
         except Exception as e:
             logger.error(f"Ошибка обновления стриков: {e}")
 
@@ -240,16 +266,26 @@ async def on_shutdown():
     except:
         pass
     try:
-        await bot.session.close()
+        if bot is not None:
+            await bot.session.close()
     except:
         pass
     logger.info("👋 NEXUS Bot v5.0 остановлен")
 
 
 async def main():
+    if dp is None:
+        logger.error("❌ Dispatcher is None!")
+        sys.exit(1)
+        
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     logger.info("📡 Запуск long-polling...")
+    
+    if bot is None:
+        logger.error("❌ Bot is None!")
+        sys.exit(1)
+        
     await dp.start_polling(bot, skip_updates=True)
 
 
