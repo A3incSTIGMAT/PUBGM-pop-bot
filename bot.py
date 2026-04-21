@@ -2,7 +2,7 @@
 # ============================================
 # ФАЙЛ: bot.py
 # ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
-# ПРОВЕРКА НА NULL: ПОЛНАЯ
+# ИСПРАВЛЕНО: Удалён rp_commands_router, защита от NULL
 # ============================================
 
 import asyncio
@@ -112,7 +112,7 @@ try:
     from handlers.tag_trigger import router as tag_trigger_router
     from handlers.ranks import router as ranks_router
     from handlers.rating import router as rating_router
-    from handlers.rp_commands import router as rp_commands_router
+    # rp_commands_router УДАЛЁН — весь функционал в smart_commands.py
     from handlers.smart_commands import router as smart_commands_router
     
     dp.include_routers(
@@ -130,10 +130,10 @@ try:
         tag_trigger_router,
         ranks_router,
         rating_router,
-        rp_commands_router,
+        # rp_commands_router УДАЛЁН
         smart_commands_router,
     )
-    logger.info("✅ Все роутеры загружены")
+    logger.info("✅ Все роутеры загружены (rp_commands отключен)")
 except Exception as e:
     logger.error(f"❌ Ошибка загрузки роутеров: {e}")
     sys.exit(1)
@@ -195,6 +195,17 @@ async def on_startup():
                     logger.info(f"✅ Данные бота {bot_id} очищены")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка очистки данных бота: {e}")
+    
+    # 7. Инициализация РП таблиц (только если нужны отношения/группы)
+    try:
+        from handlers.rp_tables import init_rp_tables
+        if init_rp_tables is not None:
+            await init_rp_tables()
+            logger.info("✅ РП таблицы инициализированы")
+    except ImportError:
+        logger.debug("rp_tables module not found, skipping")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации РП таблиц: {e}")
     
     logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
 
