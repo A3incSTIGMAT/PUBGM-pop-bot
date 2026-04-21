@@ -1,7 +1,7 @@
 # ============================================
 # ФАЙЛ: handlers/smart_commands.py
-# ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ
-# ИСПРАВЛЕНО: Команды без слеша, защита от NULL, синтаксис
+# ОПИСАНИЕ: Умный парсер + КАСТОМНЫЕ РП КОМАНДЫ (ИДЕАЛЬНЫЙ КОД)
+# ИСПРАВЛЕНО: Ответы только при обращении, защита от NULL, синтаксис
 # ============================================
 
 import re
@@ -11,7 +11,7 @@ import hashlib
 import asyncio
 import html
 import random
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Any
 from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 # Глобальный экземпляр бота
-bot: Bot = None
+bot: Optional[Bot] = None
 
 
-def set_bot(bot_instance: Bot):
+def set_bot(bot_instance: Bot) -> None:
     """Установка экземпляра бота"""
     global bot
     if bot_instance is not None:
@@ -37,6 +37,7 @@ def set_bot(bot_instance: Bot):
 # ==================== РЕЕСТР КОМАНД ====================
 
 class CommandHandler:
+    """Обработчик команды"""
     def __init__(self, keywords: list, handler: Callable, need_target: bool = False):
         self.keywords = keywords if keywords is not None else []
         self.handler = handler
@@ -47,21 +48,21 @@ NO_TARGET_COMMANDS: Dict[str, CommandHandler] = {}
 TARGET_COMMANDS: Dict[str, CommandHandler] = {}
 
 
-def register_command(keywords: list, need_target: bool = False):
+def register_command(keywords: list, need_target: bool = False) -> Callable:
     """Декоратор для регистрации команды"""
     if keywords is None:
         keywords = []
         
-    def decorator(func: Callable):
+    def decorator(func: Callable) -> Callable:
         handler = CommandHandler(keywords, func, need_target)
         if need_target:
             for kw in keywords:
-                if kw is not None:
-                    TARGET_COMMANDS[kw] = handler
+                if kw is not None and kw.strip():
+                    TARGET_COMMANDS[kw.strip()] = handler
         else:
             for kw in keywords:
-                if kw is not None:
-                    NO_TARGET_COMMANDS[kw] = handler
+                if kw is not None and kw.strip():
+                    NO_TARGET_COMMANDS[kw.strip()] = handler
         return func
     return decorator
 
@@ -72,12 +73,17 @@ async def ensure_user_exists(user_id: int, username: str = None, first_name: str
     """Гарантирует, что пользователь существует в БД"""
     if user_id is None:
         return {}
-    user = await db.get_user(user_id)
-    if not user:
-        await db.create_user(user_id, username, first_name, START_BALANCE)
+    
+    try:
         user = await db.get_user(user_id)
-        logger.info(f"Auto-registered user {user_id} in smart_commands")
-    return user or {}
+        if not user:
+            await db.create_user(user_id, username, first_name, START_BALANCE)
+            user = await db.get_user(user_id)
+            logger.info(f"Auto-registered user {user_id} in smart_commands")
+        return user or {}
+    except Exception as e:
+        logger.error(f"Error ensuring user exists: {e}")
+        return {}
 
 
 def extract_username(text: str) -> Optional[str]:
@@ -96,7 +102,7 @@ def extract_number(text: str) -> int:
     return int(match.group()) if match else 0
 
 
-def format_number(num: any) -> str:
+def format_number(num: Any) -> str:
     """Форматирование числа"""
     if num is None:
         return "0"
@@ -122,39 +128,45 @@ async def get_target_from_message(message: types.Message) -> Tuple[Optional[int]
     username = extract_username(text)
     if username:
         target_username = username
-        target_user = await db.get_user_by_username(username)
-        if target_user:
-            target_id = target_user.get("user_id")
-            logger.info(f"🔍 Target found by @username: {username} -> id={target_id}")
-        else:
-            logger.info(f"🔍 Target @{username} not found in DB")
+        try:
+            target_user = await db.get_user_by_username(username)
+            if target_user:
+                target_id = target_user.get("user_id")
+                logger.info(f"🔍 Target found by @username: {username} -> id={target_id}")
+            else:
+                logger.info(f"🔍 Target @{username} not found in DB")
+        except Exception as e:
+            logger.error(f"Error getting user by username: {e}")
     
     # Способ 2: Ответ на сообщение (reply) — ИГНОРИРУЕМ БОТОВ
     if not target_id and reply and reply.from_user:
         if not reply.from_user.is_bot:
             target_id = reply.from_user.id
-            target_user = await db.get_user(target_id)
-            if target_user:
-                target_username = target_user.get("username")
-                logger.info(f"🔍 Target found by reply: id={target_id}, username={target_username}")
-            else:
-                # 🔥 АВТОРЕГИСТРАЦИЯ ЦЕЛИ
-                logger.info(f"🔍 Target not registered, auto-creating user {target_id}")
-                await ensure_user_exists(
-                    target_id, 
-                    reply.from_user.username, 
-                    reply.from_user.first_name
-                )
+            try:
                 target_user = await db.get_user(target_id)
                 if target_user:
                     target_username = target_user.get("username")
+                    logger.info(f"🔍 Target found by reply: id={target_id}, username={target_username}")
+                else:
+                    # 🔥 АВТОРЕГИСТРАЦИЯ ЦЕЛИ
+                    logger.info(f"🔍 Target not registered, auto-creating user {target_id}")
+                    await ensure_user_exists(
+                        target_id,
+                        reply.from_user.username,
+                        reply.from_user.first_name
+                    )
+                    target_user = await db.get_user(target_id)
+                    if target_user:
+                        target_username = target_user.get("username")
+            except Exception as e:
+                logger.error(f"Error getting target by reply: {e}")
     
     return target_id, target_user, target_username
 
 
-# ==================== РП ДЕЙСТВИЯ ====================
+# ==================== РП ДЕЙСТВИЯ (БАЗОВЫЕ) ====================
 
-RP_ACTIONS = {
+RP_ACTIONS: Dict[str, str] = {
     'обнять': 'hug', 'обнял': 'hug', 'обнимаю': 'hug',
     'поцеловать': 'kiss', 'поцелуй': 'kiss', 'чмок': 'kiss',
     'пнуть': 'kick', 'пнул': 'kick', 'пинаю': 'kick',
@@ -168,7 +180,7 @@ RP_ACTIONS = {
     'накормить': 'feed', 'покормить': 'feed', 'кормить': 'feed',
 }
 
-RP_TEXTS = {
+RP_TEXTS: Dict[str, list] = {
     'hug': ["🤗 {from_name} крепко обнимает {target_name}!"],
     'kiss': ["💋 {from_name} страстно целует {target_name}!"],
     'kick': ["👢 {from_name} пинает {target_name}!"],
@@ -183,30 +195,36 @@ RP_TEXTS = {
 }
 
 
-# Регистрируем все РП действия
-def _register_rp_actions():
+def _register_rp_actions() -> None:
     """Вспомогательная функция для регистрации РП действий"""
     for rp_word, rp_action in RP_ACTIONS.items():
+        if not rp_word or not rp_action:
+            continue
+            
         @register_command([rp_word], need_target=True)
-        async def rp_handler(message: types.Message, from_id: int, target_id: int, 
-                             target_user: dict, action=rp_action):
+        async def rp_handler(message: types.Message, from_id: int, target_id: int,
+                             target_user: dict, action: str = rp_action) -> None:
             if message is None:
                 return
                 
-            from_user = await db.get_user(from_id)
-            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-            
-            texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
-            if texts:
-                text = random.choice(texts).format(
-                    from_name=html.escape(from_name) if from_name else "Пользователь",
-                    target_name=html.escape(target_name) if target_name else "Пользователь"
-                )
-            else:
-                text = f"{from_name} взаимодействует с {target_name}"
+            try:
+                from_user = await db.get_user(from_id)
+                from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+                target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
                 
-            await message.answer(text)
+                texts = RP_TEXTS.get(action, [f"{from_name} взаимодействует с {target_name}"])
+                if texts:
+                    text = random.choice(texts).format(
+                        from_name=html.escape(from_name) if from_name else "Пользователь",
+                        target_name=html.escape(target_name) if target_name else "Пользователь"
+                    )
+                else:
+                    text = f"{from_name} взаимодействует с {target_name}"
+                    
+                await message.answer(text)
+            except Exception as e:
+                logger.error(f"Error in RP handler: {e}")
+                await message.answer("❌ Произошла ошибка при выполнении действия.")
 
 
 _register_rp_actions()
@@ -215,7 +233,8 @@ _register_rp_actions()
 # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
 
 @register_command(['общий сбор', 'оповести всех', 'собери всех'])
-async def cmd_gather(message: types.Message, **kwargs):
+async def cmd_gather(message: types.Message, **kwargs: Any) -> None:
+    """Общий сбор участников"""
     if message is None:
         return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -230,29 +249,41 @@ async def cmd_gather(message: types.Message, **kwargs):
 
 
 @register_command(['крестики', 'нолики', 'xo', 'tic', 'tac'])
-async def cmd_xo_game(message: types.Message, **kwargs):
+async def cmd_xo_game(message: types.Message, **kwargs: Any) -> None:
+    """Запуск крестиков-ноликов"""
     if message is None:
         return
-    from handlers.tictactoe import cmd_xo
-    await cmd_xo(message)
+    try:
+        from handlers.tictactoe import cmd_xo
+        await cmd_xo(message)
+    except Exception as e:
+        logger.error(f"Error starting XO game: {e}")
+        await message.answer("❌ Игра временно недоступна.")
 
 
 @register_command(['статистика', 'стата', 'stats'])
-async def cmd_show_stats(message: types.Message, **kwargs):
+async def cmd_show_stats(message: types.Message, **kwargs: Any) -> None:
+    """Показать статистику"""
     if message is None:
         return
-    from handlers.stats import cmd_stats
-    await cmd_stats(message)
+    try:
+        from handlers.stats import cmd_stats
+        await cmd_stats(message)
+    except Exception as e:
+        logger.error(f"Error showing stats: {e}")
+        await message.answer("❌ Статистика временно недоступна.")
 
 
 @register_command(['помощь', 'помоги', 'help', 'что ты умеешь'])
-async def cmd_show_help(message: types.Message, **kwargs):
+async def cmd_show_help(message: types.Message, **kwargs: Any) -> None:
+    """Показать помощь"""
     if message is None:
         return
+    
     help_text = (
         "🤖 <b>ЧТО Я УМЕЮ:</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>🗣️ УМНЫЕ КОМАНДЫ:</b>\n"
+        "<b>🗣️ УМНЫЕ КОМАНДЫ (обращайтесь ко мне):</b>\n"
         "• <code>Нексус, оповести всех</code> — общий сбор\n"
         "• <code>Нексус, найди сквад в PUBG</code>\n"
         "• <code>Нексус, крестики-нолики</code> — играть\n"
@@ -278,7 +309,8 @@ async def cmd_show_help(message: types.Message, **kwargs):
 
 
 @register_command(['привет', 'здарова', 'хай', 'ку'])
-async def cmd_greet(message: types.Message, **kwargs):
+async def cmd_greet(message: types.Message, **kwargs: Any) -> None:
+    """Приветствие"""
     if message is None:
         return
     name = message.from_user.first_name or ""
@@ -287,7 +319,7 @@ async def cmd_greet(message: types.Message, **kwargs):
 
 # 🔥 КАСТОМНЫЕ РП КОМАНДЫ БЕЗ СЛЕША
 @register_command(['add_rp', 'добавить рп', 'add rp'])
-async def cmd_add_rp_smart(message: types.Message, **kwargs):
+async def cmd_add_rp_smart(message: types.Message, **kwargs: Any) -> None:
     """Добавить кастомную РП команду через умный парсер"""
     if message is None:
         return
@@ -295,7 +327,7 @@ async def cmd_add_rp_smart(message: types.Message, **kwargs):
 
 
 @register_command(['del_rp', 'удалить рп', 'delete rp'])
-async def cmd_del_rp_smart(message: types.Message, **kwargs):
+async def cmd_del_rp_smart(message: types.Message, **kwargs: Any) -> None:
     """Удалить кастомную РП команду через умный парсер"""
     if message is None:
         return
@@ -303,7 +335,7 @@ async def cmd_del_rp_smart(message: types.Message, **kwargs):
 
 
 @register_command(['my_rp', 'мои рп', 'my rp'])
-async def cmd_my_rp_smart(message: types.Message, **kwargs):
+async def cmd_my_rp_smart(message: types.Message, **kwargs: Any) -> None:
     """Показать мои РП команды через умный парсер"""
     if message is None:
         return
@@ -313,8 +345,9 @@ async def cmd_my_rp_smart(message: types.Message, **kwargs):
 # ==================== КОМАНДЫ С ЦЕЛЬЮ ====================
 
 @register_command(['крестики', 'нолики', 'xo'], need_target=True)
-async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int, 
-                           target_user: dict, **kwargs):
+async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
+                           target_user: dict, **kwargs: Any) -> None:
+    """Вызвать на крестики-нолики"""
     if message is None:
         return
         
@@ -390,46 +423,53 @@ async def cmd_challenge_xo(message: types.Message, from_id: int, target_id: int,
     
     try:
         from handlers.tictactoe import auto_cancel_challenge
-        asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
-    except:
-        pass
+        if msg.chat and msg.message_id:
+            asyncio.create_task(auto_cancel_challenge(game_id, msg.chat.id, msg.message_id))
+    except Exception as e:
+        logger.error(f"Error setting auto-cancel: {e}")
 
 
 @register_command(['анкета', 'профиль', 'profile'], need_target=True)
-async def cmd_show_profile(message: types.Message, target_id: int, target_user: dict, **kwargs):
+async def cmd_show_profile(message: types.Message, target_id: int, target_user: dict, **kwargs: Any) -> None:
+    """Показать анкету пользователя"""
     if message is None:
         return
         
-    profile = await db.get_profile(target_id)
-    balance = await db.get_balance(target_id)
-    
-    target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-    
-    if not profile:
-        await message.answer(
-            f"👤 <b>{html.escape(target_name)}</b>\n\n"
-            f"❌ Анкета не заполнена\n"
-            f"💰 Баланс: <b>{format_number(balance)}</b> NCoin",
-            parse_mode=ParseMode.HTML
+    try:
+        profile = await db.get_profile(target_id)
+        balance = await db.get_balance(target_id)
+        
+        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+        
+        if not profile:
+            await message.answer(
+                f"👤 <b>{html.escape(target_name)}</b>\n\n"
+                f"❌ Анкета не заполнена\n"
+                f"💰 Баланс: <b>{format_number(balance)}</b> NCoin",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        text = (
+            f"👤 <b>АНКЕТА {html.escape(target_name)}</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📛 Имя: <b>{html.escape(profile.get('full_name', '') or 'Не указано')}</b>\n"
+            f"🎂 Возраст: <b>{profile.get('age', '') or 'Не указано'}</b>\n"
+            f"🏙️ Город: <b>{html.escape(profile.get('city', '') or 'Не указано')}</b>\n"
+            f"📝 О себе: {html.escape(profile.get('about', '') or 'Не указано')}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰 Баланс: <b>{format_number(balance)}</b> NCoin"
         )
-        return
-    
-    text = (
-        f"👤 <b>АНКЕТА {html.escape(target_name)}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📛 Имя: <b>{html.escape(profile.get('full_name', '') or 'Не указано')}</b>\n"
-        f"🎂 Возраст: <b>{profile.get('age', '') or 'Не указано'}</b>\n"
-        f"🏙️ Город: <b>{html.escape(profile.get('city', '') or 'Не указано')}</b>\n"
-        f"📝 О себе: {html.escape(profile.get('about', '') or 'Не указано')}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💰 Баланс: <b>{format_number(balance)}</b> NCoin"
-    )
-    await message.answer(text, parse_mode=ParseMode.HTML)
+        await message.answer(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Error showing profile: {e}")
+        await message.answer("❌ Не удалось загрузить анкету.")
 
 
 @register_command(['перевод', 'перевести', 'transfer'], need_target=True)
-async def cmd_transfer_coins(message: types.Message, from_id: int, target_id: int, 
-                             target_user: dict, **kwargs):
+async def cmd_transfer_coins(message: types.Message, from_id: int, target_id: int,
+                             target_user: dict, **kwargs: Any) -> None:
+    """Перевести монеты"""
     if message is None:
         return
         
@@ -478,7 +518,7 @@ async def cmd_transfer_coins(message: types.Message, from_id: int, target_id: in
 
 # ==================== УМНЫЕ ТЕГИ ====================
 
-TAG_KEYWORDS = {
+TAG_KEYWORDS: Dict[str, list] = {
     'pubg': ['пубг', 'pubg', 'пабг', 'сквад', 'ранкед'],
     'cs2': ['кс2', 'cs2', 'катка', 'матчмейкинг'],
     'dota': ['дота', 'dota', 'пати'],
@@ -494,7 +534,7 @@ TAG_KEYWORDS = {
 
 # ==================== КАСТОМНЫЕ РП КОМАНДЫ (СЛЕШ) ====================
 
-async def load_custom_rp_commands():
+async def load_custom_rp_commands() -> None:
     """Загрузить все кастомные РП команды из БД при старте"""
     try:
         all_custom = await db.get_all_custom_rp()
@@ -508,13 +548,19 @@ async def load_custom_rp_commands():
                     
                     @register_command([cmd], need_target=True)
                     async def dynamic_handler(message: types.Message, from_id: int, target_id: int,
-                                             target_user: dict, c=cmd, a=action):
+                                             target_user: dict, c: str = cmd, a: str = action) -> None:
                         if message is None:
                             return
-                        from_user = await db.get_user(from_id)
-                        from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-                        target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-                        await message.answer(f"✨ {html.escape(from_name) if from_name else 'Пользователь'} {a} {html.escape(target_name) if target_name else 'Пользователь'}!")
+                        try:
+                            from_user = await db.get_user(from_id)
+                            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+                            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+                            await message.answer(
+                                f"✨ {html.escape(from_name) if from_name else 'Пользователь'} "
+                                f"{a} {html.escape(target_name) if target_name else 'Пользователь'}!"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error in dynamic RP handler: {e}")
                     
                     loaded += 1
         
@@ -524,7 +570,7 @@ async def load_custom_rp_commands():
 
 
 @router.message(Command("add_rp"))
-async def cmd_add_custom_rp(message: types.Message):
+async def cmd_add_custom_rp(message: types.Message) -> None:
     """Добавить кастомную РП команду: /add_rp команда действие"""
     if message is None:
         return
@@ -559,47 +605,60 @@ async def cmd_add_custom_rp(message: types.Message):
     
     user_id = message.from_user.id
     
-    count = await db.count_custom_rp(user_id)
-    
-    if count >= 10:
-        await message.answer("❌ Вы уже добавили максимум 10 команд! Удалите ненужные через /del_rp")
-        return
-    
-    exists = await db.check_custom_rp_exists(user_id, command)
-    if exists:
-        await message.answer(f"❌ Команда <code>{command}</code> уже существует! Используйте /del_rp {command}", parse_mode=ParseMode.HTML)
-        return
-    
-    await db.add_custom_rp(user_id, command, action)
-    
-    # Добавляем в реестр
-    if command not in RP_ACTIONS:
-        RP_ACTIONS[command] = command
-        RP_TEXTS[command] = [action]
+    try:
+        count = await db.count_custom_rp(user_id)
         
-        @register_command([command], need_target=True)
-        async def dynamic_rp_handler(message: types.Message, from_id: int, target_id: int,
-                                     target_user: dict, cmd=command, act=action):
-            if message is None:
-                return
-            from_user = await db.get_user(from_id)
-            from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
-            target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
-            await message.answer(f"✨ {html.escape(from_name) if from_name else 'Пользователь'} {act} {html.escape(target_name) if target_name else 'Пользователь'}!")
-    
-    await message.answer(
-        f"✅ <b>Команда добавлена!</b>\n\n"
-        f"Команда: <code>{command}</code>\n"
-        f"Действие: {action}\n\n"
-        f"Теперь можно использовать:\n"
-        f"• Ответ на сообщение + <code>{command}</code>\n"
-        f"• <code>@user {command}</code>",
-        parse_mode=ParseMode.HTML
-    )
+        if count >= 10:
+            await message.answer("❌ Вы уже добавили максимум 10 команд! Удалите ненужные через /del_rp")
+            return
+        
+        exists = await db.check_custom_rp_exists(user_id, command)
+        if exists:
+            await message.answer(
+                f"❌ Команда <code>{command}</code> уже существует! Используйте /del_rp {command}",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        await db.add_custom_rp(user_id, command, action)
+        
+        # Добавляем в реестр
+        if command not in RP_ACTIONS:
+            RP_ACTIONS[command] = command
+            RP_TEXTS[command] = [action]
+            
+            @register_command([command], need_target=True)
+            async def dynamic_rp_handler(message: types.Message, from_id: int, target_id: int,
+                                         target_user: dict, cmd: str = command, act: str = action) -> None:
+                if message is None:
+                    return
+                try:
+                    from_user = await db.get_user(from_id)
+                    from_name = from_user.get('first_name', 'Пользователь') if from_user else 'Пользователь'
+                    target_name = target_user.get('first_name', 'Пользователь') if target_user else 'Пользователь'
+                    await message.answer(
+                        f"✨ {html.escape(from_name) if from_name else 'Пользователь'} "
+                        f"{act} {html.escape(target_name) if target_name else 'Пользователь'}!"
+                    )
+                except Exception as e:
+                    logger.error(f"Error in dynamic RP handler: {e}")
+        
+        await message.answer(
+            f"✅ <b>Команда добавлена!</b>\n\n"
+            f"Команда: <code>{command}</code>\n"
+            f"Действие: {action}\n\n"
+            f"Теперь можно использовать:\n"
+            f"• Ответ на сообщение + <code>{command}</code>\n"
+            f"• <code>@user {command}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error adding custom RP: {e}")
+        await message.answer("❌ Ошибка при добавлении команды.")
 
 
 @router.message(Command("del_rp"))
-async def cmd_del_custom_rp(message: types.Message):
+async def cmd_del_custom_rp(message: types.Message) -> None:
     """Удалить кастомную РП команду: /del_rp команда"""
     if message is None:
         return
@@ -619,57 +678,65 @@ async def cmd_del_custom_rp(message: types.Message):
     command = args[1].lower().strip()
     user_id = message.from_user.id
     
-    deleted = await db.delete_custom_rp(user_id, command)
-    
-    if deleted:
-        if command in RP_ACTIONS:
-            del RP_ACTIONS[command]
-        if command in RP_TEXTS:
-            del RP_TEXTS[command]
-        if command in TARGET_COMMANDS:
-            del TARGET_COMMANDS[command]
-            
-        await message.answer(f"✅ Команда <code>{command}</code> удалена!", parse_mode=ParseMode.HTML)
-    else:
-        await message.answer(f"❌ Команда <code>{command}</code> не найдена!", parse_mode=ParseMode.HTML)
+    try:
+        deleted = await db.delete_custom_rp(user_id, command)
+        
+        if deleted:
+            if command in RP_ACTIONS:
+                del RP_ACTIONS[command]
+            if command in RP_TEXTS:
+                del RP_TEXTS[command]
+            if command in TARGET_COMMANDS:
+                del TARGET_COMMANDS[command]
+                
+            await message.answer(f"✅ Команда <code>{command}</code> удалена!", parse_mode=ParseMode.HTML)
+        else:
+            await message.answer(f"❌ Команда <code>{command}</code> не найдена!", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Error deleting custom RP: {e}")
+        await message.answer("❌ Ошибка при удалении команды.")
 
 
 @router.message(Command("my_rp"))
-async def cmd_my_custom_rp(message: types.Message):
+async def cmd_my_custom_rp(message: types.Message) -> None:
     """Показать мои кастомные РП команды"""
     if message is None:
         return
         
     user_id = message.from_user.id
     
-    commands = await db.get_custom_rp(user_id)
-    
-    if not commands:
-        await message.answer(
-            "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
-            "У вас пока нет кастомных команд.\n\n"
-            "<b>Добавьте:</b>\n"
-            "<code>/add_rp команда действие</code>\n\n"
-            "Пример:\n"
-            "<code>/add_rp шмальнуть шмальнул из 9мм ПМ в ногу</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    
-    text = "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
-    for cmd, action in commands.items():
-        text += f"• <code>{cmd}</code> — {action}\n"
-    
-    text += f"\n📊 Всего: {len(commands)}/10\n"
-    text += "🗑️ Удалить: <code>/del_rp команда</code>"
-    
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    try:
+        commands = await db.get_custom_rp(user_id)
+        
+        if not commands:
+            await message.answer(
+                "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
+                "У вас пока нет кастомных команд.\n\n"
+                "<b>Добавьте:</b>\n"
+                "<code>/add_rp команда действие</code>\n\n"
+                "Пример:\n"
+                "<code>/add_rp шмальнуть шмальнул из 9мм ПМ в ногу</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        text = "✨ <b>ВАШИ РП КОМАНДЫ</b>\n\n"
+        for cmd, action in commands.items():
+            text += f"• <code>{cmd}</code> — {action}\n"
+        
+        text += f"\n📊 Всего: {len(commands)}/10\n"
+        text += "🗑️ Удалить: <code>/del_rp команда</code>"
+        
+        await message.answer(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Error getting custom RP: {e}")
+        await message.answer("❌ Ошибка при загрузке команд.")
 
 
 # ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
 
 @router.message(F.text, lambda message: not message.text.startswith('/'))
-async def smart_parser(message: types.Message):
+async def smart_parser(message: types.Message) -> None:
     """Умный парсер — обрабатывает ТОЛЬКО текст, не начинающийся с /"""
     
     if message is None or message.from_user is None or message.from_user.is_bot:
@@ -721,7 +788,7 @@ async def smart_parser(message: types.Message):
     
     bot_called = any(word in text for word in ['нексус', 'нэксус', 'nexus', 'некс', 'нэкс', 'бот'])
     
-    # Умные теги
+    # Умные теги (только при обращении)
     if bot_called:
         for slug, keywords in TAG_KEYWORDS.items():
             for keyword in keywords:
@@ -745,74 +812,99 @@ async def smart_parser(message: types.Message):
     target_id, target_user, target_username = await get_target_from_message(message)
     logger.info(f"🔍 TARGET RESULT: id={target_id}, user_exists={target_user is not None}")
     
-    # Команды с целью
+    # 🔥 КОМАНДЫ С ЦЕЛЬЮ — ПРОВЕРЯЕМ В ПЕРВУЮ ОЧЕРЕДЬ
     if target_id and target_user:
-        for keyword, handler in TARGET_COMMANDS.items():
-            if keyword and keyword in text:
-                logger.info(f"✅ Executing TARGET command: {keyword}")
+        found_keywords = [kw for kw in TARGET_COMMANDS.keys() if kw and kw in text]
+        logger.info(f"🔍 Keywords in text: {found_keywords}")
+        
+        for keyword in found_keywords:
+            handler = TARGET_COMMANDS[keyword]
+            logger.info(f"✅ Executing TARGET command: {keyword}")
+            try:
                 await handler.handler(
-                    message, 
-                    from_id=user_id, 
-                    target_id=target_id, 
+                    message,
+                    from_id=user_id,
+                    target_id=target_id,
                     target_user=target_user,
                     target_username=target_username
                 )
                 return
+            except Exception as e:
+                logger.error(f"Error executing target command {keyword}: {e}")
         
         # Чистый перевод
         amount = extract_number(text)
         if amount > 0:
-            await cmd_transfer_coins(
-                message, 
-                from_id=user_id, 
-                target_id=target_id, 
-                target_user=target_user
-            )
-            return
+            try:
+                await cmd_transfer_coins(
+                    message,
+                    from_id=user_id,
+                    target_id=target_id,
+                    target_user=target_user
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error in transfer: {e}")
     
-    # Команды без цели (только при обращении к боту ИЛИ кастомные РП)
+    # ==================== КОМАНДЫ БЕЗ ЦЕЛИ ====================
     for keyword, handler in NO_TARGET_COMMANDS.items():
         if keyword and keyword in text:
             # Для кастомных РП команд не требуем bot_called
             if keyword in ['add_rp', 'добавить рп', 'add rp', 'del_rp', 'удалить рп', 'delete rp', 'my_rp', 'мои рп', 'my rp']:
                 logger.info(f"✅ Executing NO_TARGET command (custom RP): {keyword}")
-                await handler.handler(message)
-                return
+                try:
+                    await handler.handler(message)
+                    return
+                except Exception as e:
+                    logger.error(f"Error executing custom RP command: {e}")
             elif bot_called:
                 logger.info(f"✅ Executing NO_TARGET command: {keyword}")
-                await handler.handler(message)
+                try:
+                    await handler.handler(message)
+                    return
+                except Exception as e:
+                    logger.error(f"Error executing no-target command: {e}")
+    
+    # ==================== РП ОТВЕТЫ БЕЗ ЦЕЛИ (ТОЛЬКО ПРИ ОБРАЩЕНИИ) ====================
+    if bot_called:
+        rp_responses = {
+            'привет': 'Привет! 👋',
+            'пока': 'Пока! 👋',
+            'спасибо': 'Пожалуйста! 🤗',
+            'доброе утро': 'Доброе утро! ☀️',
+            'добрый вечер': 'Добрый вечер! 🌙',
+            'спокойной ночи': 'Сладких снов! 😴',
+        }
+        
+        for key, response in rp_responses.items():
+            if key and key in text:
+                await message.answer(response)
                 return
-    
-    # РП ответы без цели
-    rp_responses = {
-        'привет': 'Привет! 👋',
-        'пока': 'Пока! 👋',
-        'спасибо': 'Пожалуйста! 🤗',
-        'доброе утро': 'Доброе утро! ☀️',
-        'добрый вечер': 'Добрый вечер! 🌙',
-        'спокойной ночи': 'Сладких снов! 😴',
-    }
-    
-    for key, response in rp_responses.items():
-        if key and key in text:
-            await message.answer(response)
-            return
 
 
 # ==================== ОБРАБОТЧИКИ КНОПОК ====================
 
 @router.callback_query(lambda c: c.data == "start_all")
-async def start_all_callback(callback: types.CallbackQuery):
+async def start_all_callback(callback: types.CallbackQuery) -> None:
+    """Запуск общего сбора"""
     if callback is None:
         return
-    from handlers.tag import cmd_all
-    await cmd_all(callback.message)
+    try:
+        from handlers.tag import cmd_all
+        await cmd_all(callback.message)
+    except Exception as e:
+        logger.error(f"Error in start_all: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "cancel_all")
-async def cancel_all_callback(callback: types.CallbackQuery):
+async def cancel_all_callback(callback: types.CallbackQuery) -> None:
+    """Отмена общего сбора"""
     if callback is None:
         return
-    await callback.message.edit_text("❌ Общий сбор отменён.")
+    try:
+        await callback.message.edit_text("❌ Общий сбор отменён.")
+    except Exception as e:
+        logger.error(f"Error in cancel_all: {e}")
     await callback.answer()
