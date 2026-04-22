@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.1.0-production
+# ВЕРСИЯ: 5.1.1-production
 # ОПИСАНИЕ: NEXUS Chat Manager — Точка входа
-# ИСПРАВЛЕНИЯ: Полная совместимость с aiosqlite, graceful shutdown, фоновые задачи
+# ИСПРАВЛЕНИЯ: Исправлена загрузка роутеров, добавлен admin
 # ============================================
 
 import asyncio
@@ -60,15 +60,7 @@ _shutdown_event = asyncio.Event()
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
-    """
-    Создает главное меню бота.
-    
-    Args:
-        user_id: ID пользователя для проверки прав администратора
-        
-    Returns:
-        InlineKeyboardMarkup с кнопками меню
-    """
+    """Создает главное меню бота."""
     is_admin = user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS
     
     keyboard = [
@@ -99,7 +91,7 @@ def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
 
 # ==================== ТЕСТОВЫЕ КОМАНДЫ ====================
 
-@dp.message(lambda msg: msg.text and msg.text.lower() == "/ping")
+@dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "ping"])
 async def cmd_ping(message: types.Message) -> None:
     """Проверка работоспособности бота."""
     if message is None:
@@ -135,9 +127,7 @@ setup_bot_for_modules()
 # ==================== ИМПОРТ РОУТЕРОВ (с fallback) ====================
 
 def load_routers() -> None:
-    """
-    Загружает все роутеры с обработкой отсутствующих модулей.
-    """
+    """Загружает все роутеры с обработкой отсутствующих модулей."""
     router_modules = [
         "handlers.start",
         "handlers.profile",
@@ -146,8 +136,7 @@ def load_routers() -> None:
         "handlers.stats",
         "handlers.vip",
         "handlers.tag",
-        "handlers.admin",  # Админ-панель
-        "handlers.ai_assistant",
+        "handlers.admin",
         "handlers.referral",
         "handlers.tag_admin",
         "handlers.tag_user",
@@ -167,7 +156,7 @@ def load_routers() -> None:
             if router:
                 dp.include_router(router)
                 loaded += 1
-                logger.debug(f"✅ Loaded router: {module_name}")
+                logger.info(f"✅ Loaded router: {module_name}")
             else:
                 logger.warning(f"No router in {module_name}")
                 failed += 1
@@ -190,12 +179,7 @@ load_routers()
 from database import db, DatabaseError
 
 async def init_database() -> bool:
-    """
-    Инициализация базы данных с обработкой ошибок.
-    
-    Returns:
-        True если успешно, иначе False
-    """
+    """Инициализация базы данных с обработкой ошибок."""
     try:
         await db.initialize()
         logger.info("✅ Database initialized successfully")
@@ -249,7 +233,7 @@ async def auto_register_all_chat_members() -> None:
             except Exception as e:
                 logger.warning(f"Error registering members from {chat_id}: {e}")
             
-            await asyncio.sleep(0.5)  # Защита от флуда
+            await asyncio.sleep(0.5)
         
         if registered > 0:
             logger.info(f"✅ Auto-registered {registered} new users")
@@ -314,26 +298,8 @@ async def init_tag_categories() -> None:
         logger.warning(f"Tag categories init failed: {e}")
 
 
-async def init_rp_tables_safe() -> None:
-    """Безопасная инициализация РП таблиц."""
-    try:
-        from handlers.rp_tables import init_rp_tables
-        await init_rp_tables()
-        logger.info("✅ RP tables initialized")
-    except ImportError:
-        logger.debug("rp_tables module not found")
-    except Exception as e:
-        logger.warning(f"RP tables init failed: {e}")
-
-
 def create_background_task(coro, name: str) -> None:
-    """
-    Создает фоновую задачу с отслеживанием.
-    
-    Args:
-        coro: Корутина для выполнения
-        name: Имя задачи для логирования
-    """
+    """Создает фоновую задачу с отслеживанием."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(lambda t: _background_tasks.discard(t))
@@ -348,7 +314,7 @@ def create_background_task(coro, name: str) -> None:
 
 async def on_startup() -> None:
     """Действия при запуске бота."""
-    logger.info("🚀 Starting NEXUS Bot v5.1...")
+    logger.info("🚀 Starting NEXUS Bot v5.1.1...")
     
     # 1. Инициализация БД (КРИТИЧЕСКИ)
     if not await init_database():
@@ -358,7 +324,6 @@ async def on_startup() -> None:
     # 2. Параллельная инициализация некритических компонентов
     init_tasks = [
         init_tag_categories(),
-        init_rp_tables_safe(),
         load_custom_rp_on_startup(),
     ]
     await asyncio.gather(*init_tasks, return_exceptions=True)
@@ -388,22 +353,20 @@ async def on_startup() -> None:
     except Exception as e:
         logger.warning(f"Initial streak update failed: {e}")
     
-    logger.info("✅ NEXUS Bot v5.1 successfully started!")
+    logger.info("✅ NEXUS Bot v5.1.1 successfully started!")
+    logger.info("📡 Bot is ready to receive messages!")
 
 
 async def on_shutdown() -> None:
     """Действия при остановке бота."""
     logger.info("🛑 Shutting down NEXUS Bot...")
     
-    # Сигнализируем фоновым задачам о завершении
     _shutdown_event.set()
     
-    # Отменяем все фоновые задачи
     for task in _background_tasks:
         task.cancel()
         logger.debug(f"Cancelled task: {task.get_name()}")
     
-    # Ждем завершения задач (с таймаутом)
     if _background_tasks:
         done, pending = await asyncio.wait(
             _background_tasks,
@@ -412,7 +375,6 @@ async def on_shutdown() -> None:
         for task in pending:
             logger.warning(f"Task {task.get_name()} did not finish in time")
     
-    # Закрываем соединения
     try:
         await db.close()
         logger.info("✅ Database connection closed")
@@ -440,16 +402,13 @@ def handle_sigterm():
 
 async def main() -> None:
     """Главная функция запуска бота."""
-    # Регистрируем обработчики сигналов
     try:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
         loop.add_signal_handler(signal.SIGINT, handle_sigterm)
     except NotImplementedError:
-        # Windows не поддерживает add_signal_handler
         pass
     
-    # Регистрируем startup/shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
