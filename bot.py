@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.5.1-fixed
-# ОПИСАНИЕ: NEXUS Chat Manager — ВСЕ КНОПКИ РАБОТАЮТ
+# ВЕРСИЯ: 5.5.2-null-safe
+# ОПИСАНИЕ: NEXUS Chat Manager — ПОЛНАЯ ЗАЩИТА ОТ NULL
 # ============================================
 
 import asyncio
@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Dict, Set, Optional
 
-from aiogram import Bot, Dispatcher, types, F  # ← ДОБАВЛЕН F!
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
@@ -39,10 +39,19 @@ if not BOT_TOKEN:
     logger.critical("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
+# Защита от None для ADMIN_IDS и SUPER_ADMIN_IDS
+ADMIN_IDS = ADMIN_IDS if ADMIN_IDS is not None else []
+SUPER_ADMIN_IDS = SUPER_ADMIN_IDS if SUPER_ADMIN_IDS is not None else []
+START_BALANCE = START_BALANCE if START_BALANCE is not None else 1000
+
 logger.info(f"🔧 ADMIN_IDS: {ADMIN_IDS}")
 logger.info(f"🔧 BOT_USERNAME: {BOT_USERNAME}")
 
 # ==================== БОТ ====================
+
+if BOT_TOKEN is None:
+    logger.critical("❌ BOT_TOKEN is None!")
+    sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -55,45 +64,122 @@ _user_cache: Dict[int, dict] = {}
 _cache_time: Dict[int, float] = {}
 CACHE_TTL = 10
 
+
 # ==================== БАЗА ДАННЫХ ====================
 
 from database import db, DatabaseError
 
 async def get_user_cached(user_id: int) -> Optional[dict]:
-    """Получение пользователя с кешем."""
+    """Получение пользователя с кешем и защитой от NULL."""
+    if user_id is None:
+        logger.warning("get_user_cached called with None user_id")
+        return None
+    
+    if db is None:
+        logger.error("Database is None!")
+        return None
+    
     now = time.time()
     if user_id in _user_cache and now - _cache_time.get(user_id, 0) < CACHE_TTL:
         return _user_cache[user_id]
     
     try:
         user = await db.get_user(user_id)
-        if user:
+        if user is not None:
             _user_cache[user_id] = user
             _cache_time[user_id] = now
         return user
-    except Exception:
+    except DatabaseError as e:
+        logger.error(f"Database error in get_user_cached: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_user_cached: {e}")
         return None
 
 
 async def ensure_user_exists(user_id: int, username: str = None, first_name: str = None) -> Optional[dict]:
-    """Гарантирует существование пользователя."""
-    user = await get_user_cached(user_id)
-    if not user:
-        try:
-            await db.create_user(user_id, username, first_name, START_BALANCE)
+    """Гарантирует существование пользователя с защитой от NULL."""
+    if user_id is None:
+        logger.warning("ensure_user_exists called with None user_id")
+        return None
+    
+    if db is None:
+        logger.error("Database is None!")
+        return None
+    
+    try:
+        user = await get_user_cached(user_id)
+        if not user:
+            await db.create_user(
+                user_id, 
+                username if username is not None else "", 
+                first_name if first_name is not None else "", 
+                START_BALANCE
+            )
             user = await db.get_user(user_id)
-            if user:
+            if user is not None:
                 _user_cache[user_id] = user
                 _cache_time[user_id] = time.time()
-        except Exception as e:
-            logger.error(f"Create user error: {e}")
-    return user
+        return user
+    except DatabaseError as e:
+        logger.error(f"Database error in ensure_user_exists: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in ensure_user_exists: {e}")
+        return None
+
+
+async def get_balance_safe(user_id: int) -> int:
+    """Безопасное получение баланса."""
+    if user_id is None or db is None:
+        return 0
+    try:
+        balance = await db.get_balance(user_id)
+        return balance if balance is not None else 0
+    except Exception:
+        return 0
+
+
+async def get_user_stats_safe(user_id: int) -> dict:
+    """Безопасное получение статистики."""
+    if user_id is None or db is None:
+        return {'wins': 0, 'games_played': 0}
+    try:
+        stats = await db.get_user_stats(user_id)
+        if stats is None:
+            return {'wins': 0, 'games_played': 0}
+        return {
+            'wins': stats.get('wins', 0) if stats.get('wins') is not None else 0,
+            'games_played': stats.get('games_played', 0) if stats.get('games_played') is not None else 0,
+        }
+    except Exception:
+        return {'wins': 0, 'games_played': 0}
+
+
+def safe_int(value) -> int:
+    """Безопасное преобразование в int."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
+def safe_str(value) -> str:
+    """Безопасное преобразование в str."""
+    if value is None:
+        return ""
+    return str(value)
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Создает главное меню бота."""
+    if is_admin is None:
+        is_admin = False
+        
     keyboard = [
         [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
          InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
@@ -127,12 +213,40 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+# ==================== ПРОВЕРКА АДМИНА ====================
+
+async def check_is_admin(user_id: int, chat_id: int) -> bool:
+    """Проверка прав администратора с защитой от NULL."""
+    if user_id is None:
+        return False
+    
+    # Проверка в глобальных списках
+    if user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS:
+        return True
+    
+    # Проверка в чате
+    if chat_id is not None and bot is not None:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            return member.status in ['creator', 'administrator']
+        except Exception:
+            pass
+    
+    return False
+
+
 # ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, command: CommandObject):
     """Главная команда старта."""
-    if not message.from_user:
+    # Защита от NULL
+    if message is None:
+        logger.warning("cmd_start called with None message")
+        return
+    
+    if message.from_user is None:
+        logger.warning("cmd_start: message.from_user is None")
         return
     
     logger.info(f"🚀 /start from {message.from_user.id}")
@@ -140,41 +254,36 @@ async def cmd_start(message: types.Message, command: CommandObject):
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name or "Пользователь"
-    chat_id = message.chat.id if message.chat else user_id
+    chat_id = message.chat.id if message.chat is not None else user_id
     
     # Проверка админа
-    is_admin = user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS
-    if message.chat and message.chat.type in ['group', 'supergroup']:
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            is_admin = is_admin or member.status in ['creator', 'administrator']
-        except:
-            pass
+    is_admin = await check_is_admin(user_id, chat_id)
     
     # Создаем пользователя
-    user = await get_user_cached(user_id)
-    is_new = not user
+    user = await ensure_user_exists(user_id, username, first_name)
+    is_new = user is None
     
     if is_new:
         try:
-            await db.create_user(user_id, username, first_name, START_BALANCE)
-            user = await db.get_user(user_id)
-            if user:
-                _user_cache[user_id] = user
-                _cache_time[user_id] = time.time()
+            if db is not None:
+                await db.create_user(user_id, username, first_name, START_BALANCE)
+                user = await db.get_user(user_id)
+                if user is not None:
+                    _user_cache[user_id] = user
+                    _cache_time[user_id] = time.time()
         except Exception as e:
             logger.error(f"Create user error: {e}")
             await message.answer("❌ Ошибка регистрации")
             return
     
     try:
-        balance = await db.get_balance(user_id)
-        vip_level = user.get('vip_level', 0) if user else 0
-        daily_streak = user.get('daily_streak', 0) if user else 0
+        balance = await get_balance_safe(user_id)
+        vip_level = safe_int(user.get('vip_level')) if user else 0
+        daily_streak = safe_int(user.get('daily_streak')) if user else 0
         
-        stats = await db.get_user_stats(user_id)
-        xo_wins = stats.get('wins', 0) if stats else 0
-        xo_games = stats.get('games_played', 0) if stats else 0
+        stats = await get_user_stats_safe(user_id)
+        xo_wins = stats.get('wins', 0)
+        xo_games = stats.get('games_played', 0)
         
         if is_new:
             welcome = (
@@ -205,6 +314,11 @@ async def cmd_start(message: types.Message, command: CommandObject):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     """Помощь."""
+    if message is None:
+        return
+    
+    bot_username = BOT_USERNAME if BOT_USERNAME is not None else "NEXUS_Manager_Official_bot"
+    
     text = (
         "🤖 <b>NEXUS CHAT MANAGER — ПОМОЩЬ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -219,14 +333,15 @@ async def cmd_help(message: types.Message):
         "<code>/profile</code> — профиль\n"
         "<code>/donate</code> — поддержать\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💡 В группах: /start@{BOT_USERNAME}"
+        f"💡 В группах: /start@{bot_username}"
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
-    await message.answer("🏓 PONG!")
+    if message is not None:
+        await message.answer("🏓 PONG!")
 
 
 # ==================== CALLBACK: НАЗАД ====================
@@ -234,32 +349,29 @@ async def cmd_ping(message: types.Message):
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
     """Кнопка НАЗАД."""
-    if not callback.message or not callback.from_user:
+    if callback is None:
+        return
+    
+    if callback.message is None or callback.from_user is None:
         return
     
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message.chat else user_id
+    chat_id = callback.message.chat.id if callback.message.chat is not None else user_id
     
     try:
-        is_admin = user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS
-        if callback.message.chat and callback.message.chat.type in ['group', 'supergroup']:
-            try:
-                member = await bot.get_chat_member(chat_id, user_id)
-                is_admin = is_admin or member.status in ['creator', 'administrator']
-            except:
-                pass
+        is_admin = await check_is_admin(user_id, chat_id)
         
         user = await get_user_cached(user_id)
         if not user:
             user = await ensure_user_exists(user_id, callback.from_user.username, callback.from_user.first_name)
         
-        balance = await db.get_balance(user_id)
-        vip_level = user.get('vip_level', 0) if user else 0
-        daily_streak = user.get('daily_streak', 0) if user else 0
+        balance = await get_balance_safe(user_id)
+        vip_level = safe_int(user.get('vip_level')) if user else 0
+        daily_streak = safe_int(user.get('daily_streak')) if user else 0
         
-        stats = await db.get_user_stats(user_id)
-        xo_wins = stats.get('wins', 0) if stats else 0
-        xo_games = stats.get('games_played', 0) if stats else 0
+        stats = await get_user_stats_safe(user_id)
+        xo_wins = stats.get('wins', 0)
+        xo_games = stats.get('games_played', 0)
         
         text = (
             f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
@@ -273,6 +385,9 @@ async def back_to_menu(callback: types.CallbackQuery):
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu(is_admin))
         await callback.answer()
         
+    except TelegramAPIError as e:
+        logger.error(f"Telegram API error in back_to_menu: {e}")
+        await callback.answer("❌ Ошибка Telegram", show_alert=True)
     except Exception as e:
         logger.error(f"Back error: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
@@ -282,6 +397,8 @@ async def back_to_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "vip")
 async def vip_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.vip import cmd_vip
         await cmd_vip(callback.message)
@@ -292,6 +409,8 @@ async def vip_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.profile import cmd_profile
         await cmd_profile(callback.message)
@@ -302,6 +421,8 @@ async def profile_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "balance")
 async def balance_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.economy import cmd_balance
         await cmd_balance(callback.message)
@@ -312,6 +433,8 @@ async def balance_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "rank_menu")
 async def rank_menu_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.ranks import cmd_rank
         await cmd_rank(callback.message)
@@ -322,6 +445,8 @@ async def rank_menu_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "game_xo")
 async def game_xo_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.tictactoe import cmd_xo
         await cmd_xo(callback.message)
@@ -332,6 +457,8 @@ async def game_xo_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "stats")
 async def stats_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.stats import cmd_stats
         await cmd_stats(callback.message)
@@ -342,6 +469,8 @@ async def stats_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "start_all")
 async def start_all_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.tag import cmd_all
         await cmd_all(callback.message)
@@ -352,6 +481,8 @@ async def start_all_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "ref_menu")
 async def ref_menu_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.referral import ref_menu_callback as target
         await target(callback)
@@ -362,6 +493,8 @@ async def ref_menu_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "relationships_menu")
 async def relationships_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     await callback.message.edit_text(
         "💕 <b>ОТНОШЕНИЯ</b>\n\nЭтот раздел в разработке.",
         parse_mode=ParseMode.HTML,
@@ -371,6 +504,8 @@ async def relationships_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "groups_menu")
 async def groups_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     await callback.message.edit_text(
         "👥 <b>ГРУППЫ</b>\n\nЭтот раздел в разработке.",
         parse_mode=ParseMode.HTML,
@@ -380,6 +515,8 @@ async def groups_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "rp_menu")
 async def rp_menu_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.smart_commands import cmd_my_custom_rp
         await cmd_my_custom_rp(callback.message)
@@ -390,6 +527,8 @@ async def rp_menu_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "my_tags_menu")
 async def my_tags_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.tag_user import cmd_mytags
         await cmd_mytags(callback.message)
@@ -400,6 +539,8 @@ async def my_tags_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "top_chats")
 async def top_chats_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.rating import cmd_top_chats
         await cmd_top_chats(callback.message)
@@ -410,6 +551,8 @@ async def top_chats_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "privacy")
 async def privacy_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     text = (
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
         "📌 <b>Собираемые данные:</b>\n"
@@ -421,11 +564,15 @@ async def privacy_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "help")
 async def help_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     await cmd_help(callback.message)
     await callback.answer()
 
 @dp.callback_query(F.data == "donate")
 async def donate_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     try:
         from handlers.economy import cmd_donate as economy_donate
         await economy_donate(callback.message)
@@ -436,6 +583,8 @@ async def donate_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "feedback_menu")
 async def feedback_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None:
+        return
     await callback.message.edit_text(
         "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\n"
         "Напишите ваш отзыв или предложение в чат:\n"
@@ -447,6 +596,9 @@ async def feedback_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel_callback(callback: types.CallbackQuery):
+    if callback is None or callback.message is None or callback.from_user is None:
+        return
+    
     user_id = callback.from_user.id
     if user_id not in ADMIN_IDS and user_id not in SUPER_ADMIN_IDS:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
@@ -465,6 +617,10 @@ async def admin_panel_callback(callback: types.CallbackQuery):
 
 def setup_modules():
     """Установка бота и загрузка роутеров."""
+    if bot is None:
+        logger.error("Bot is None, cannot setup modules")
+        return
+    
     # Установка бота
     try:
         from handlers.tictactoe import set_bot
@@ -500,7 +656,7 @@ def setup_modules():
         try:
             module = __import__(module_name, fromlist=[attr_name])
             router = getattr(module, attr_name, None)
-            if router:
+            if router is not None:
                 dp.include_router(router)
                 logger.info(f"✅ Loaded: {module_name}")
         except Exception as e:
@@ -513,13 +669,16 @@ setup_modules()
 # ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
 
 async def on_startup():
-    logger.info("🚀 Starting NEXUS Bot v5.5.1...")
+    logger.info("🚀 Starting NEXUS Bot v5.5.2-null-safe...")
     
-    try:
-        await db.initialize()
-        logger.info("✅ Database initialized")
-    except Exception as e:
-        logger.error(f"DB init error: {e}")
+    if db is not None:
+        try:
+            await db.initialize()
+            logger.info("✅ Database initialized")
+        except Exception as e:
+            logger.error(f"DB init error: {e}")
+    else:
+        logger.error("Database is None!")
     
     try:
         from handlers.smart_commands import load_custom_rp_commands
@@ -531,19 +690,21 @@ async def on_startup():
     # Утренняя очистка
     try:
         from utils.auto_delete import schedule_morning_cleanup
-        task = asyncio.create_task(schedule_morning_cleanup(bot))
-        _background_tasks.add(task)
-        logger.info("✅ Morning cleanup scheduled")
+        if bot is not None:
+            task = asyncio.create_task(schedule_morning_cleanup(bot))
+            _background_tasks.add(task)
+            logger.info("✅ Morning cleanup scheduled")
     except Exception as e:
         logger.warning(f"Cleanup scheduler: {e}")
     
-    logger.info("✅ Bot started! Все кнопки работают!")
+    logger.info("✅ Bot started! Полная защита от NULL активирована!")
 
 
 async def on_shutdown():
     logger.info("🛑 Stopping...")
     for task in _background_tasks:
-        task.cancel()
+        if task is not None:
+            task.cancel()
     await asyncio.sleep(1)
     logger.info("👋 Stopped")
 
@@ -553,13 +714,22 @@ async def on_shutdown():
 @dp.message()
 async def debug_unhandled(message: types.Message):
     """Логирует необработанные сообщения."""
+    if message is None:
+        return
+    
     text = message.text[:100] if message.text else "НЕ ТЕКСТ"
-    logger.warning(f"⚠️ UNHANDLED: chat={message.chat.id} user={message.from_user.id} text={text}")
+    chat_id = message.chat.id if message.chat else "N/A"
+    user_id = message.from_user.id if message.from_user else "N/A"
+    logger.warning(f"⚠️ UNHANDLED: chat={chat_id} user={user_id} text={text}")
 
 
 # ==================== ЗАПУСК ====================
 
 async def main():
+    if dp is None:
+        logger.critical("Dispatcher is None!")
+        sys.exit(1)
+    
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
