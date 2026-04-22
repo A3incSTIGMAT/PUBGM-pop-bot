@@ -1,64 +1,76 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ОПИСАНИЕ: NEXUS Chat Manager v5.0 — Точка входа
-# ИСПРАВЛЕНО: Загрузка кастомных РП команд, защита от NULL
+# ВЕРСИЯ: 5.1.0-production
+# ОПИСАНИЕ: NEXUS Chat Manager — Точка входа
+# ИСПРАВЛЕНИЯ: Полная совместимость с aiosqlite, graceful shutdown, фоновые задачи
 # ============================================
 
 import asyncio
 import logging
-import os
 import sys
-from datetime import datetime, timedelta
+import signal
+from datetime import datetime
+from typing import Optional, Set
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
+# Загрузка переменных окружения
 load_dotenv()
+
+# ==================== КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ====================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("nexus_bot.log", encoding="utf-8")
+    ]
 )
 logger = logging.getLogger(__name__)
 
-from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS
+# ==================== ИМПОРТ КОНФИГУРАЦИИ ====================
+
+from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS, SUPER_ADMIN_IDS
+
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN not set!")
+    logger.critical("❌ BOT_TOKEN not set in .env file!")
     sys.exit(1)
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 
-# ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
-try:
-    from handlers.tictactoe import set_bot
-    if bot is not None:
-        set_bot(bot)
-        logger.info("✅ Bot instance set for tictactoe")
-except Exception as e:
-    logger.warning(f"⚠️ Could not set bot for tictactoe: {e}")
-
-try:
-    from handlers.smart_commands import set_bot as set_smart_bot
-    if bot is not None:
-        set_smart_bot(bot)
-        logger.info("✅ Bot instance set for smart_commands")
-except Exception as e:
-    logger.warning(f"⚠️ Could not set bot for smart_commands: {e}")
+# Глобальные переменные для управления жизненным циклом
+_background_tasks: Set[asyncio.Task] = set()
+_shutdown_event = asyncio.Event()
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
-def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню бота"""
-    if is_admin is None:
-        is_admin = False
+def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
+    """
+    Создает главное меню бота.
+    
+    Args:
+        user_id: ID пользователя для проверки прав администратора
         
+    Returns:
+        InlineKeyboardMarkup с кнопками меню
+    """
+    is_admin = user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS
+    
     keyboard = [
         [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
          InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")],
@@ -87,240 +99,378 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 # ==================== ТЕСТОВЫЕ КОМАНДЫ ====================
 
-@dp.message(Command("ping"))
-async def cmd_ping(message: types.Message):
+@dp.message(lambda msg: msg.text and msg.text.lower() == "/ping")
+async def cmd_ping(message: types.Message) -> None:
+    """Проверка работоспособности бота."""
     if message is None:
         return
     await message.answer("🏓 PONG! Бот работает!")
 
 
-# ==================== ИМПОРТЫ РОУТЕРОВ ====================
-from database import db
+# ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 
-try:
-    from handlers.start import router as start_router
-    from handlers.profile import router as profile_router
-    from handlers.economy import router as economy_router
-    from handlers.tictactoe import router as tictactoe_router
-    from handlers.stats import router as stats_router
-    from handlers.vip import router as vip_router
-    from handlers.tag import router as tag_router
-    from handlers.ai_assistant import router as ai_assistant_router
-    from handlers.referral import router as referral_router
-    from handlers.tag_admin import router as tag_admin_router
-    from handlers.tag_user import router as tag_user_router
-    from handlers.tag_trigger import router as tag_trigger_router
-    from handlers.ranks import router as ranks_router
-    from handlers.rating import router as rating_router
-    from handlers.smart_commands import router as smart_commands_router
+def setup_bot_for_modules() -> None:
+    """Централизованная установка экземпляра бота для модулей."""
+    modules_to_setup = [
+        ("handlers.tictactoe", "set_bot"),
+        ("handlers.smart_commands", "set_bot"),
+    ]
     
-    dp.include_routers(
-        start_router,
-        profile_router,
-        economy_router,
-        tictactoe_router,
-        stats_router,
-        vip_router,
-        tag_router,
-        ai_assistant_router,
-        referral_router,
-        tag_admin_router,
-        tag_user_router,
-        tag_trigger_router,
-        ranks_router,
-        rating_router,
-        smart_commands_router,
-    )
-    logger.info("✅ Все роутеры загружены")
-except Exception as e:
-    logger.error(f"❌ Ошибка загрузки роутеров: {e}")
-    sys.exit(1)
+    for module_name, func_name in modules_to_setup:
+        try:
+            module = __import__(module_name, fromlist=[func_name])
+            setup_func = getattr(module, func_name, None)
+            if setup_func and bot:
+                setup_func(bot)
+                logger.debug(f"✅ Bot set for {module_name}")
+        except ImportError:
+            logger.debug(f"Module {module_name} not available")
+        except Exception as e:
+            logger.warning(f"Failed to set bot for {module_name}: {e}")
 
 
-# ==================== ЖИЗНЕННЫЙ ЦИКЛ БОТА ====================
-
-async def on_startup():
-    logger.info("🚀 Запуск NEXUS Bot v5.0...")
-    
-    # 1. Инициализация БД
-    try:
-        if db is not None:
-            await db.init()
-            logger.info("✅ База данных инициализирована")
-    except Exception as e:
-        logger.critical(f"❌ Ошибка инициализации БД: {e}")
-        sys.exit(1)
-    
-    # 2. Инициализация категорий тегов
-    try:
-        from handlers.tag_categories import init_categories
-        if init_categories is not None:
-            await init_categories()
-            logger.info("✅ Категории тегов инициализированы")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка инициализации категорий: {e}")
-    
-    # 3. Запуск планировщика стриков
-    try:
-        asyncio.create_task(schedule_streak_updates())
-        logger.info("✅ Планировщик стриков запущен")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка запуска планировщика стриков: {e}")
-    
-    # 4. Запуск планировщика утренней очистки
-    try:
-        from utils.auto_delete import schedule_morning_cleanup
-        if schedule_morning_cleanup is not None and bot is not None:
-            asyncio.create_task(schedule_morning_cleanup(bot))
-            logger.info("✅ Планировщик утренней очистки запущен")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка запуска планировщика очистки: {e}")
-    
-    # 5. Авторегистрация участников чатов
-    try:
-        await auto_register_all_chat_members()
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка авторегистрации участников: {e}")
-    
-    # 6. Очистка данных бота
-    try:
-        if bot is not None:
-            bot_me = await bot.get_me()
-            if bot_me is not None:
-                bot_id = bot_me.id
-                if db is not None:
-                    await db.cleanup_bot_from_all_tables(bot_id)
-                    logger.info(f"✅ Данные бота {bot_id} очищены")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка очистки данных бота: {e}")
-    
-    # 7. Инициализация РП таблиц
-    try:
-        from handlers.rp_tables import init_rp_tables
-        if init_rp_tables is not None:
-            await init_rp_tables()
-            logger.info("✅ РП таблицы инициализированы")
-    except ImportError:
-        logger.debug("rp_tables module not found, skipping")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка инициализации РП таблиц: {e}")
-    
-    # 8. 🔥 ЗАГРУЗКА КАСТОМНЫХ РП КОМАНД
-    try:
-        from handlers.smart_commands import load_custom_rp_commands
-        if load_custom_rp_commands is not None:
-            await load_custom_rp_commands()
-            logger.info("✅ Кастомные РП команды загружены")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка загрузки кастомных РП команд: {e}")
-    
-    # 9. 🔥 ЗАГРУЗКА СТАТИСТИКИ
-    try:
-        from handlers.stats import update_all_streaks
-        if update_all_streaks is not None:
-            await update_all_streaks()
-            logger.info("✅ Стрики активности обновлены при старте")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка обновления стриков при старте: {e}")
-    
-    logger.info("✅ NEXUS Bot v5.0 успешно запущен!")
+setup_bot_for_modules()
 
 
-async def auto_register_all_chat_members():
-    """Автоматическая регистрация всех участников чатов (КРОМЕ БОТОВ)"""
+# ==================== ИМПОРТ РОУТЕРОВ (с fallback) ====================
+
+def load_routers() -> None:
+    """
+    Загружает все роутеры с обработкой отсутствующих модулей.
+    """
+    router_modules = [
+        "handlers.start",
+        "handlers.profile",
+        "handlers.economy",
+        "handlers.tictactoe",
+        "handlers.stats",
+        "handlers.vip",
+        "handlers.tag",
+        "handlers.admin",  # Админ-панель
+        "handlers.ai_assistant",
+        "handlers.referral",
+        "handlers.tag_admin",
+        "handlers.tag_user",
+        "handlers.tag_trigger",
+        "handlers.ranks",
+        "handlers.rating",
+        "handlers.smart_commands",
+    ]
+    
+    loaded = 0
+    failed = 0
+    
+    for module_name in router_modules:
+        try:
+            module = __import__(module_name, fromlist=["router"])
+            router = getattr(module, "router", None)
+            if router:
+                dp.include_router(router)
+                loaded += 1
+                logger.debug(f"✅ Loaded router: {module_name}")
+            else:
+                logger.warning(f"No router in {module_name}")
+                failed += 1
+        except ImportError as e:
+            logger.warning(f"Module {module_name} not found: {e}")
+            failed += 1
+        except Exception as e:
+            logger.error(f"Error loading {module_name}: {e}")
+            failed += 1
+    
+    logger.info(f"📦 Routers loaded: {loaded}, skipped: {failed}")
+
+
+# Загружаем роутеры
+load_routers()
+
+
+# ==================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ====================
+
+from database import db, DatabaseError
+
+async def init_database() -> bool:
+    """
+    Инициализация базы данных с обработкой ошибок.
+    
+    Returns:
+        True если успешно, иначе False
+    """
+    try:
+        await db.initialize()
+        logger.info("✅ Database initialized successfully")
+        return True
+    except DatabaseError as e:
+        logger.critical(f"❌ Database initialization failed: {e}")
+        return False
+    except Exception as e:
+        logger.critical(f"❌ Unexpected database error: {e}", exc_info=True)
+        return False
+
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+
+async def auto_register_all_chat_members() -> None:
+    """Автоматическая регистрация всех участников чатов (в фоне)."""
     try:
         from utils.auto_delete import _active_chats
         
-        if _active_chats is None:
+        if not _active_chats:
             logger.debug("No active chats to register")
             return
             
         registered = 0
         for chat_id in list(_active_chats):
-            if chat_id is None:
-                continue
+            if _shutdown_event.is_set():
+                break
+                
             try:
-                if bot is None:
-                    continue
                 members = await bot.get_chat_administrators(chat_id)
-                if members is None:
-                    continue
-                    
+                
                 for member in members:
-                    if member is None or member.user is None:
-                        continue
                     if member.user.is_bot:
                         continue
                         
                     user_id = member.user.id
-                    username = member.user.username
-                    first_name = member.user.first_name
-                    
-                    if db is None:
-                        continue
                     user = await db.get_user(user_id)
+                    
                     if not user:
-                        await db.create_user(user_id, username, first_name, START_BALANCE)
+                        await db.create_user(
+                            user_id,
+                            member.user.username,
+                            member.user.first_name,
+                            START_BALANCE
+                        )
                         registered += 1
-                        logger.info(f"Auto-registered user {user_id} (@{username}) from chat {chat_id}")
+                        logger.debug(f"Auto-registered: {user_id} from chat {chat_id}")
+                        
+            except TelegramAPIError as e:
+                logger.debug(f"Telegram API error for chat {chat_id}: {e}")
             except Exception as e:
-                logger.debug(f"Could not register members from chat {chat_id}: {e}")
+                logger.warning(f"Error registering members from {chat_id}: {e}")
+            
+            await asyncio.sleep(0.5)  # Защита от флуда
         
         if registered > 0:
-            logger.info(f"✅ Auto-registered {registered} users from all chats")
+            logger.info(f"✅ Auto-registered {registered} new users")
+            
     except Exception as e:
         logger.error(f"Error in auto_register_all_chat_members: {e}")
 
 
-async def schedule_streak_updates():
-    """Периодическое обновление стриков (раз в час)"""
-    while True:
-        await asyncio.sleep(3600)
+async def schedule_streak_updates() -> None:
+    """Периодическое обновление стриков (каждый час)."""
+    while not _shutdown_event.is_set():
         try:
+            await asyncio.sleep(3600)
+            if _shutdown_event.is_set():
+                break
+                
             from handlers.stats import update_all_streaks
-            if update_all_streaks is not None:
-                await update_all_streaks()
-                logger.debug("✅ Стрики обновлены")
+            await update_all_streaks()
+            logger.debug("✅ Streaks updated")
+            
+        except asyncio.CancelledError:
+            break
         except Exception as e:
-            logger.error(f"Ошибка обновления стриков: {e}")
+            logger.error(f"Streak update error: {e}")
+            await asyncio.sleep(60)
 
 
-async def on_shutdown():
-    logger.info("🛑 Остановка бота...")
+async def load_custom_rp_on_startup() -> None:
+    """Загрузка кастомных РП команд."""
     try:
-        if db is not None:
-            await db.close()
-    except:
-        pass
+        from handlers.smart_commands import load_custom_rp_commands
+        await load_custom_rp_commands()
+        logger.info("✅ Custom RP commands loaded")
+    except ImportError:
+        logger.debug("smart_commands module not available")
+    except Exception as e:
+        logger.warning(f"Failed to load custom RP: {e}")
+
+
+async def cleanup_bot_data() -> None:
+    """Очистка данных бота из таблиц."""
     try:
-        if bot is not None:
-            await bot.session.close()
-    except:
-        pass
-    logger.info("👋 NEXUS Bot v5.0 остановлен")
+        bot_me = await bot.get_me()
+        if bot_me:
+            await db.cleanup_bot_from_all_tables(bot_me.id)
+            logger.info(f"✅ Bot {bot_me.id} data cleaned")
+    except TelegramAPIError as e:
+        logger.warning(f"Failed to get bot info: {e}")
+    except Exception as e:
+        logger.warning(f"Error cleaning bot data: {e}")
 
 
-async def main():
-    if dp is None:
-        logger.error("❌ Dispatcher is None!")
+async def init_tag_categories() -> None:
+    """Инициализация категорий тегов."""
+    try:
+        from handlers.tag_categories import init_categories
+        await init_categories()
+        logger.info("✅ Tag categories initialized")
+    except ImportError:
+        logger.debug("tag_categories module not available")
+    except Exception as e:
+        logger.warning(f"Tag categories init failed: {e}")
+
+
+async def init_rp_tables_safe() -> None:
+    """Безопасная инициализация РП таблиц."""
+    try:
+        from handlers.rp_tables import init_rp_tables
+        await init_rp_tables()
+        logger.info("✅ RP tables initialized")
+    except ImportError:
+        logger.debug("rp_tables module not found")
+    except Exception as e:
+        logger.warning(f"RP tables init failed: {e}")
+
+
+def create_background_task(coro, name: str) -> None:
+    """
+    Создает фоновую задачу с отслеживанием.
+    
+    Args:
+        coro: Корутина для выполнения
+        name: Имя задачи для логирования
+    """
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(lambda t: _background_tasks.discard(t))
+    task.add_done_callback(
+        lambda t: logger.error(f"Background task '{name}' failed", exc_info=t.exception())
+        if t.exception() else None
+    )
+    logger.debug(f"Background task '{name}' started")
+
+
+# ==================== ЖИЗНЕННЫЙ ЦИКЛ БОТА ====================
+
+async def on_startup() -> None:
+    """Действия при запуске бота."""
+    logger.info("🚀 Starting NEXUS Bot v5.1...")
+    
+    # 1. Инициализация БД (КРИТИЧЕСКИ)
+    if not await init_database():
+        logger.critical("Cannot start without database")
         sys.exit(1)
-        
+    
+    # 2. Параллельная инициализация некритических компонентов
+    init_tasks = [
+        init_tag_categories(),
+        init_rp_tables_safe(),
+        load_custom_rp_on_startup(),
+    ]
+    await asyncio.gather(*init_tasks, return_exceptions=True)
+    
+    # 3. Очистка данных бота
+    await cleanup_bot_data()
+    
+    # 4. Запуск фоновых задач
+    create_background_task(auto_register_all_chat_members(), "auto_register")
+    create_background_task(schedule_streak_updates(), "streak_updates")
+    
+    # 5. Запуск планировщика утренней очистки
+    try:
+        from utils.auto_delete import schedule_morning_cleanup
+        create_background_task(schedule_morning_cleanup(bot), "morning_cleanup")
+        logger.info("✅ Morning cleanup scheduler started")
+    except ImportError:
+        logger.debug("auto_delete module not available")
+    except Exception as e:
+        logger.warning(f"Morning cleanup scheduler failed: {e}")
+    
+    # 6. Обновление стриков при старте
+    try:
+        from handlers.stats import update_all_streaks
+        await update_all_streaks()
+        logger.info("✅ Initial streak update completed")
+    except Exception as e:
+        logger.warning(f"Initial streak update failed: {e}")
+    
+    logger.info("✅ NEXUS Bot v5.1 successfully started!")
+
+
+async def on_shutdown() -> None:
+    """Действия при остановке бота."""
+    logger.info("🛑 Shutting down NEXUS Bot...")
+    
+    # Сигнализируем фоновым задачам о завершении
+    _shutdown_event.set()
+    
+    # Отменяем все фоновые задачи
+    for task in _background_tasks:
+        task.cancel()
+        logger.debug(f"Cancelled task: {task.get_name()}")
+    
+    # Ждем завершения задач (с таймаутом)
+    if _background_tasks:
+        done, pending = await asyncio.wait(
+            _background_tasks,
+            timeout=5.0
+        )
+        for task in pending:
+            logger.warning(f"Task {task.get_name()} did not finish in time")
+    
+    # Закрываем соединения
+    try:
+        await db.close()
+        logger.info("✅ Database connection closed")
+    except Exception as e:
+        logger.warning(f"Error closing database: {e}")
+    
+    try:
+        await bot.session.close()
+        logger.info("✅ Bot session closed")
+    except Exception as e:
+        logger.warning(f"Error closing bot session: {e}")
+    
+    logger.info("👋 NEXUS Bot stopped. Goodbye!")
+
+
+# ==================== ОБРАБОТКА СИГНАЛОВ ====================
+
+def handle_sigterm():
+    """Обработчик SIGTERM для корректного завершения."""
+    logger.info("Received SIGTERM, initiating shutdown...")
+    _shutdown_event.set()
+
+
+# ==================== ТОЧКА ВХОДА ====================
+
+async def main() -> None:
+    """Главная функция запуска бота."""
+    # Регистрируем обработчики сигналов
+    try:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
+        loop.add_signal_handler(signal.SIGINT, handle_sigterm)
+    except NotImplementedError:
+        # Windows не поддерживает add_signal_handler
+        pass
+    
+    # Регистрируем startup/shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    logger.info("📡 Запуск long-polling...")
     
-    if bot is None:
-        logger.error("❌ Bot is None!")
-        sys.exit(1)
-        
-    await dp.start_polling(bot, skip_updates=True)
+    logger.info("📡 Starting long-polling...")
+    
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except asyncio.CancelledError:
+        logger.info("Polling cancelled")
+    except Exception as e:
+        logger.critical(f"💥 Fatal error in polling: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Прервано пользователем")
+        logger.info("👋 Interrupted by user")
+    except SystemExit:
+        logger.info("👋 System exit")
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка: {e}", exc_info=True)
+        logger.critical(f"💥 Unhandled exception: {e}", exc_info=True)
         sys.exit(1)
