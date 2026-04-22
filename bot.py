@@ -459,3 +459,39 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 Unhandled exception: {e}", exc_info=True)
         sys.exit(1)
+# ==================== ЭКСТРЕННЫЙ ХЕНДЛЕР /start ====================
+@dp.message(lambda msg: msg.text and "/start" in msg.text)
+async def emergency_start(message: types.Message):
+    """ЭКСТРЕННЫЙ ОБРАБОТЧИК /start"""
+    logger.info(f"🚨 EMERGENCY /start from {message.from_user.id}")
+    
+    from config import START_BALANCE
+    from database import db
+    from utils.keyboards import main_menu
+    
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name or "Пользователь"
+    
+    # Создаем пользователя если нет
+    try:
+        user = await db.get_user(user_id)
+        if not user:
+            await db.create_user(user_id, username, first_name, START_BALANCE)
+            user = await db.get_user(user_id)
+        
+        balance = await db.get_balance(user_id)
+        vip_level = user.get('vip_level', 0) if user else 0
+        
+        text = (
+            f"🚨 <b>ЭКСТРЕННЫЙ РЕЖИМ</b>\n\n"
+            f"👋 Привет, <b>{first_name}</b>!\n"
+            f"💰 Баланс: <b>{balance}</b> NCoin\n"
+            f"⭐ VIP: {'✅' if vip_level > 0 else '❌'}\n\n"
+            f"👇 Выберите действие:"
+        )
+        
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_menu(is_admin=False))
+    except Exception as e:
+        logger.error(f"Emergency start error: {e}")
+        await message.answer("❌ Ошибка. Попробуйте позже.")
