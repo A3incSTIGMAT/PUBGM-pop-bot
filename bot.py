@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.5.0-full-working
+# ВЕРСИЯ: 5.5.1-fixed
 # ОПИСАНИЕ: NEXUS Chat Manager — ВСЕ КНОПКИ РАБОТАЮТ
 # ============================================
 
@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Dict, Set, Optional
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F  # ← ДОБАВЛЕН F!
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
@@ -513,7 +513,7 @@ setup_modules()
 # ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
 
 async def on_startup():
-    logger.info("🚀 Starting NEXUS Bot v5.5.0...")
+    logger.info("🚀 Starting NEXUS Bot v5.5.1...")
     
     try:
         await db.initialize()
