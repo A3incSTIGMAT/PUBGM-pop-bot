@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.1.1-production
-# ОПИСАНИЕ: NEXUS Chat Manager — Точка входа
-# ИСПРАВЛЕНИЯ: Исправлена загрузка роутеров, добавлен admin
+# ВЕРСИЯ: 5.2.0-production
+# ОПИСАНИЕ: NEXUS Chat Manager — ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
 # ============================================
 
 import asyncio
@@ -89,16 +88,6 @@ def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-# ==================== ТЕСТОВЫЕ КОМАНДЫ ====================
-
-@dp.message(lambda msg: msg.text and msg.text.lower() in ["/ping", "ping"])
-async def cmd_ping(message: types.Message) -> None:
-    """Проверка работоспособности бота."""
-    if message is None:
-        return
-    await message.answer("🏓 PONG! Бот работает!")
-
-
 # ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 
 def setup_bot_for_modules() -> None:
@@ -124,39 +113,47 @@ def setup_bot_for_modules() -> None:
 setup_bot_for_modules()
 
 
-# ==================== ИМПОРТ РОУТЕРОВ (с fallback) ====================
+# ==================== ЗАГРУЗКА РОУТЕРОВ ====================
 
 def load_routers() -> None:
-    """Загружает все роутеры с обработкой отсутствующих модулей."""
+    """Загружает все роутеры."""
     router_modules = [
-        "handlers.start",
-        "handlers.profile",
-        "handlers.economy",
-        "handlers.tictactoe",
-        "handlers.stats",
-        "handlers.vip",
-        "handlers.tag",
-        "handlers.admin",
-        "handlers.referral",
-        "handlers.tag_admin",
-        "handlers.tag_user",
-        "handlers.tag_trigger",
-        "handlers.ranks",
-        "handlers.rating",
-        "handlers.smart_commands",
+        # Основные модули
+        ("handlers.start", "router"),
+        ("handlers.profile", "router"),
+        ("handlers.economy", "router"),
+        ("handlers.tictactoe", "router"),
+        ("handlers.stats", "router"),
+        ("handlers.vip", "router"),
+        ("handlers.tag", "router"),
+        ("handlers.admin", "router"),
+        ("handlers.rating", "router"),
+        ("handlers.smart_commands", "router"),
+        
+        # Реферальная система
+        ("handlers.referral", "router"),
+        
+        # Система тегов
+        ("handlers.tag_categories", "router"),
+        ("handlers.tag_admin", "router"),
+        ("handlers.tag_user", "router"),
+        ("handlers.tag_trigger", "router"),
+        
+        # Ранги
+        ("handlers.ranks", "router"),
     ]
     
     loaded = 0
     failed = 0
     
-    for module_name in router_modules:
+    for module_name, attr_name in router_modules:
         try:
-            module = __import__(module_name, fromlist=["router"])
-            router = getattr(module, "router", None)
+            module = __import__(module_name, fromlist=[attr_name])
+            router = getattr(module, attr_name, None)
             if router:
                 dp.include_router(router)
                 loaded += 1
-                logger.info(f"✅ Loaded router: {module_name}")
+                logger.info(f"✅ Loaded: {module_name}")
             else:
                 logger.warning(f"No router in {module_name}")
                 failed += 1
@@ -170,7 +167,7 @@ def load_routers() -> None:
     logger.info(f"📦 Routers loaded: {loaded}, skipped: {failed}")
 
 
-# Загружаем роутеры
+# Загружаем роутеры ДО импорта БД
 load_routers()
 
 
@@ -179,7 +176,7 @@ load_routers()
 from database import db, DatabaseError
 
 async def init_database() -> bool:
-    """Инициализация базы данных с обработкой ошибок."""
+    """Инициализация базы данных."""
     try:
         await db.initialize()
         logger.info("✅ Database initialized successfully")
@@ -195,7 +192,7 @@ async def init_database() -> bool:
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 async def auto_register_all_chat_members() -> None:
-    """Автоматическая регистрация всех участников чатов (в фоне)."""
+    """Автоматическая регистрация участников чатов."""
     try:
         from utils.auto_delete import _active_chats
         
@@ -243,7 +240,7 @@ async def auto_register_all_chat_members() -> None:
 
 
 async def schedule_streak_updates() -> None:
-    """Периодическое обновление стриков (каждый час)."""
+    """Периодическое обновление стриков."""
     while not _shutdown_event.is_set():
         try:
             await asyncio.sleep(3600)
@@ -314,19 +311,19 @@ def create_background_task(coro, name: str) -> None:
 
 async def on_startup() -> None:
     """Действия при запуске бота."""
-    logger.info("🚀 Starting NEXUS Bot v5.1.1...")
+    logger.info("🚀 Starting NEXUS Bot v5.2.0...")
     
-    # 1. Инициализация БД (КРИТИЧЕСКИ)
+    # 1. Инициализация БД
     if not await init_database():
         logger.critical("Cannot start without database")
         sys.exit(1)
     
-    # 2. Параллельная инициализация некритических компонентов
-    init_tasks = [
+    # 2. Параллельная инициализация
+    await asyncio.gather(
         init_tag_categories(),
         load_custom_rp_on_startup(),
-    ]
-    await asyncio.gather(*init_tasks, return_exceptions=True)
+        return_exceptions=True
+    )
     
     # 3. Очистка данных бота
     await cleanup_bot_data()
@@ -353,7 +350,7 @@ async def on_startup() -> None:
     except Exception as e:
         logger.warning(f"Initial streak update failed: {e}")
     
-    logger.info("✅ NEXUS Bot v5.1.1 successfully started!")
+    logger.info("✅ NEXUS Bot v5.2.0 successfully started!")
     logger.info("📡 Bot is ready to receive messages!")
 
 
@@ -365,35 +362,26 @@ async def on_shutdown() -> None:
     
     for task in _background_tasks:
         task.cancel()
-        logger.debug(f"Cancelled task: {task.get_name()}")
     
     if _background_tasks:
-        done, pending = await asyncio.wait(
-            _background_tasks,
-            timeout=5.0
-        )
-        for task in pending:
-            logger.warning(f"Task {task.get_name()} did not finish in time")
+        await asyncio.wait(_background_tasks, timeout=5.0)
     
     try:
         await db.close()
-        logger.info("✅ Database connection closed")
-    except Exception as e:
-        logger.warning(f"Error closing database: {e}")
+    except Exception:
+        pass
     
     try:
         await bot.session.close()
-        logger.info("✅ Bot session closed")
-    except Exception as e:
-        logger.warning(f"Error closing bot session: {e}")
+    except Exception:
+        pass
     
-    logger.info("👋 NEXUS Bot stopped. Goodbye!")
+    logger.info("👋 NEXUS Bot stopped.")
 
 
 # ==================== ОБРАБОТКА СИГНАЛОВ ====================
 
 def handle_sigterm():
-    """Обработчик SIGTERM для корректного завершения."""
     logger.info("Received SIGTERM, initiating shutdown...")
     _shutdown_event.set()
 
@@ -401,7 +389,7 @@ def handle_sigterm():
 # ==================== ТОЧКА ВХОДА ====================
 
 async def main() -> None:
-    """Главная функция запуска бота."""
+    """Главная функция."""
     try:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
@@ -416,8 +404,6 @@ async def main() -> None:
     
     try:
         await dp.start_polling(bot, skip_updates=True)
-    except asyncio.CancelledError:
-        logger.info("Polling cancelled")
     except Exception as e:
         logger.critical(f"💥 Fatal error in polling: {e}", exc_info=True)
         raise
@@ -428,8 +414,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("👋 Interrupted by user")
-    except SystemExit:
-        logger.info("👋 System exit")
     except Exception as e:
         logger.critical(f"💥 Unhandled exception: {e}", exc_info=True)
         sys.exit(1)
