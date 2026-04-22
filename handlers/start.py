@@ -1,19 +1,25 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/start.py
-# ОПИСАНИЕ: Модуль навигации, старта, помощи
-# ИСПРАВЛЕНО: Статистика побед из xo_stats, кнопка РП, защита от NULL
+# ВЕРСИЯ: 2.0.0-production
+# ОПИСАНИЕ: Модуль навигации — /start, /help, /privacy, меню
+# ИСПРАВЛЕНИЯ: Безопасное удаление данных, обработка ошибок, DRY
 # ============================================
 
-import asyncio
+import html
 import logging
-from aiogram import Router, F, types, Bot
+from typing import Optional, Dict
+
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramAPIError
 
-from database import db
+from database import db, DatabaseError
 from config import START_BALANCE, ADMIN_IDS
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
 from utils.keyboards import (
@@ -34,83 +40,110 @@ class FeedbackState(StatesGroup):
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-def _escape_html(text: str | None) -> str:
-    """Безопасное экранирование HTML"""
+def safe_html_escape(text: Optional[str]) -> str:
+    """Безопасное экранирование HTML."""
     if text is None:
         return ""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _escape_markdown(text: str | None) -> str:
-    """Экранирование для MarkdownV2"""
-    if text is None:
+    try:
+        return html.escape(str(text))
+    except Exception:
         return ""
-    chars = "_*[]()~`>#+-=|{}.!"
-    for char in chars:
-        text = text.replace(char, f"\\{char}")
-    return text
 
 
 async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
-    """Проверка прав администратора"""
+    """
+    Проверка прав администратора в чате.
+    
+    Args:
+        bot: Экземпляр бота
+        user_id: ID пользователя
+        chat_id: ID чата
+        
+    Returns:
+        True если администратор, иначе False
+    """
     if bot is None or user_id is None or chat_id is None:
         return False
+    
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.warning(f"Admin check failed for {user_id} in {chat_id}: {e}")
         return False
 
 
-async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> dict:
-    """Получить или создать пользователя"""
+async def get_or_create_user(
+    user_id: int,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None
+) -> Optional[Dict]:
+    """
+    Получить или создать пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        username: Username
+        first_name: Имя
+        
+    Returns:
+        Словарь с данными пользователя или None при ошибке
+    """
     if user_id is None:
-        return {}
-    user = await db.get_user(user_id)
-    if not user:
-        await db.create_user(user_id, username, first_name, START_BALANCE)
+        return None
+    
+    try:
         user = await db.get_user(user_id)
-    return user or {}
+        if not user:
+            await db.create_user(user_id, username, first_name, START_BALANCE)
+            user = await db.get_user(user_id)
+            logger.info(f"Created new user: {user_id}")
+        return user
+    except DatabaseError as e:
+        logger.error(f"Database error in get_or_create_user: {e}")
+        return None
 
 
-# ==================== КОМАНДА /start ====================
-
-@router.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message is None or message.from_user is None:
-        return
+async def get_user_stats_safe(user_id: int) -> Dict:
+    """
+    Безопасное получение статистики пользователя с fallback.
+    
+    Args:
+        user_id: ID пользователя
         
-    user_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
-    chat_id = message.chat.id if message.chat else user_id
+    Returns:
+        Словарь со статистикой
+    """
+    try:
+        stats = await db.get_user_stats(user_id)
+        if stats:
+            return stats
+    except DatabaseError as e:
+        logger.error(f"Database error getting stats for {user_id}: {e}")
     
-    # Рефералка
-    args = message.text.split() if message.text else []
-    if len(args) > 1 and args[1].startswith("ref_"):
-        parts = args[1].split("_")
-        if len(parts) == 3:
-            try:
-                ref_chat_id = int(parts[1])
-                ref_code = parts[2]
-                from handlers.referral import process_referral_start
-                await process_referral_start(message, ref_chat_id, ref_code)
-            except Exception as e:
-                logger.error(f"Referral processing error: {e}")
+    return {
+        'wins': 0,
+        'games_played': 0,
+    }
+
+
+def format_welcome_message(first_name: str, is_new: bool = True) -> str:
+    """
+    Форматирует приветственное сообщение.
     
-    user = await db.get_user(user_id)
-    
-    is_admin = False
-    if message.chat and message.chat.type in ['group', 'supergroup']:
-        is_admin = await is_admin_in_chat(message.bot, user_id, chat_id)
-    
-    if not user:
-        await db.create_user(user_id, username, first_name, START_BALANCE)
+    Args:
+        first_name: Имя пользователя
+        is_new: Новый пользователь или существующий
         
-        welcome_text = (
+    Returns:
+        Отформатированный текст
+    """
+    safe_name = safe_html_escape(first_name)
+    
+    if is_new:
+        return (
             "🤖 <b>ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
-            f"✨ <b>Привет, {_escape_html(first_name)}!</b>\n\n"
+            f"✨ <b>Привет, {safe_name}!</b>\n\n"
             "Я — <b>NEXUS Chat Manager</b> — твой личный помощник в чате!\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<b>🎯 ЧТО Я УМЕЮ:</b>\n\n"
@@ -136,44 +169,123 @@ async def cmd_start(message: types.Message):
             f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} NCOIN!</b>\n\n"
             "👇 <b>Используйте кнопки ниже для навигации</b>"
         )
-        
-        msg = await message.answer(
-            welcome_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu(is_admin=is_admin)
-        )
-        await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=60)
     else:
-        # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
-        balance = await db.get_balance(user_id)
-        xo_stats = await db.get_user_stats(user_id)
-        
-        xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
-        xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
-        vip_level = user.get('vip_level', 0) or 0
-        daily_streak = user.get('daily_streak', 0) or 0
-        
-        msg = await message.answer(
+        return (
             f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
-            f"👋 С возвращением, <b>{_escape_html(first_name)}</b>!\n"
+            f"👋 С возвращением, <b>{safe_name}</b>!\n"
+            "👇 Выберите действие:"
+        )
+
+
+async def send_main_menu(
+    target: Message | CallbackQuery,
+    user_id: int,
+    first_name: str,
+    is_admin: bool = False,
+    is_new: bool = False
+) -> None:
+    """
+    Отправляет или редактирует главное меню с актуальной статистикой.
+    
+    Args:
+        target: Сообщение или callback
+        user_id: ID пользователя
+        first_name: Имя пользователя
+        is_admin: Является ли админом
+        is_new: Новый пользователь
+    """
+    try:
+        balance = await db.get_balance(user_id)
+        user = await db.get_user(user_id)
+        stats = await get_user_stats_safe(user_id)
+        
+        xo_wins = stats.get('wins', 0)
+        xo_games = stats.get('games_played', 0)
+        vip_level = user.get('vip_level', 0) if user else 0
+        daily_streak = user.get('daily_streak', 0) if user else 0
+        
+        header = format_welcome_message(first_name, is_new)
+        
+        text = (
+            f"{header}\n\n"
             f"💰 Баланс: <b>{balance}</b> NCoin\n"
             f"⭐ VIP: {'✅' if vip_level > 0 else '❌'}\n"
             f"🔥 Daily стрик: <b>{daily_streak}</b> дней\n"
-            f"🎮 XO: <b>{xo_wins}</b> побед ({xo_games} игр)\n\n"
-            "👇 Выберите действие:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu(is_admin=is_admin)
+            f"🎮 XO: <b>{xo_wins}</b> побед ({xo_games} игр)"
         )
-        await track_and_delete_bot_message(message.bot, chat_id, user_id, msg.message_id, delay=30)
+        
+        keyboard = main_menu(is_admin=is_admin)
+        
+        if isinstance(target, CallbackQuery):
+            await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        else:
+            msg = await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            chat_id = target.chat.id if target.chat else user_id
+            await track_and_delete_bot_message(target.bot, chat_id, user_id, msg.message_id)
+            
+    except DatabaseError as e:
+        logger.error(f"Database error in send_main_menu: {e}")
+        text = "❌ Ошибка загрузки данных. Попробуйте позже."
+        if isinstance(target, CallbackQuery):
+            await target.message.edit_text(text, parse_mode=ParseMode.HTML)
+        else:
+            await target.answer(text, parse_mode=ParseMode.HTML)
+
+
+# ==================== КОМАНДА /start ====================
+
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    """Главная команда старта."""
+    if message is None or message.from_user is None:
+        return
+    
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name or "Пользователь"
+    chat_id = message.chat.id if message.chat else user_id
+    
+    # Обработка реферальной ссылки
+    args = message.text.split() if message.text else []
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            parts = args[1].split("_")
+            if len(parts) == 3:
+                ref_chat_id = int(parts[1])
+                ref_code = parts[2]
+                from handlers.referral import process_referral_start
+                await process_referral_start(message, ref_chat_id, ref_code)
+        except Exception as e:
+            logger.error(f"Referral processing error: {e}")
+    
+    # Проверка прав администратора
+    is_admin = False
+    if message.chat and message.chat.type in ['group', 'supergroup']:
+        is_admin = await is_admin_in_chat(message.bot, user_id, chat_id)
+    
+    # Получаем или создаем пользователя
+    user = await db.get_user(user_id)
+    is_new = user is None
+    
+    if is_new:
+        try:
+            await db.create_user(user_id, username, first_name, START_BALANCE)
+        except DatabaseError as e:
+            logger.error(f"Failed to create user {user_id}: {e}")
+            await message.answer("❌ Ошибка регистрации. Попробуйте позже.")
+            return
+    
+    await send_main_menu(message, user_id, first_name, is_admin, is_new)
 
 
 # ==================== КОМАНДА /help ====================
 
 @router.message(Command("help"))
-async def cmd_help(message: types.Message):
+async def cmd_help(message: Message) -> None:
+    """Команда помощи."""
     if message is None:
         return
-        
+    
     help_text = (
         "🤖 <b>NEXUS CHAT MANAGER — ПОМОЩЬ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -190,6 +302,8 @@ async def cmd_help(message: types.Message):
         "<code>/start</code> — главное меню с кнопками\n"
         "<code>/daily</code> — ежедневный бонус\n"
         "<code>/balance</code> — проверить баланс\n"
+        "<code>/stats</code> — статистика\n"
+        "<code>/top</code> — топы\n"
         "<code>/help</code> — эта помощь\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>🎮 КРЕСТИКИ-НОЛИКИ:</b>\n"
@@ -202,14 +316,6 @@ async def cmd_help(message: types.Message):
         "├ VIP статус\n"
         "├ Ранг и прогресс\n"
         "└ Статистика игр\n\n"
-        "<b>📢 ОПОВЕЩЕНИЯ:</b>\n"
-        "├ Общий сбор (для админов)\n"
-        "├ Мои теги — управление подписками\n"
-        "└ Топ чатов\n\n"
-        "<b>💕 СОЦИАЛКА:</b>\n"
-        "├ Отношения (пары)\n"
-        "├ Группы\n"
-        "└ РП команды\n\n"
         "<b>❤️ ПОДДЕРЖКА:</b>\n"
         "└ Кнопка «ПОДДЕРЖАТЬ» в главном меню\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -228,10 +334,11 @@ async def cmd_help(message: types.Message):
 # ==================== КОМАНДА /privacy ====================
 
 @router.message(Command("privacy"))
-async def cmd_privacy(message: types.Message):
+async def cmd_privacy(message: Message) -> None:
+    """Политика конфиденциальности."""
     if message is None:
         return
-        
+    
     privacy_text = (
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -259,10 +366,11 @@ async def cmd_privacy(message: types.Message):
 # ==================== КОМАНДА /delete_my_data ====================
 
 @router.message(Command("delete_my_data"))
-async def cmd_delete_my_data(message: types.Message):
+async def cmd_delete_my_data(message: Message) -> None:
+    """Запрос на удаление данных."""
     if message is None:
         return
-        
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ ДА, УДАЛИТЬ", callback_data="confirm_delete"),
          InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_delete")]
@@ -283,50 +391,70 @@ async def cmd_delete_my_data(message: types.Message):
     )
 
 
-# ==================== ОБРАБОТЧИКИ КНОПОК ГЛАВНОГО МЕНЮ ====================
+@router.callback_query(F.data == "confirm_delete")
+async def confirm_delete(callback: CallbackQuery) -> None:
+    """Подтверждение удаления данных."""
+    if callback is None:
+        return
+    
+    user_id = callback.from_user.id
+    
+    try:
+        # Используем метод из database.py
+        await db.cleanup_bot_from_all_tables(user_id)
+        
+        if callback.message:
+            await callback.message.edit_text(
+                "✅ <b>ВАШИ ДАННЫЕ УДАЛЕНЫ!</b>\n\n"
+                "Вы можете начать заново с /start",
+                parse_mode=ParseMode.HTML
+            )
+        logger.info(f"User {user_id} deleted their data")
+        
+    except DatabaseError as e:
+        logger.error(f"Data deletion failed for {user_id}: {e}")
+        await callback.answer("❌ Ошибка при удалении", show_alert=True)
+    except Exception as e:
+        logger.error(f"Unexpected error deleting data: {e}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
 
-@router.callback_query(F.data == "back_to_menu")
-async def back_to_menu_callback(callback: types.CallbackQuery):
+
+@router.callback_query(F.data == "cancel_delete")
+async def cancel_delete(callback: CallbackQuery) -> None:
+    """Отмена удаления данных."""
     if callback is None or callback.message is None:
         return
-        
+    
+    await callback.message.edit_text("❌ Удаление отменено", reply_markup=back_button())
+    await callback.answer()
+
+
+# ==================== ОБРАБОТЧИКИ ГЛАВНОГО МЕНЮ ====================
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu_callback(callback: CallbackQuery) -> None:
+    """Возврат в главное меню."""
+    if callback is None or callback.message is None:
+        return
+    
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
+    first_name = callback.from_user.first_name or "Пользователь"
     
     is_admin = False
     if callback.message.chat and callback.message.chat.type in ['group', 'supergroup']:
         is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
     
-    await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
-    
-    # 🔥 СВЕЖИЙ БАЛАНС И СТАТИСТИКА XO
-    balance = await db.get_balance(user_id)
-    user = await db.get_user(user_id)
-    xo_stats = await db.get_user_stats(user_id)
-    
-    xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
-    xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
-    vip_level = user.get('vip_level', 0) if user else 0
-    daily_streak = user.get('daily_streak', 0) if user else 0
-    
-    await callback.message.edit_text(
-        f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
-        f"💰 Баланс: <b>{balance}</b> NCoin\n"
-        f"⭐ VIP: {'✅' if vip_level > 0 else '❌'}\n"
-        f"🔥 Daily стрик: <b>{daily_streak}</b> дней\n"
-        f"🎮 XO: <b>{xo_wins}</b> побед ({xo_games} игр)\n\n"
-        f"👇 Выберите категорию:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu(is_admin=is_admin)
-    )
+    await send_main_menu(callback, user_id, first_name, is_admin, is_new=False)
     await callback.answer()
 
 
 @router.callback_query(F.data == "admin_panel")
-async def admin_panel_callback(callback: types.CallbackQuery):
+async def admin_panel_callback(callback: CallbackQuery) -> None:
+    """Открытие админ-панели."""
     if callback is None or callback.message is None:
         return
-        
+    
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
     
@@ -335,21 +463,19 @@ async def admin_panel_callback(callback: types.CallbackQuery):
         return
     
     await callback.message.edit_text(
-        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        "Управление ботом и чатом:",
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\nУправление ботом и чатом:",
         parse_mode=ParseMode.HTML,
         reply_markup=admin_panel_menu()
     )
     await callback.answer()
 
 
-# ==================== ОБРАБОТЧИКИ КАТЕГОРИЙ МЕНЮ ====================
+# ==================== КАТЕГОРИИ МЕНЮ ====================
 
 @router.callback_query(F.data == "games_category")
-async def games_category_callback(callback: types.CallbackQuery):
+async def games_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n\nВыберите действие:",
         parse_mode=ParseMode.HTML,
@@ -359,10 +485,9 @@ async def games_category_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "profile_category")
-async def profile_category_callback(callback: types.CallbackQuery):
+async def profile_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "👤 <b>ПРОФИЛЬ</b>\n\nВыберите действие:",
         parse_mode=ParseMode.HTML,
@@ -372,10 +497,9 @@ async def profile_category_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "finance_category")
-async def finance_category_callback(callback: types.CallbackQuery):
+async def finance_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "💰 <b>ФИНАНСЫ</b>\n\nУправление балансом:",
         parse_mode=ParseMode.HTML,
@@ -385,10 +509,9 @@ async def finance_category_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "social_category")
-async def social_category_callback(callback: types.CallbackQuery):
+async def social_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "👥 <b>СОЦИАЛКА</b>\n\nОтношения, группы, РП:",
         parse_mode=ParseMode.HTML,
@@ -398,10 +521,9 @@ async def social_category_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "notifications_category")
-async def notifications_category_callback(callback: types.CallbackQuery):
+async def notifications_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "📢 <b>ОПОВЕЩЕНИЯ</b>\n\nУправление тегами:",
         parse_mode=ParseMode.HTML,
@@ -411,10 +533,9 @@ async def notifications_category_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "settings_category")
-async def settings_category_callback(callback: types.CallbackQuery):
+async def settings_category_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "⚙️ <b>НАСТРОЙКИ</b>\n\nПомощь и информация:",
         parse_mode=ParseMode.HTML,
@@ -426,10 +547,11 @@ async def settings_category_callback(callback: types.CallbackQuery):
 # ==================== ОБРАТНАЯ СВЯЗЬ ====================
 
 @router.callback_query(F.data == "feedback_menu")
-async def feedback_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+async def feedback_menu_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Меню обратной связи."""
     if callback is None or callback.message is None:
         return
-        
+    
     await state.set_state(FeedbackState.waiting_for_message)
     
     msg = await callback.message.answer(
@@ -447,18 +569,20 @@ async def feedback_menu_callback(callback: types.CallbackQuery, state: FSMContex
 
 
 @router.message(Command("cancel"))
-async def cancel_feedback_command(message: types.Message, state: FSMContext):
+async def cancel_feedback_command(message: Message, state: FSMContext) -> None:
+    """Отмена обратной связи."""
     if message is None:
         return
-        
+    
     current_state = await state.get_state()
     
     if current_state == FeedbackState.waiting_for_message:
         data = await state.get_data()
-        if prompt_id := data.get('prompt_msg_id'):
+        prompt_id = data.get('prompt_msg_id')
+        if prompt_id:
             try:
                 await message.bot.delete_message(message.chat.id, prompt_id)
-            except:
+            except TelegramAPIError:
                 pass
         await state.clear()
         await message.answer("❌ Отправка обратной связи отменена.")
@@ -467,19 +591,21 @@ async def cancel_feedback_command(message: types.Message, state: FSMContext):
 
 
 @router.message(FeedbackState.waiting_for_message)
-async def process_feedback_message(message: types.Message, state: FSMContext):
-    if message is None:
+async def process_feedback_message(message: Message, state: FSMContext) -> None:
+    """Обработка сообщения обратной связи."""
+    if message is None or message.from_user is None:
         return
-        
-    data = await state.get_data()
     
-    if prompt_id := data.get('prompt_msg_id'):
+    data = await state.get_data()
+    prompt_id = data.get('prompt_msg_id')
+    
+    if prompt_id:
         try:
             await message.bot.delete_message(message.chat.id, prompt_id)
-        except:
+        except TelegramAPIError:
             pass
     
-    feedback_text = message.text.strip() if message.text else ""
+    feedback_text = (message.text or "").strip()
     
     if feedback_text == '/cancel':
         await state.clear()
@@ -491,6 +617,7 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
         await state.clear()
         return
     
+    # Отправка админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             if admin_id is None:
@@ -499,13 +626,13 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
                 await message.bot.send_message(
                     admin_id,
                     f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
-                    f"👤 От: {_escape_html(message.from_user.full_name)}\n"
+                    f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
                     f"🆔 ID: <code>{message.from_user.id}</code>\n"
-                    f"💬 Сообщение:\n{_escape_html(feedback_text)}",
+                    f"💬 Сообщение:\n{safe_html_escape(feedback_text)}",
                     parse_mode=ParseMode.HTML
                 )
-            except:
-                pass
+            except TelegramAPIError as e:
+                logger.warning(f"Failed to send feedback to admin {admin_id}: {e}")
     
     await message.answer(
         "✅ <b>Спасибо за обратную связь!</b>\n\n"
@@ -515,69 +642,23 @@ async def process_feedback_message(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ====================
+# ==================== ПРОКСИ-КОЛЛБЭКИ ====================
 
-@router.callback_query(F.data == "confirm_delete")
-async def confirm_delete(callback: types.CallbackQuery):
-    if callback is None:
-        return
-        
-    user_id = callback.from_user.id
-    
-    def _delete_user_data():
-        conn = db._get_connection()
-        if conn is None:
-            return
-        cursor = conn.cursor()
-        try:
-            cursor.execute("BEGIN TRANSACTION")
-            cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM user_profiles WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM transactions WHERE from_id = ? OR to_id = ?", (user_id, user_id))
-            cursor.execute("DELETE FROM user_tag_subscriptions WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM ref_links WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM ref_invites WHERE inviter_id = ? OR invited_id = ?", (user_id, user_id))
-            cursor.execute("DELETE FROM user_ranks WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM xo_stats WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM user_stats WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM user_economy_stats WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM relationships WHERE user1_id = ? OR user2_id = ?", (user_id, user_id))
-            cursor.execute("DELETE FROM group_members WHERE user_id = ?", (user_id,))
-            cursor.execute("DELETE FROM custom_rp WHERE user_id = ?", (user_id,))
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-    
+def _safe_proxy(callback: CallbackQuery, module_name: str, func_name: str) -> None:
+    """Безопасный вызов прокси-коллбэка."""
     try:
-        await asyncio.to_thread(_delete_user_data)
-        if callback.message:
-            await callback.message.edit_text(
-                "✅ <b>ВАШИ ДАННЫЕ УДАЛЕНЫ!</b>\n\n"
-                "Вы можете начать заново с /start",
-                parse_mode=ParseMode.HTML
-            )
-    except Exception as e:
-        logger.error(f"Data deletion failed: {e}")
-        await callback.answer("❌ Ошибка при удалении", show_alert=True)
-
-
-@router.callback_query(F.data == "cancel_delete")
-async def cancel_delete(callback: types.CallbackQuery):
-    if callback is None or callback.message is None:
-        return
-        
-    await callback.message.edit_text("❌ Удаление отменено", reply_markup=back_button())
-    await callback.answer()
+        module = __import__(module_name, fromlist=[func_name])
+        func = getattr(module, func_name)
+        return func
+    except ImportError as e:
+        logger.error(f"Failed to import {func_name} from {module_name}: {e}")
+        return None
 
 
 @router.callback_query(F.data == "privacy")
-async def privacy_callback(callback: types.CallbackQuery):
+async def privacy_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
-        
     await callback.message.edit_text(
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
         "📌 <b>Собираемые данные:</b>\n"
@@ -590,39 +671,36 @@ async def privacy_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "help")
-async def help_callback(callback: types.CallbackQuery):
+async def help_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
-        
     await cmd_help(callback.message)
     await callback.answer()
 
 
-# ==================== ДОНАТ — ПЕРЕАДРЕСАЦИЯ В ECONOMY ====================
+# ==================== ДОНАТ ====================
 
 @router.message(Command("donate"))
-async def cmd_donate_proxy(message: types.Message):
+async def cmd_donate_proxy(message: Message) -> None:
     if message is None:
         return
-        
     from handlers.economy import cmd_donate as economy_donate
     await economy_donate(message)
 
 
 @router.callback_query(F.data == "donate")
-async def donate_callback(callback: types.CallbackQuery):
+async def donate_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
-        
     from handlers.economy import cmd_donate as economy_donate
     await economy_donate(callback.message)
     await callback.answer()
 
 
-# ==================== ПРОКСИ-КОЛЛБЭКИ ДЛЯ ДРУГИХ МОДУЛЕЙ ====================
+# ==================== ПРОКСИ ДЛЯ ДРУГИХ МОДУЛЕЙ ====================
 
 @router.callback_query(F.data == "my_stats")
-async def my_stats_callback(callback: types.CallbackQuery):
+async def my_stats_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.profile import my_stats_callback as target
@@ -630,7 +708,7 @@ async def my_stats_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "rank_menu")
-async def rank_menu_callback(callback: types.CallbackQuery):
+async def rank_menu_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.ranks import cmd_rank
@@ -639,7 +717,7 @@ async def rank_menu_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "private_games")
-async def private_games_callback(callback: types.CallbackQuery):
+async def private_games_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.tictactoe import cmd_xo
@@ -648,7 +726,7 @@ async def private_games_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "top_chats")
-async def top_chats_callback(callback: types.CallbackQuery):
+async def top_chats_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.rating import cmd_top_chats
@@ -657,7 +735,7 @@ async def top_chats_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "relationships_menu")
-async def relationships_menu_callback(callback: types.CallbackQuery):
+async def relationships_menu_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
@@ -671,7 +749,7 @@ async def relationships_menu_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "groups_menu")
-async def groups_menu_callback(callback: types.CallbackQuery):
+async def groups_menu_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
@@ -685,8 +763,7 @@ async def groups_menu_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "rp_menu")
-async def rp_menu_callback(callback: types.CallbackQuery):
-    """Кнопка РП КОМАНДЫ — показывает кастомные РП команды"""
+async def rp_menu_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
     from handlers.smart_commands import cmd_my_custom_rp
@@ -695,11 +772,11 @@ async def rp_menu_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "my_tags_menu")
-async def my_tags_menu_callback(callback: types.CallbackQuery):
+async def my_tags_menu_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
-    from handlers.tag_user import cmd_mytags
     try:
+        from handlers.tag_user import cmd_mytags
         await cmd_mytags(callback.message)
     except Exception as e:
         logger.error(f"Error in my_tags_menu: {e}")
@@ -713,7 +790,7 @@ async def my_tags_menu_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "start_all")
-async def start_all_callback(callback: types.CallbackQuery):
+async def start_all_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.tag import cmd_all
@@ -722,7 +799,7 @@ async def start_all_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "my_ref")
-async def my_ref_callback(callback: types.CallbackQuery):
+async def my_ref_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     from handlers.referral import my_referral_link
@@ -731,8 +808,7 @@ async def my_ref_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "ref_menu")
-async def ref_menu_callback(callback: types.CallbackQuery):
+async def ref_menu_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
-    from handlers.referral import ref_menu_callback
-    await ref_menu_callback(callback)
+    from handlers.referral import ref_menu_callback as target    await target(callback)
