@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/start.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.1.0-production
 # ОПИСАНИЕ: Модуль навигации — /start, /help, /privacy, меню
-# ИСПРАВЛЕНИЯ: Безопасное удаление данных, обработка ошибок, DRY
+# ИСПРАВЛЕНИЯ: Добавлена обработка команд с упоминанием бота
 # ============================================
 
 import html
@@ -12,7 +12,7 @@ import logging
 from typing import Optional, Dict
 
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -20,7 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramAPIError
 
 from database import db, DatabaseError
-from config import START_BALANCE, ADMIN_IDS
+from config import START_BALANCE, ADMIN_IDS, BOT_USERNAME
 from utils.auto_delete import track_and_delete_bot_message, delete_bot_message_after
 from utils.keyboards import (
     main_menu, back_button, games_category_menu, profile_category_menu,
@@ -172,7 +172,7 @@ def format_welcome_message(first_name: str, is_new: bool = True) -> str:
     else:
         return (
             f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
-            f"👋 С возвращением, <b>{safe_name}</b>!\n"
+            f"👋 С возвращением, <b>{safe_name}!</b>\n"
             "👇 Выберите действие:"
         )
 
@@ -235,10 +235,12 @@ async def send_main_menu(
 # ==================== КОМАНДА /start ====================
 
 @router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, command: CommandObject) -> None:
     """Главная команда старта."""
     if message is None or message.from_user is None:
         return
+    
+    logger.info(f"🔥 /start triggered: user={message.from_user.id} chat={message.chat.id} args={command.args}")
     
     user_id = message.from_user.id
     username = message.from_user.username
@@ -246,10 +248,9 @@ async def cmd_start(message: Message) -> None:
     chat_id = message.chat.id if message.chat else user_id
     
     # Обработка реферальной ссылки
-    args = message.text.split() if message.text else []
-    if len(args) > 1 and args[1].startswith("ref_"):
+    if command.args and command.args.startswith("ref_"):
         try:
-            parts = args[1].split("_")
+            parts = command.args.split("_")
             if len(parts) == 3:
                 ref_chat_id = int(parts[1])
                 ref_code = parts[2]
@@ -276,6 +277,47 @@ async def cmd_start(message: Message) -> None:
             return
     
     await send_main_menu(message, user_id, first_name, is_admin, is_new)
+
+
+# ==================== ОБРАБОТЧИК СООБЩЕНИЙ С УПОМИНАНИЕМ БОТА ====================
+
+@router.message(F.text)
+async def handle_bot_mention(message: Message) -> None:
+    """Обработчик сообщений с упоминанием бота."""
+    if message is None or message.text is None:
+        return
+    
+    text = message.text.lower()
+    bot_username = BOT_USERNAME.lower() if BOT_USERNAME else "nexus_manager_official_bot"
+    
+    if f"@{bot_username}" not in text:
+        return
+    
+    logger.info(f"🔔 Bot mentioned in: {text[:100]}")
+    
+    if text.startswith("/start"):
+        args = text.replace(f"/start@{bot_username}", "").strip()
+        await cmd_start(message, CommandObject(command="start", args=args))
+    elif text.startswith("/help"):
+        await cmd_help(message)
+    elif text.startswith("/profile"):
+        from handlers.profile import cmd_profile
+        await cmd_profile(message)
+    elif text.startswith("/balance"):
+        from handlers.economy import cmd_balance
+        await cmd_balance(message)
+    elif text.startswith("/daily"):
+        from handlers.economy import cmd_daily
+        await cmd_daily(message)
+    elif text.startswith("/stats"):
+        from handlers.stats import cmd_stats
+        await cmd_stats(message)
+    elif text.startswith("/top"):
+        from handlers.stats import cmd_top
+        await cmd_top(message)
+    elif text.startswith("/xo"):
+        from handlers.tictactoe import cmd_xo
+        await cmd_xo(message)
 
 
 # ==================== КОМАНДА /help ====================
@@ -320,7 +362,8 @@ async def cmd_help(message: Message) -> None:
         "└ Кнопка «ПОДДЕРЖАТЬ» в главном меню\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "💡 <b>Совет:</b> Всё доступно через кнопки в главном меню!\n"
-        "Нажмите /start чтобы открыть меню."
+        "Нажмите /start чтобы открыть меню.\n\n"
+        f"📌 <i>В группах используйте команды с упоминанием бота: /start@{BOT_USERNAME}</i>"
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -400,7 +443,6 @@ async def confirm_delete(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
     
     try:
-        # Используем метод из database.py
         await db.cleanup_bot_from_all_tables(user_id)
         
         if callback.message:
@@ -617,7 +659,6 @@ async def process_feedback_message(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     
-    # Отправка админам
     if ADMIN_IDS:
         for admin_id in ADMIN_IDS:
             if admin_id is None:
@@ -643,17 +684,6 @@ async def process_feedback_message(message: Message, state: FSMContext) -> None:
 
 
 # ==================== ПРОКСИ-КОЛЛБЭКИ ====================
-
-def _safe_proxy(callback: CallbackQuery, module_name: str, func_name: str) -> None:
-    """Безопасный вызов прокси-коллбэка."""
-    try:
-        module = __import__(module_name, fromlist=[func_name])
-        func = getattr(module, func_name)
-        return func
-    except ImportError as e:
-        logger.error(f"Failed to import {func_name} from {module_name}: {e}")
-        return None
-
 
 @router.callback_query(F.data == "privacy")
 async def privacy_callback(callback: CallbackQuery) -> None:
@@ -811,4 +841,5 @@ async def my_ref_callback(callback: CallbackQuery) -> None:
 async def ref_menu_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
-    from handlers.referral import ref_menu_callback as target    await target(callback)
+    from handlers.referral import ref_menu_callback as target
+    await target(callback)
