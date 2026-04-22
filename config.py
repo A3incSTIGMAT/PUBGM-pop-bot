@@ -11,6 +11,13 @@ if not BOT_TOKEN:
 # ==================== АДМИНИСТРИРОВАНИЕ ====================
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
+# === ДОБАВЛЕНО: СУПЕР-АДМИНЫ (владельцы) ===
+SUPER_ADMIN_IDS = [
+    int(x.strip()) for x in os.getenv("SUPER_ADMIN_IDS", "").split(",") if x.strip()
+]
+if not SUPER_ADMIN_IDS and ADMIN_IDS:
+    SUPER_ADMIN_IDS = ADMIN_IDS.copy()
+
 # ==================== ПУТИ ДЛЯ AMVERA ====================
 DATA_DIR = "/data"
 DATABASE_PATH = os.getenv("DATABASE_PATH", f"{DATA_DIR}/nexus.db")
@@ -26,6 +33,9 @@ REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "250"))
 SLOT_COST = int(os.getenv("SLOT_COST", "50"))
 ROULETTE_MIN = int(os.getenv("ROULETTE_MIN", "50"))
 DUEL_MIN = int(os.getenv("DUEL_MIN", "100"))
+
+# === ДОБАВЛЕНО: Комиссия для игр (например, крестики-нолики) ===
+GAME_COMMISSION = float(os.getenv("GAME_COMMISSION", "0.05"))
 
 # ==================== МОДЕРАЦИЯ ====================
 MAX_WARN_COUNT = int(os.getenv("MAX_WARN_COUNT", "3"))
@@ -61,3 +71,9 @@ OZON_SBP_QR_URL = os.getenv("OZON_SBP_QR_URL", "")
 TWITCH_URL = os.getenv("TWITCH_URL", "")
 INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
+
+# === ДОБАВЛЕНО: ИМЯ БОТА (используется в ссылках) ===
+BOT_USERNAME = os.getenv("BOT_USERNAME", "NEXUS_Manager_Official_bot")
+
+# === ДОБАВЛЕНО: ВРЕМЯ УТРЕННЕЙ ОЧИСТКИ ===
+MORNING_CLEANUP_HOUR = int(os.getenv("MORNING_CLEANUP_HOUR", "10"))
