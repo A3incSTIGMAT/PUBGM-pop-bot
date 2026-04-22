@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.2.0-production
-# ОПИСАНИЕ: NEXUS Chat Manager — ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
+# ВЕРСИЯ: 5.2.1-debug
+# ОПИСАНИЕ: NEXUS Chat Manager — С ОТЛАДКОЙ
 # ============================================
 
 import asyncio
@@ -18,6 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandObject
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -42,6 +43,9 @@ from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS, SUPER_ADMIN_IDS
 if not BOT_TOKEN:
     logger.critical("❌ BOT_TOKEN not set in .env file!")
     sys.exit(1)
+
+logger.info(f"🔧 ADMIN_IDS: {ADMIN_IDS}")
+logger.info(f"🔧 SUPER_ADMIN_IDS: {SUPER_ADMIN_IDS}")
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 
@@ -88,6 +92,68 @@ def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+# ==================== ОТЛАДОЧНЫЕ ХЕНДЛЕРЫ ====================
+
+@dp.message(Command("start"))
+async def cmd_start_debug(message: types.Message, command: CommandObject):
+    """ОТЛАДКА: прямой хендлер /start"""
+    logger.info(f"🔥🔥🔥 DIRECT /start HANDLER TRIGGERED!")
+    logger.info(f"   User: {message.from_user.id} (@{message.from_user.username})")
+    logger.info(f"   Chat: {message.chat.id} (type: {message.chat.type})")
+    logger.info(f"   Args: {command.args}")
+    
+    await message.answer(
+        f"✅ Бот работает!\n"
+        f"User ID: {message.from_user.id}\n"
+        f"Chat ID: {message.chat.id}\n"
+        f"Chat type: {message.chat.type}",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@dp.message(Command("ping"))
+async def cmd_ping_debug(message: types.Message):
+    """ОТЛАДКА: прямой хендлер /ping"""
+    logger.info(f"🔥 /ping from {message.from_user.id}")
+    await message.answer("🏓 PONG! Бот работает!")
+
+
+@dp.message(lambda msg: msg.text and "/start" in msg.text)
+async def catch_all_start(message: types.Message):
+    """ОТЛАДКА: ловит ВСЕ сообщения с /start"""
+    logger.info(f"🔍 CAUGHT /start VARIANT: '{message.text}' from {message.from_user.id}")
+    await message.answer(f"🔍 Поймано: {message.text}")
+
+
+@dp.message()
+async def debug_all_messages(message: types.Message):
+    """ОТЛАДКА: логирует ВСЕ сообщения"""
+    text_preview = message.text[:100] if message.text else (
+        "📷 ФОТО" if message.photo else (
+        "🎥 ВИДЕО" if message.video else (
+        "🎤 ГОЛОСОВОЕ" if message.voice else (
+        "📄 ДОКУМЕНТ" if message.document else "ДРУГОЕ"
+    ))))
+    
+    logger.info(f"📨 [DEBUG] chat={message.chat.id} | user={message.from_user.id} | "
+                f"type={message.chat.type} | content={text_preview}")
+    
+    # Отвечаем на ВСЕ сообщения в ЛС для отладки
+    if message.chat.type == "private":
+        await message.answer(
+            f"📨 Получено: {text_preview}\n"
+            f"Chat ID: {message.chat.id}\n"
+            f"Chat type: {message.chat.type}"
+        )
+
+
+@dp.callback_query()
+async def debug_all_callbacks(callback: types.CallbackQuery):
+    """ОТЛАДКА: логирует ВСЕ callback"""
+    logger.info(f"🔘 [DEBUG] callback: {callback.data} from user={callback.from_user.id}")
+    await callback.answer(f"Callback: {callback.data}")
+
+
 # ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 
 def setup_bot_for_modules() -> None:
@@ -103,11 +169,11 @@ def setup_bot_for_modules() -> None:
             setup_func = getattr(module, func_name, None)
             if setup_func and bot:
                 setup_func(bot)
-                logger.debug(f"✅ Bot set for {module_name}")
+                logger.info(f"✅ Bot set for {module_name}")
         except ImportError:
-            logger.debug(f"Module {module_name} not available")
+            logger.warning(f"Module {module_name} not available")
         except Exception as e:
-            logger.warning(f"Failed to set bot for {module_name}: {e}")
+            logger.error(f"Failed to set bot for {module_name}: {e}")
 
 
 setup_bot_for_modules()
@@ -153,7 +219,7 @@ def load_routers() -> None:
             if router:
                 dp.include_router(router)
                 loaded += 1
-                logger.info(f"✅ Loaded: {module_name}")
+                logger.info(f"✅ Loaded router: {module_name}")
             else:
                 logger.warning(f"No router in {module_name}")
                 failed += 1
@@ -167,7 +233,7 @@ def load_routers() -> None:
     logger.info(f"📦 Routers loaded: {loaded}, skipped: {failed}")
 
 
-# Загружаем роутеры ДО импорта БД
+# Загружаем роутеры
 load_routers()
 
 
@@ -311,7 +377,7 @@ def create_background_task(coro, name: str) -> None:
 
 async def on_startup() -> None:
     """Действия при запуске бота."""
-    logger.info("🚀 Starting NEXUS Bot v5.2.0...")
+    logger.info("🚀 Starting NEXUS Bot v5.2.1-debug...")
     
     # 1. Инициализация БД
     if not await init_database():
@@ -350,8 +416,9 @@ async def on_startup() -> None:
     except Exception as e:
         logger.warning(f"Initial streak update failed: {e}")
     
-    logger.info("✅ NEXUS Bot v5.2.0 successfully started!")
+    logger.info("✅ NEXUS Bot v5.2.1-debug successfully started!")
     logger.info("📡 Bot is ready to receive messages!")
+    logger.info("🔍 DEBUG MODE: All messages will be logged!")
 
 
 async def on_shutdown() -> None:
