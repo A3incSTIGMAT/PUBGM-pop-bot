@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 5.2.1-debug
-# ОПИСАНИЕ: NEXUS Chat Manager — С ОТЛАДКОЙ
+# ВЕРСИЯ: 5.2.2-fixed
+# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕН ПОРЯДОК ХЕНДЛЕРОВ
 # ============================================
 
 import asyncio
@@ -18,10 +18,9 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
 load_dotenv()
 
 # ==================== КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ====================
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 from config import BOT_TOKEN, START_BALANCE, ADMIN_IDS, SUPER_ADMIN_IDS
 
 if not BOT_TOKEN:
-    logger.critical("❌ BOT_TOKEN not set in .env file!")
+    logger.critical("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
 logger.info(f"🔧 ADMIN_IDS: {ADMIN_IDS}")
@@ -55,7 +54,6 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Глобальные переменные для управления жизненным циклом
 _background_tasks: Set[asyncio.Task] = set()
 _shutdown_event = asyncio.Event()
 
@@ -92,68 +90,6 @@ def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-# ==================== ОТЛАДОЧНЫЕ ХЕНДЛЕРЫ ====================
-
-@dp.message(Command("start"))
-async def cmd_start_debug(message: types.Message, command: CommandObject):
-    """ОТЛАДКА: прямой хендлер /start"""
-    logger.info(f"🔥🔥🔥 DIRECT /start HANDLER TRIGGERED!")
-    logger.info(f"   User: {message.from_user.id} (@{message.from_user.username})")
-    logger.info(f"   Chat: {message.chat.id} (type: {message.chat.type})")
-    logger.info(f"   Args: {command.args}")
-    
-    await message.answer(
-        f"✅ Бот работает!\n"
-        f"User ID: {message.from_user.id}\n"
-        f"Chat ID: {message.chat.id}\n"
-        f"Chat type: {message.chat.type}",
-        parse_mode=ParseMode.HTML
-    )
-
-
-@dp.message(Command("ping"))
-async def cmd_ping_debug(message: types.Message):
-    """ОТЛАДКА: прямой хендлер /ping"""
-    logger.info(f"🔥 /ping from {message.from_user.id}")
-    await message.answer("🏓 PONG! Бот работает!")
-
-
-@dp.message(lambda msg: msg.text and "/start" in msg.text)
-async def catch_all_start(message: types.Message):
-    """ОТЛАДКА: ловит ВСЕ сообщения с /start"""
-    logger.info(f"🔍 CAUGHT /start VARIANT: '{message.text}' from {message.from_user.id}")
-    await message.answer(f"🔍 Поймано: {message.text}")
-
-
-@dp.message()
-async def debug_all_messages(message: types.Message):
-    """ОТЛАДКА: логирует ВСЕ сообщения"""
-    text_preview = message.text[:100] if message.text else (
-        "📷 ФОТО" if message.photo else (
-        "🎥 ВИДЕО" if message.video else (
-        "🎤 ГОЛОСОВОЕ" if message.voice else (
-        "📄 ДОКУМЕНТ" if message.document else "ДРУГОЕ"
-    ))))
-    
-    logger.info(f"📨 [DEBUG] chat={message.chat.id} | user={message.from_user.id} | "
-                f"type={message.chat.type} | content={text_preview}")
-    
-    # Отвечаем на ВСЕ сообщения в ЛС для отладки
-    if message.chat.type == "private":
-        await message.answer(
-            f"📨 Получено: {text_preview}\n"
-            f"Chat ID: {message.chat.id}\n"
-            f"Chat type: {message.chat.type}"
-        )
-
-
-@dp.callback_query()
-async def debug_all_callbacks(callback: types.CallbackQuery):
-    """ОТЛАДКА: логирует ВСЕ callback"""
-    logger.info(f"🔘 [DEBUG] callback: {callback.data} from user={callback.from_user.id}")
-    await callback.answer(f"Callback: {callback.data}")
-
-
 # ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 
 def setup_bot_for_modules() -> None:
@@ -179,12 +115,11 @@ def setup_bot_for_modules() -> None:
 setup_bot_for_modules()
 
 
-# ==================== ЗАГРУЗКА РОУТЕРОВ ====================
+# ==================== ЗАГРУЗКА РОУТЕРОВ (СНАЧАЛА!) ====================
 
 def load_routers() -> None:
     """Загружает все роутеры."""
     router_modules = [
-        # Основные модули
         ("handlers.start", "router"),
         ("handlers.profile", "router"),
         ("handlers.economy", "router"),
@@ -195,17 +130,11 @@ def load_routers() -> None:
         ("handlers.admin", "router"),
         ("handlers.rating", "router"),
         ("handlers.smart_commands", "router"),
-        
-        # Реферальная система
         ("handlers.referral", "router"),
-        
-        # Система тегов
         ("handlers.tag_categories", "router"),
         ("handlers.tag_admin", "router"),
         ("handlers.tag_user", "router"),
         ("handlers.tag_trigger", "router"),
-        
-        # Ранги
         ("handlers.ranks", "router"),
     ]
     
@@ -233,8 +162,20 @@ def load_routers() -> None:
     logger.info(f"📦 Routers loaded: {loaded}, skipped: {failed}")
 
 
-# Загружаем роутеры
+# ЗАГРУЖАЕМ РОУТЕРЫ ПЕРВЫМИ!
 load_routers()
+
+
+# ==================== ОТЛАДОЧНЫЙ ХЕНДЛЕР (ПОСЛЕ РОУТЕРОВ) ====================
+
+@dp.message()
+async def debug_unhandled_messages(message: types.Message):
+    """Логирует НЕОБРАБОТАННЫЕ сообщения."""
+    text_preview = message.text[:100] if message.text else (
+        "📷 ФОТО" if message.photo else "🎥 ВИДЕО" if message.video else "ДРУГОЕ"
+    )
+    
+    logger.warning(f"⚠️ UNHANDLED: chat={message.chat.id} user={message.from_user.id} content={text_preview}")
 
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ====================
@@ -242,7 +183,6 @@ load_routers()
 from database import db, DatabaseError
 
 async def init_database() -> bool:
-    """Инициализация базы данных."""
     try:
         await db.initialize()
         logger.info("✅ Database initialized successfully")
@@ -258,65 +198,44 @@ async def init_database() -> bool:
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 async def auto_register_all_chat_members() -> None:
-    """Автоматическая регистрация участников чатов."""
     try:
         from utils.auto_delete import _active_chats
         
         if not _active_chats:
-            logger.debug("No active chats to register")
             return
             
         registered = 0
         for chat_id in list(_active_chats):
             if _shutdown_event.is_set():
                 break
-                
             try:
                 members = await bot.get_chat_administrators(chat_id)
-                
                 for member in members:
                     if member.user.is_bot:
                         continue
-                        
                     user_id = member.user.id
                     user = await db.get_user(user_id)
-                    
                     if not user:
-                        await db.create_user(
-                            user_id,
-                            member.user.username,
-                            member.user.first_name,
-                            START_BALANCE
-                        )
+                        await db.create_user(user_id, member.user.username, member.user.first_name, START_BALANCE)
                         registered += 1
-                        logger.debug(f"Auto-registered: {user_id} from chat {chat_id}")
-                        
-            except TelegramAPIError as e:
-                logger.debug(f"Telegram API error for chat {chat_id}: {e}")
             except Exception as e:
-                logger.warning(f"Error registering members from {chat_id}: {e}")
-            
+                logger.warning(f"Error registering from {chat_id}: {e}")
             await asyncio.sleep(0.5)
         
         if registered > 0:
             logger.info(f"✅ Auto-registered {registered} new users")
-            
     except Exception as e:
-        logger.error(f"Error in auto_register_all_chat_members: {e}")
+        logger.error(f"Error in auto_register: {e}")
 
 
 async def schedule_streak_updates() -> None:
-    """Периодическое обновление стриков."""
     while not _shutdown_event.is_set():
         try:
             await asyncio.sleep(3600)
             if _shutdown_event.is_set():
                 break
-                
             from handlers.stats import update_all_streaks
             await update_all_streaks()
-            logger.debug("✅ Streaks updated")
-            
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -325,106 +244,77 @@ async def schedule_streak_updates() -> None:
 
 
 async def load_custom_rp_on_startup() -> None:
-    """Загрузка кастомных РП команд."""
     try:
         from handlers.smart_commands import load_custom_rp_commands
         await load_custom_rp_commands()
         logger.info("✅ Custom RP commands loaded")
-    except ImportError:
-        logger.debug("smart_commands module not available")
     except Exception as e:
         logger.warning(f"Failed to load custom RP: {e}")
 
 
 async def cleanup_bot_data() -> None:
-    """Очистка данных бота из таблиц."""
     try:
         bot_me = await bot.get_me()
         if bot_me:
             await db.cleanup_bot_from_all_tables(bot_me.id)
             logger.info(f"✅ Bot {bot_me.id} data cleaned")
-    except TelegramAPIError as e:
-        logger.warning(f"Failed to get bot info: {e}")
     except Exception as e:
         logger.warning(f"Error cleaning bot data: {e}")
 
 
 async def init_tag_categories() -> None:
-    """Инициализация категорий тегов."""
     try:
         from handlers.tag_categories import init_categories
         await init_categories()
         logger.info("✅ Tag categories initialized")
-    except ImportError:
-        logger.debug("tag_categories module not available")
     except Exception as e:
         logger.warning(f"Tag categories init failed: {e}")
 
 
 def create_background_task(coro, name: str) -> None:
-    """Создает фоновую задачу с отслеживанием."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(lambda t: _background_tasks.discard(t))
-    task.add_done_callback(
-        lambda t: logger.error(f"Background task '{name}' failed", exc_info=t.exception())
-        if t.exception() else None
-    )
     logger.debug(f"Background task '{name}' started")
 
 
-# ==================== ЖИЗНЕННЫЙ ЦИКЛ БОТА ====================
+# ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
 
 async def on_startup() -> None:
-    """Действия при запуске бота."""
-    logger.info("🚀 Starting NEXUS Bot v5.2.1-debug...")
+    logger.info("🚀 Starting NEXUS Bot v5.2.2-fixed...")
     
-    # 1. Инициализация БД
     if not await init_database():
-        logger.critical("Cannot start without database")
         sys.exit(1)
     
-    # 2. Параллельная инициализация
     await asyncio.gather(
         init_tag_categories(),
         load_custom_rp_on_startup(),
         return_exceptions=True
     )
     
-    # 3. Очистка данных бота
     await cleanup_bot_data()
     
-    # 4. Запуск фоновых задач
     create_background_task(auto_register_all_chat_members(), "auto_register")
     create_background_task(schedule_streak_updates(), "streak_updates")
     
-    # 5. Запуск планировщика утренней очистки
     try:
         from utils.auto_delete import schedule_morning_cleanup
         create_background_task(schedule_morning_cleanup(bot), "morning_cleanup")
         logger.info("✅ Morning cleanup scheduler started")
-    except ImportError:
-        logger.debug("auto_delete module not available")
     except Exception as e:
-        logger.warning(f"Morning cleanup scheduler failed: {e}")
+        logger.warning(f"Morning cleanup failed: {e}")
     
-    # 6. Обновление стриков при старте
     try:
         from handlers.stats import update_all_streaks
         await update_all_streaks()
-        logger.info("✅ Initial streak update completed")
     except Exception as e:
         logger.warning(f"Initial streak update failed: {e}")
     
-    logger.info("✅ NEXUS Bot v5.2.1-debug successfully started!")
-    logger.info("📡 Bot is ready to receive messages!")
-    logger.info("🔍 DEBUG MODE: All messages will be logged!")
+    logger.info("✅ NEXUS Bot v5.2.2-fixed successfully started!")
 
 
 async def on_shutdown() -> None:
-    """Действия при остановке бота."""
-    logger.info("🛑 Shutting down NEXUS Bot...")
-    
+    logger.info("🛑 Shutting down...")
     _shutdown_event.set()
     
     for task in _background_tasks:
@@ -446,17 +336,12 @@ async def on_shutdown() -> None:
     logger.info("👋 NEXUS Bot stopped.")
 
 
-# ==================== ОБРАБОТКА СИГНАЛОВ ====================
-
 def handle_sigterm():
-    logger.info("Received SIGTERM, initiating shutdown...")
+    logger.info("Received SIGTERM...")
     _shutdown_event.set()
 
 
-# ==================== ТОЧКА ВХОДА ====================
-
 async def main() -> None:
-    """Главная функция."""
     try:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
@@ -468,12 +353,7 @@ async def main() -> None:
     dp.shutdown.register(on_shutdown)
     
     logger.info("📡 Starting long-polling...")
-    
-    try:
-        await dp.start_polling(bot, skip_updates=True)
-    except Exception as e:
-        logger.critical(f"💥 Fatal error in polling: {e}", exc_info=True)
-        raise
+    await dp.start_polling(bot, skip_updates=True)
 
 
 if __name__ == "__main__":
