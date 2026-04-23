@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.9-final
-# ОПИСАНИЕ: NEXUS Chat Manager — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+# ВЕРСИЯ: 6.0.10-fixed
+# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНА АДМИН-ПАНЕЛЬ
 # ============================================
 
 import asyncio
@@ -157,28 +157,6 @@ def safe_html_escape(text: Optional[str]) -> str:
         return ""
 
 
-# ==================== ПОЛУЧЕНИЕ РЕАЛЬНОГО ID ПОЛЬЗОВАТЕЛЯ ====================
-
-def get_real_user_id(callback: CallbackQuery) -> int:
-    """
-    Получить НАСТОЯЩИЙ ID пользователя из callback.
-    🔥 В группах callback.from_user.id может быть ID бота!
-    """
-    if not callback or not callback.from_user:
-        return OWNER_ID
-    
-    user_id = callback.from_user.id
-    
-    if BOT_ID and user_id == BOT_ID:
-        if callback.message and callback.message.reply_to_message:
-            reply_user = callback.message.reply_to_message.from_user
-            if reply_user:
-                logger.info(f"📩 Got real user_id from reply: {reply_user.id}")
-                return reply_user.id
-    
-    return user_id
-
-
 # ==================== ПРОВЕРКА АДМИНА ====================
 
 def is_super_admin(user_id: Optional[int]) -> bool:
@@ -240,7 +218,7 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
+def get_back_keyboard(callback_ str = "back_to_menu") -> InlineKeyboardMarkup:
     """Клавиатура с кнопкой «Назад»."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
@@ -453,7 +431,7 @@ async def back_to_menu(callback: CallbackQuery):
     if not callback or not callback.message:
         return
     
-    user_id = get_real_user_id(callback)
+    user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
     first_name = callback.from_user.first_name or "Пользователь"
     
@@ -682,36 +660,60 @@ async def menu_feedback(callback: CallbackQuery):
     await callback.answer()
 
 
+# 🔥 ИСПРАВЛЕННЫЙ ОБРАБОТЧИК АДМИН-ПАНЕЛИ
 @dp.callback_query(F.data == "menu_admin")
 async def menu_admin(callback: CallbackQuery):
-    """Админ-панель — прямой вызов."""
+    """
+    Обработчик кнопки админ-панели.
+    🔥 ДЕЛЕГИРУЕТ обработку в handlers.admin
+    """
     if not callback or not callback.message:
+        logger.warning("⚠️ menu_admin: callback or message is None")
         return
     
-    user_id = get_real_user_id(callback)
-    logger.info(f"🔥 ADMIN PANEL: user_id={user_id}, OWNER_ID={OWNER_ID}")
+    if not callback.from_user:
+        logger.warning("⚠️ menu_admin: callback.from_user is None")
+        return
     
-    if user_id != OWNER_ID and user_id not in SUPER_ADMIN_IDS:
+    user_id = callback.from_user.id
+    logger.info(f"🔥 ADMIN PANEL ACCESS: user_id={user_id}, OWNER_ID={OWNER_ID}")
+    
+    # Проверка прав
+    if not is_super_admin(user_id):
+        logger.warning(f"🚫 Admin access denied for user {user_id}")
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     
+    logger.info(f"✅ User {user_id} has admin rights, delegating to handlers.admin...")
+    
     try:
-        from handlers.admin import get_admin_menu_keyboard, get_admin_panel_text
+        # 🔥 ИМПОРТИРУЕМ И ВЫЗЫВАЕМ хендлер из admin.py
+        from handlers.admin import admin_panel_callback
+        await admin_panel_callback(callback)
+        logger.info(f"✅ Admin panel opened successfully for user {user_id}")
         
-        user = await get_user_cached(user_id)
-        first_name = user.get('first_name') if user else callback.from_user.first_name or "Владелец"
-        
-        text = get_admin_panel_text(user_id, first_name, callback.message.chat.id)
-        await callback.message.edit_text(
-            text,
+    except ImportError as e:
+        logger.error(f"❌ ImportError loading admin panel: {e}", exc_info=True)
+        await callback.message.answer(
+            f"❌ <b>Ошибка импорта админ-панели!</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)}</code>\n\n"
+            f"Проверьте файл handlers/admin.py",
             parse_mode=ParseMode.HTML,
-            reply_markup=get_admin_menu_keyboard()
+            reply_markup=get_back_keyboard()
         )
     except Exception as e:
-        logger.error(f"Admin panel error: {e}", exc_info=True)
-        await callback.message.answer("❌ Ошибка открытия админ-панели", reply_markup=get_back_keyboard())
-    
-    await callback.answer()
+        logger.error(f"❌ Admin panel error for user {user_id}: {e}", exc_info=True)
+        await callback.message.answer(
+            f"❌ <b>Ошибка открытия админ-панели</b>\n\n"
+            f"<code>{type(e).__name__}: {str(e)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_keyboard()
+        )
+    finally:
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
 
 # ==================== УПРАВЛЕНИЕ ФОНОВЫМИ ЗАДАЧАМИ ====================
@@ -790,7 +792,7 @@ async def on_startup():
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
     
-    logger.info("🚀 NEXUS Bot v6.0.9-final starting...")
+    logger.info("🚀 NEXUS Bot v6.0.10-fixed starting...")
     
     setup_bot_for_modules()
     load_all_routers()
@@ -869,3 +871,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 Fatal error: {e}", exc_info=True)
         sys.exit(1)
+
