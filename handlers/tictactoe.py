@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/tictactoe.py
-# ВЕРСИЯ: 3.0.1-hardened
+# ВЕРСИЯ: 3.0.2-final
 # ОПИСАНИЕ: Крестики-нолики — игра в ЛС с защитой от гонок
-# ИСПРАВЛЕНИЯ: Graceful shutdown, таймауты, защита от memory leak, FSM-фильтры
+# ИСПРАВЛЕНИЯ: Исправлена опечатка в GameManager.add_game
 # ============================================
 
 import asyncio
@@ -76,7 +76,7 @@ class GameManager:
         self._max_games = max_games
         self._move_clicks: Dict[str, float] = {}  # game_id:user_id -> last_click_time
     
-    async def add_game(self, game_id: str, game_ Dict) -> bool:
+    async def add_game(self, game_id: str, game_data: Dict) -> bool:
         """Добавить игру. Возвращает False если достигнут лимит."""
         async with self._lock:
             if len(self._active_games) >= self._max_games:
@@ -110,7 +110,7 @@ class GameManager:
         async with self._lock:
             return list(self._active_games.items())
     
-    async def add_pending_challenge(self, user_id: int, bet: int, target_id: int) -> bool:
+    async def add_pending_challenge(self, user_id: int, bet: int, target_id: Optional[int] = None) -> bool:
         """Добавить ожидающий вызов. Возвращает False если уже есть активный."""
         async with self._lock:
             if user_id in self._pending_challenges:
@@ -475,6 +475,7 @@ async def end_game(
                 px_name = safe_html_escape(px_user.get("first_name")) if px_user else "Игрок"
                 result_text = f"🎉 ПОБЕДИЛ {px_name} (X)!"
                 
+                win_amount = 0
                 if bet > 0:
                     win_amount = int(bet * 2 * (1 - COMMISSION))
                     await db.update_balance(player_x, win_amount, "Выигрыш в крестики-нолики")
@@ -498,6 +499,7 @@ async def end_game(
                 po_name = safe_html_escape(po_user.get("first_name")) if po_user else "Игрок"
                 result_text = f"🎉 ПОБЕДИЛ {po_name} (O)!"
                 
+                win_amount = 0
                 if bet > 0:
                     win_amount = int(bet * 2 * (1 - COMMISSION))
                     await db.update_balance(player_o, win_amount, "Выигрыш в крестики-нолики")
@@ -1335,4 +1337,3 @@ async def xo_help_callback(callback: CallbackQuery) -> None:
 async def xo_noop(callback: CallbackQuery) -> None:
     """Заглушка для неактивных клеток."""
     await callback.answer("❌ Эта клетка занята или игра не активна!", show_alert=True)
-
