@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.11-fixed
-# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА
+# ВЕРСИЯ: 6.0.12-fixed
+# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА В get_back_keyboard
 # ============================================
 
 import asyncio
@@ -218,7 +218,8 @@ def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_back_keyboard(callback_ str = "back_to_menu") -> InlineKeyboardMarkup:
+# 🔥 ИСПРАВЛЕНО: callback_data: str
+def get_back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
     """Клавиатура с кнопкой «Назад»."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
@@ -792,7 +793,7 @@ async def on_startup():
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
     
-    logger.info("🚀 NEXUS Bot v6.0.11-fixed starting...")
+    logger.info("🚀 NEXUS Bot v6.0.12-fixed starting...")
     
     setup_bot_for_modules()
     load_all_routers()
@@ -871,4 +872,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 Fatal error: {e}", exc_info=True)
         sys.exit(1)
-
