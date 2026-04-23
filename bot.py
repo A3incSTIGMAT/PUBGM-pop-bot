@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.10-fixed
-# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНА АДМИН-ПАНЕЛЬ
+# ВЕРСИЯ: 6.0.11-fixed
+# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА
 # ============================================
 
 import asyncio
@@ -792,7 +792,7 @@ async def on_startup():
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
     
-    logger.info("🚀 NEXUS Bot v6.0.10-fixed starting...")
+    logger.info("🚀 NEXUS Bot v6.0.11-fixed starting...")
     
     setup_bot_for_modules()
     load_all_routers()
