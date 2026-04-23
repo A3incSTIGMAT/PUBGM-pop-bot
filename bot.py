@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.0-final
-# ОПИСАНИЕ: NEXUS Chat Manager — ВСЕ ФУНКЦИИ РАБОТАЮТ ИДЕАЛЬНО
+# ВЕРСИЯ: 6.0.2-rate-limit
+# ОПИСАНИЕ: NEXUS Chat Manager — С RATE LIMITER (ПОЛНЫЙ)
 # ============================================
 
 import asyncio
@@ -55,6 +55,21 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 _background_tasks: Set[asyncio.Task] = set()
+
+# ==================== RATE LIMITER ====================
+
+from utils.rate_limiter import (
+    RateLimiter, 
+    start_cleanup_task, 
+    stop_cleanup_task,
+    rate_limit as rate_limit_decorator
+)
+
+# Создаем лимитеры для разных команд
+daily_limiter = RateLimiter(limit=1, period=10)      # /daily — раз в 10 сек
+transfer_limiter = RateLimiter(limit=5, period=60)   # /transfer — 5 в минуту
+game_limiter = RateLimiter(limit=10, period=60)      # Игры — 10 в минуту
+all_limiter = RateLimiter(limit=3, period=300)       # /all — 3 раза в 5 минут
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -475,25 +490,33 @@ async def menu_admin(callback: CallbackQuery):
 # ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
 
 async def on_startup():
-    logger.info("🚀 NEXUS Bot v6.0.0-final starting...")
+    logger.info("🚀 NEXUS Bot v6.0.2-rate-limit starting...")
+    
+    # Запускаем очистку rate limiter
+    start_cleanup_task()
+    logger.info("✅ Rate limiter cleanup started")
+    
     if db:
         try:
             await db.initialize()
             logger.info("✅ Database initialized")
         except Exception as e:
             logger.error(f"DB error: {e}")
+    
     try:
         from handlers.smart_commands import load_custom_rp_commands
         await load_custom_rp_commands()
         logger.info("✅ Custom RP loaded")
     except Exception as e:
         logger.warning(f"Custom RP: {e}")
+    
     try:
         from handlers.stats import update_all_streaks
         await update_all_streaks()
         logger.info("✅ Streaks updated")
     except Exception as e:
         logger.warning(f"Streaks: {e}")
+    
     try:
         from utils.auto_delete import schedule_morning_cleanup
         task = asyncio.create_task(schedule_morning_cleanup(bot))
@@ -501,10 +524,16 @@ async def on_startup():
         logger.info("✅ Morning cleanup scheduled")
     except Exception as e:
         logger.warning(f"Cleanup: {e}")
+    
     logger.info("✅ ALL SYSTEMS GO! Бот готов к работе!")
 
 async def on_shutdown():
     logger.info("🛑 Shutting down...")
+    
+    # Останавливаем очистку rate limiter
+    await stop_cleanup_task()
+    logger.info("✅ Rate limiter cleanup stopped")
+    
     for task in _background_tasks:
         if task: task.cancel()
     await asyncio.sleep(1)
