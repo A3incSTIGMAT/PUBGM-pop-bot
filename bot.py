@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.7-user-fix-final
-# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНО ОПРЕДЕЛЕНИЕ ПОЛЬЗОВАТЕЛЯ В CALLBACK
+# ВЕРСИЯ: 6.0.9-final
+# ОПИСАНИЕ: NEXUS Chat Manager — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 # ============================================
 
 import asyncio
@@ -159,44 +159,24 @@ def safe_html_escape(text: Optional[str]) -> str:
 
 # ==================== ПОЛУЧЕНИЕ РЕАЛЬНОГО ID ПОЛЬЗОВАТЕЛЯ ====================
 
-def get_real_user_id_from_callback(callback: CallbackQuery) -> Optional[int]:
+def get_real_user_id(callback: CallbackQuery) -> int:
     """
     Получить НАСТОЯЩИЙ ID пользователя из callback.
     🔥 В группах callback.from_user.id может быть ID бота!
     """
     if not callback or not callback.from_user:
-        return None
+        return OWNER_ID
     
     user_id = callback.from_user.id
     
-    # Если это бот — пробуем получить настоящего пользователя из reply_to_message
     if BOT_ID and user_id == BOT_ID:
         if callback.message and callback.message.reply_to_message:
             reply_user = callback.message.reply_to_message.from_user
             if reply_user:
                 logger.info(f"📩 Got real user_id from reply: {reply_user.id}")
                 return reply_user.id
-        
-        # Fallback на владельца (для экстренного доступа)
-        logger.warning(f"⚠️ Could not get real user, using OWNER_ID as fallback")
-        return OWNER_ID
     
     return user_id
-
-
-def get_user_name_from_callback(callback: CallbackQuery, user_id: int) -> str:
-    """Получить имя пользователя из callback."""
-    if not callback:
-        return "Пользователь"
-    
-    # Если это бот — пробуем получить имя из reply
-    if BOT_ID and callback.from_user.id == BOT_ID:
-        if callback.message and callback.message.reply_to_message:
-            reply_user = callback.message.reply_to_message.from_user
-            if reply_user:
-                return reply_user.first_name or "Пользователь"
-    
-    return callback.from_user.first_name or "Пользователь"
 
 
 # ==================== ПРОВЕРКА АДМИНА ====================
@@ -473,13 +453,9 @@ async def back_to_menu(callback: CallbackQuery):
     if not callback or not callback.message:
         return
     
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка определения пользователя", show_alert=True)
-        return
-    
+    user_id = get_real_user_id(callback)
     chat_id = callback.message.chat.id if callback.message.chat else user_id
-    first_name = get_user_name_from_callback(callback, user_id)
+    first_name = callback.from_user.first_name or "Пользователь"
     
     text, keyboard = await render_main_menu(user_id, chat_id, first_name)
     
@@ -542,132 +518,85 @@ def load_all_routers():
 
 # ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ ====================
 
-async def safe_menu_callback(callback: CallbackQuery, user_id: int, handler_func, error_msg: str = "❌ Ошибка"):
-    """Безопасный вызов хендлера меню с подменой from_user."""
-    if not callback or not callback.message:
-        return
-    
-    try:
-        # Создаём фейковое сообщение с правильным from_user
-        fake_message = callback.message
-        original_user = fake_message.from_user
-        
-        # Получаем имя пользователя
-        first_name = get_user_name_from_callback(callback, user_id)
-        
-        fake_message.from_user = types.User(
-            id=user_id, 
-            is_bot=False, 
-            first_name=first_name,
-            username=None
-        )
-        
-        await handler_func(fake_message)
-        fake_message.from_user = original_user
-        
-    except Exception as e:
-        logger.error(f"{error_msg}: {e}", exc_info=True)
-        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard(), parse_mode=ParseMode.HTML)
-    finally:
-        await callback.answer()
-
-
 @dp.callback_query(F.data == "menu_vip")
 async def menu_vip(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    from handlers.vip import cmd_vip
-    await safe_menu_callback(callback, user_id, cmd_vip, "VIP error")
+    try:
+        from handlers.vip import cmd_vip
+        await cmd_vip(callback.message)
+    except Exception as e:
+        logger.error(f"VIP error: {e}")
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_profile")
 async def menu_profile(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    from handlers.profile import cmd_profile
-    await safe_menu_callback(callback, user_id, cmd_profile, "Profile error")
+    try:
+        from handlers.profile import cmd_profile
+        await cmd_profile(callback.message)
+    except Exception as e:
+        logger.error(f"Profile error: {e}")
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_balance")
 async def menu_balance(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    from handlers.economy import cmd_balance
-    await safe_menu_callback(callback, user_id, cmd_balance, "Balance error")
+    try:
+        from handlers.economy import cmd_balance
+        await cmd_balance(callback.message)
+    except Exception as e:
+        logger.error(f"Balance error: {e}")
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_rank")
 async def menu_rank(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.ranks import cmd_rank
-        await safe_menu_callback(callback, user_id, cmd_rank, "Rank error")
+        await cmd_rank(callback.message)
     except Exception as e:
         logger.error(f"Rank error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_xo")
 async def menu_xo(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.tictactoe import cmd_xo
-        await safe_menu_callback(callback, user_id, cmd_xo, "XO error")
+        await cmd_xo(callback.message)
     except Exception as e:
         logger.error(f"XO error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_stats")
 async def menu_stats(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.stats import cmd_stats
-        await safe_menu_callback(callback, user_id, cmd_stats, "Stats error")
+        await cmd_stats(callback.message)
     except Exception as e:
         logger.error(f"Stats error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_all")
 async def menu_all(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.tag import cmd_all
-        await safe_menu_callback(callback, user_id, cmd_all, "Tag all error")
+        await cmd_all(callback.message)
     except Exception as e:
         logger.error(f"Tag all error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_ref")
 async def menu_ref(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.referral import ref_menu_callback
         await ref_menu_callback(callback)
@@ -679,33 +608,25 @@ async def menu_ref(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_relations")
 async def menu_relations(callback: CallbackQuery):
-    if not callback or not callback.message:
-        return
-    await safe_callback_edit(callback, "💕 <b>ОТНОШЕНИЯ</b>\n\nВ разработке.", get_back_keyboard())
+    await callback.message.edit_text("💕 <b>ОТНОШЕНИЯ</b>\n\nВ разработке.", parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_groups")
 async def menu_groups(callback: CallbackQuery):
-    if not callback or not callback.message:
-        return
-    await safe_callback_edit(callback, "👥 <b>ГРУППЫ</b>\n\nВ разработке.", get_back_keyboard())
+    await callback.message.edit_text("👥 <b>ГРУППЫ</b>\n\nВ разработке.", parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_rp")
 async def menu_rp(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.smart_commands import cmd_my_custom_rp
-        await safe_menu_callback(callback, user_id, cmd_my_custom_rp, "RP error")
+        await cmd_my_custom_rp(callback.message)
     except Exception as e:
         logger.error(f"RP error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_tags")
@@ -721,83 +642,64 @@ async def menu_tags(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_topchats")
 async def menu_topchats(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.rating import cmd_top_chats
-        await safe_menu_callback(callback, user_id, cmd_top_chats, "Top chats error")
+        await cmd_top_chats(callback.message)
     except Exception as e:
         logger.error(f"Top chats error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_privacy")
 async def menu_privacy(callback: CallbackQuery):
-    if not callback or not callback.message:
-        return
     text = "🔒 <b>ПОЛИТИКА</b>\n\n• Telegram ID\n• Имя\n• Баланс\n• Статистика\n\nУдаление: /delete_my_data"
-    await safe_callback_edit(callback, text, get_back_keyboard())
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_help")
 async def menu_help(callback: CallbackQuery):
-    if not callback or not callback.message:
-        return
     await cmd_help(callback.message)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_donate")
 async def menu_donate(callback: CallbackQuery):
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
     try:
         from handlers.economy import cmd_donate as economy_donate
-        await safe_menu_callback(callback, user_id, economy_donate, "Donate error")
+        await economy_donate(callback.message)
     except Exception as e:
         logger.error(f"Donate error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
-        await callback.answer()
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_feedback")
 async def menu_feedback(callback: CallbackQuery):
-    if not callback or not callback.message:
-        return
     text = "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\nНапишите: <code>/feedback ваш текст</code>"
-    await safe_callback_edit(callback, text, get_back_keyboard())
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 
-# 🔥 ИСПРАВЛЕННЫЙ ОБРАБОТЧИК АДМИН-ПАНЕЛИ
 @dp.callback_query(F.data == "menu_admin")
 async def menu_admin(callback: CallbackQuery):
-    """Админ-панель — исправлено определение пользователя."""
+    """Админ-панель — прямой вызов."""
     if not callback or not callback.message:
         return
     
-    user_id = get_real_user_id_from_callback(callback)
-    if user_id is None:
-        await callback.answer("❌ Ошибка определения пользователя", show_alert=True)
-        return
-    
+    user_id = get_real_user_id(callback)
     logger.info(f"🔥 ADMIN PANEL: user_id={user_id}, OWNER_ID={OWNER_ID}")
     
-    if not is_super_admin(user_id):
-        await callback.answer(f"❌ Доступ запрещён", show_alert=True)
+    if user_id != OWNER_ID and user_id not in SUPER_ADMIN_IDS:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     
     try:
         from handlers.admin import get_admin_menu_keyboard, get_admin_panel_text
         
         user = await get_user_cached(user_id)
-        first_name = user.get('first_name') if user else get_user_name_from_callback(callback, user_id)
+        first_name = user.get('first_name') if user else callback.from_user.first_name or "Владелец"
         
         text = get_admin_panel_text(user_id, first_name, callback.message.chat.id)
         await callback.message.edit_text(
@@ -815,7 +717,7 @@ async def menu_admin(callback: CallbackQuery):
 # ==================== УПРАВЛЕНИЕ ФОНОВЫМИ ЗАДАЧАМИ ====================
 
 async def start_all_background_tasks():
-    """Запуск всех фоновых задач с отслеживанием."""
+    """Запуск всех фоновых задач."""
     logger.info("🔄 Starting background tasks...")
     
     try:
@@ -884,12 +786,11 @@ async def on_startup():
     global START_TIME, BOT_ID
     START_TIME = time.time()
     
-    # 🔥 Получаем ID бота
     me = await bot.get_me()
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
     
-    logger.info("🚀 NEXUS Bot v6.0.7-user-fix-final starting...")
+    logger.info("🚀 NEXUS Bot v6.0.9-final starting...")
     
     setup_bot_for_modules()
     load_all_routers()
@@ -942,7 +843,7 @@ async def on_shutdown():
 
 @dp.message()
 async def debug_unhandled(message: Message):
-    """Логирование необработанных сообщений для отладки."""
+    """Логирование необработанных сообщений."""
     if not message:
         return
     text = message.text[:100] if message.text else "НЕ ТЕКСТ"
