@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/relationships.py
-# ВЕРСИЯ: 2.1.0-free
+# ВЕРСИЯ: 2.2.0-free
 # ОПИСАНИЕ: Система отношений — ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ
 # ============================================
 
@@ -10,7 +10,7 @@ import html
 import logging
 import random
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -86,6 +86,12 @@ def get_cancel_keyboard():
     )
     return keyboard
 
+def get_back_inline_keyboard(callback_data: str = "back_to_relations") -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура для возврата"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
+    ])
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
@@ -113,15 +119,13 @@ async def get_marriage_partner(user_id: int) -> Optional[int]:
         logger.error(f"Get marriage partner error: {e}")
     return None
 
-# ==================== ВХОД В РАЗДЕЛ ОТНОШЕНИЙ ====================
+# ==================== ВХОД В РАЗДЕЛ ОТНОШЕНИЙ (РАБОТАЕТ И ОТ MESSAGE, И ОТ CALLBACK) ====================
 
-@router.message(lambda message: message.text == "💕 Отношения")
-async def relations_menu(message: Message, state: FSMContext):
-    """Вход в раздел отношений"""
-    await state.clear()
-    
+async def relations_menu_entry(user_id: int, message: Message) -> None:
+    """Вход в раздел отношений (основная логика)"""
+    # Очищаем состояние
     # Проверяем, есть ли брак
-    partner_id = await get_marriage_partner(message.from_user.id)
+    partner_id = await get_marriage_partner(user_id)
     
     if partner_id:
         partner_name = await get_user_name(partner_id)
@@ -144,6 +148,28 @@ async def relations_menu(message: Message, state: FSMContext):
         )
     
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_relations_keyboard())
+
+@router.message(lambda message: message.text == "💕 Отношения")
+async def relations_menu_from_message(message: Message, state: FSMContext):
+    """Вход в раздел отношений из Message (кнопка в меню)"""
+    await state.clear()
+    await relations_menu_entry(message.from_user.id, message)
+
+@router.callback_query(F.data == "menu_relations")
+async def relations_menu_from_callback(callback: CallbackQuery):
+    """Вход в раздел отношений из CallbackQuery (кнопка в инлайн-меню)"""
+    await callback.answer()
+    # Создаём фейковое сообщение
+    class FakeMessage:
+        def __init__(self, callback):
+            self.from_user = callback.from_user
+            self.chat = callback.message.chat
+            self.bot = callback.bot
+        async def answer(self, *args, **kwargs):
+            pass
+    
+    fake_message = FakeMessage(callback)
+    await relations_menu_entry(callback.from_user.id, fake_message)
 
 # ==================== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ДЕЙСТВИЙ ====================
 
@@ -311,14 +337,11 @@ async def marry_accept(callback: CallbackQuery):
             f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\n\n"
             f"💍 <b>{safe_html_escape(proposer_name)}</b> и <b>{safe_html_escape(acceptor_name)}</b> теперь в браке!\n\n"
             f"💕 Совет да любовь!",
-            parse_mode=ParseMode.HTML
-        )
-        await callback.message.answer(
-            "💍 Вы можете вернуться в раздел отношений через главное меню.",
-            reply_markup=get_relations_keyboard()
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_inline_keyboard("menu_relations")
         )
     else:
-        await callback.message.edit_text("❌ Ошибка создания брака.")
+        await callback.message.edit_text("❌ Ошибка создания брака.", reply_markup=get_back_inline_keyboard("menu_relations"))
     
     await callback.answer()
 
@@ -327,13 +350,13 @@ async def marry_reject(callback: CallbackQuery):
     """Отклонить предложение брака"""
     if not callback:
         return
-    await callback.message.edit_text("💔 Предложение отклонено.", parse_mode=ParseMode.HTML)
+    await callback.message.edit_text("💔 Предложение отклонено.", parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard("menu_relations"))
     await callback.answer("❌ Отклонено")
 
 # ==================== РАЗВОД ====================
 
-@router.message(lambda message: message.text == "💔 РАЗВЕСТИСЬ" or message.data == "divorce")
-async def divorce_start(message: Message, state: FSMContext):
+@router.message(lambda message: message.text == "💔 РАЗВЕСТИСЬ")
+async def divorce_start(message: Message):
     """Начало развода"""
     user_id = message.from_user.id
     
@@ -366,7 +389,7 @@ async def divorce_confirm(callback: CallbackQuery):
     partner_id = await get_marriage_partner(user_id)
     if not partner_id:
         await callback.answer("❌ Вы не в браке!", show_alert=True)
-        await callback.message.edit_text("❌ Вы не в браке.")
+        await callback.message.edit_text("❌ Вы не в браке.", reply_markup=get_back_inline_keyboard("menu_relations"))
         return
     
     success = await db.end_relationship(user_id, partner_id, "marriage")
@@ -377,21 +400,18 @@ async def divorce_confirm(callback: CallbackQuery):
             f"💔 <b>РАЗВОД ОФОРМЛЕН</b>\n\n"
             f"Вы развелись с {safe_html_escape(partner_name)}.\n"
             f"Вы снова свободны!",
-            parse_mode=ParseMode.HTML
-        )
-        await callback.message.answer(
-            "💕 Вернуться в раздел отношений: /relations",
-            reply_markup=get_relations_keyboard()
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_inline_keyboard("menu_relations")
         )
     else:
-        await callback.message.edit_text("❌ Ошибка при разводе.")
+        await callback.message.edit_text("❌ Ошибка при разводе.", reply_markup=get_back_inline_keyboard("menu_relations"))
     
     await callback.answer()
 
 @router.callback_query(F.data == "divorce_cancel")
 async def divorce_cancel(callback: CallbackQuery):
     """Отмена развода"""
-    await callback.message.edit_text("✅ Развод отменён.", reply_markup=get_relations_keyboard())
+    await callback.message.edit_text("✅ Развод отменён.", reply_markup=get_back_inline_keyboard("menu_relations"))
     await callback.answer()
 
 # ==================== КОМАНДЫ (для обратной совместимости) ====================
@@ -399,7 +419,8 @@ async def divorce_cancel(callback: CallbackQuery):
 @router.message(Command("relations"))
 async def cmd_relations(message: Message, state: FSMContext):
     """Команда /relations — вход в раздел отношений"""
-    await relations_menu(message, state)
+    await state.clear()
+    await relations_menu_entry(message.from_user.id, message)
 
 @router.message(Command("marry"))
 async def cmd_marry(message: Message, state: FSMContext):
@@ -494,5 +515,6 @@ async def cancel_action(message: Message, state: FSMContext):
 async def back_button(message: Message, state: FSMContext):
     """Кнопка назад — возврат в главное меню"""
     await state.clear()
-    from handlers.start import start_command
-    await start_command(message, state)
+    # Возвращаемся в главное меню через команду /start
+    from bot import cmd_start
+    await cmd_start(message, None)
