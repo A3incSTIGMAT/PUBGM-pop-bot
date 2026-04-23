@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: utils/auto_delete.py
-# ВЕРСИЯ: 2.2.1-hardened
-# ОПИСАНИЕ: Утренняя очистка + приветствие + СТАТИСТИКА ПО ЧАТАМ — ИСПРАВЛЕНО
+# ВЕРСИЯ: 2.3.0-final
+# ОПИСАНИЕ: Утренняя очистка + сводка дня + анализ тем — ФИНАЛЬНАЯ ВЕРСИЯ
 # ============================================
 
 import asyncio
@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
 
-from config import ADMIN_IDS, MORNING_CLEANUP_HOUR, DONATE_URL
+from config import ADMIN_IDS, MORNING_CLEANUP_HOUR
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,16 @@ CLEANUP_HOUR = MORNING_CLEANUP_HOUR if MORNING_CLEANUP_HOUR else 10
 # Задержки для API-запросов
 DELETE_DELAY = 0.05
 SEND_DELAY = 0.1
-RATE_LIMIT_RETRY_DELAY = 60  # секунды при получении 429
+RATE_LIMIT_RETRY_DELAY = 60
 
-# Тематические ключевые слова для анализа общения (с границами слов)
+# Тематические ключевые слова с границами слов
 TOPIC_KEYWORDS = {
-    "🎮 Игры": [r"\bигра\b", r"\bxo\b", r"\bкрестики\b", r"\bнолики\b", r"\bпобеда\b", r"\bставка\b", r"\bбот\b", r"\bсложность\b"],
-    "💰 Экономика": [r"\bбаланс\b", r"\bмонеты\b", r"\bdaily\b", r"\bбонус\b", r"\bперевод\b", r"\bncoin\b", r"\bзаработать\b"],
-    "👑 VIP и ранги": [r"\bvip\b", r"\bстатус\b", r"\bпривилегия\b", r"\bранг\b", r"\bуровень\b", r"\bxp\b", r"\bопыт\b"],
-    "💕 Отношения": [r"\bлюбовь\b", r"\bпара\b", r"\bсемья\b", r"\bотношения\b", r"\bбрак\b", r"\bсвадьба\b"],
+    "🎮 Игры": [r"\bигра\b", r"\bxo\b", r"\bкрестики\b", r"\bнолики\b", r"\bпобеда\b", r"\bставка\b", r"\bбот\b"],
+    "💰 Экономика": [r"\bбаланс\b", r"\bмонеты\b", r"\bdaily\b", r"\bбонус\b", r"\bперевод\b", r"\bncoin\b"],
+    "👑 VIP и ранги": [r"\bvip\b", r"\bстатус\b", r"\bранг\b", r"\bуровень\b", r"\bxp\b", r"\bопыт\b"],
+    "💕 Отношения": [r"\bлюбовь\b", r"\bпара\b", r"\bсемья\b", r"\bотношения\b", r"\bбрак\b"],
     "🏷️ Теги": [r"\bтег\b", r"\bкатегория\b", r"\bподписка\b", r"\bуведомление\b"],
-    "🤖 Бот": [r"\bnexus\b", r"\bнексус\b", r"\bкоманда\b", r"\bфункция\b", r"\bбаг\b", r"\bошибка\b"],
+    "🤖 Бот": [r"\bnexus\b", r"\bнексус\b", r"\bкоманда\b", r"\bфункция\b", r"\bбаг\b"],
     "💬 Общение": [r"\bпривет\b", r"\bпока\b", r"\bспасибо\b", r"\bдоброе\b", r"\bутро\b", r"\bвечер\b"],
 }
 
@@ -78,10 +78,6 @@ class MessageTracker:
         async with self._lock:
             return list(self._active_chats)
     
-    async def get_active_chats_count(self) -> int:
-        async with self._lock:
-            return len(self._active_chats)
-    
     async def sync_chats_from_db(self, db) -> None:
         try:
             if db and hasattr(db, 'get_all_chats_with_bot'):
@@ -97,13 +93,11 @@ class MessageTracker:
 
 _tracker = MessageTracker()
 _shutdown_event = asyncio.Event()
-_background_tasks: Set[asyncio.Task] = set()
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасное экранирование HTML."""
     if text is None:
         return ""
     try:
@@ -113,87 +107,65 @@ def safe_html_escape(text: Optional[str]) -> str:
 
 
 def format_top_name(user: Optional[Dict]) -> str:
-    """Форматирование имени пользователя с защитой от ошибок."""
     if user is None or not isinstance(user, dict):
         return "Игрок"
-    
     username = user.get("username")
     if username:
         return f"@{safe_html_escape(str(username))}"
-    
     first_name = user.get("first_name")
     if first_name:
         escaped = safe_html_escape(str(first_name))
         return escaped[:20] if len(escaped) > 20 else escaped
-    
     return "Игрок"
 
 
 def format_number(num: Any) -> str:
-    """Безопасное форматирование числа с разделителями."""
     if num is None:
         return "0"
     try:
-        num_int = int(num)
-        return f"{num_int:,}".replace(",", " ")
+        return f"{int(num):,}".replace(",", " ")
     except (ValueError, TypeError, OverflowError):
         return "0"
 
 
-async def _safe_create_task(coro) -> asyncio.Task:
-    """Создание задачи с автоматическим отслеживанием и очисткой."""
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    return task
-
-
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, parse_mode: str = "HTML", max_retries: int = 3) -> bool:
-    """Отправка сообщения с обработкой лимитов Telegram."""
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, max_retries: int = 3) -> bool:
+    """Отправка сообщения с обработкой лимитов."""
     for attempt in range(max_retries):
         try:
-            await bot.send_message(chat_id, text, parse_mode=parse_mode)
+            await bot.send_message(chat_id, text, parse_mode="HTML")
             return True
         except TelegramRetryAfter as e:
             wait_time = min(e.retry_after, RATE_LIMIT_RETRY_DELAY)
             logger.warning(f"⏳ Rate limited, waiting {wait_time}s")
             await asyncio.sleep(wait_time)
         except TelegramForbiddenError:
-            logger.debug(f"Bot was kicked from chat {chat_id}")
+            logger.debug(f"Bot kicked from chat {chat_id}")
             return False
         except TelegramAPIError as e:
             if attempt == max_retries - 1:
-                logger.error(f"Failed to send to {chat_id} after {max_retries} attempts: {e}")
+                logger.error(f"Failed to send to {chat_id}: {e}")
                 return False
             await asyncio.sleep(1)
     return False
 
 
 async def analyze_chat_topics(chat_id: int, db) -> List[Tuple[str, int]]:
-    """Анализ тем общения в конкретном чате с точным сопоставлением слов."""
-    if db is None or not hasattr(db, 'get_chat_top_words'):
-        logger.warning(f"⚠️ DB or method not available for topic analysis in chat {chat_id}")
+    """Анализ тем общения в чате."""
+    if db is None:
         return []
     
     try:
         words = await db.get_chat_top_words(chat_id, 100)
-        
-        if not words or not isinstance(words, list):
+        if not words:
             return []
         
         topic_scores = {topic: 0 for topic in TOPIC_KEYWORDS}
         
-        for item in words:
-            if not isinstance(item, (list, tuple)) or len(item) < 2:
-                continue
-            word, count = item[0], item[1]
-            if not isinstance(word, str) or not isinstance(count, (int, float)):
-                continue
-            
+        for word, count in words:
             word_lower = word.lower()
             for topic, patterns in TOPIC_KEYWORDS.items():
                 if any(re.search(pattern, word_lower, re.IGNORECASE) for pattern in patterns):
-                    topic_scores[topic] += int(count)
+                    topic_scores[topic] += count
                     break
         
         sorted_topics = sorted(topic_scores.items(), key=lambda x: x[1], reverse=True)
@@ -205,7 +177,7 @@ async def analyze_chat_topics(chat_id: int, db) -> List[Tuple[str, int]]:
 
 
 async def get_chat_stats_for_greeting(chat_id: int, db) -> Dict[str, Any]:
-    """Получить статистику конкретного чата для утреннего приветствия."""
+    """Получить статистику конкретного чата."""
     if db is None:
         return {}
     
@@ -219,64 +191,39 @@ async def get_chat_stats_for_greeting(chat_id: int, db) -> Dict[str, Any]:
     }
     
     try:
-        # Статистика сообщений
         if hasattr(db, 'get_chat_daily_stats'):
             stats = await db.get_chat_daily_stats(chat_id)
             if stats and isinstance(stats, dict):
                 result['total_messages'] = stats.get('total_messages', 0) or 0
                 result['unique_users'] = stats.get('unique_users', 0) or 0
         
-        # Топы по балансу
         if hasattr(db, 'get_chat_top_balance'):
-            top_balance = await db.get_chat_top_balance(chat_id, 3)
-            if top_balance and isinstance(top_balance, list):
-                result['top_balance'] = [u for u in top_balance if isinstance(u, dict)]
+            result['top_balance'] = await db.get_chat_top_balance(chat_id, 3) or []
         
-        # Топы по XO
         if hasattr(db, 'get_chat_top_xo'):
-            top_xo = await db.get_chat_top_xo(chat_id, 3)
-            if top_xo and isinstance(top_xo, list):
-                result['top_xo'] = [u for u in top_xo if isinstance(u, dict)]
+            result['top_xo'] = await db.get_chat_top_xo(chat_id, 3) or []
         
-        # Топы по сообщениям
         if hasattr(db, 'get_chat_top_messages'):
-            top_messages = await db.get_chat_top_messages(chat_id, 3)
-            if top_messages and isinstance(top_messages, list):
-                result['top_messages'] = [u for u in top_messages if isinstance(u, dict)]
+            result['top_messages'] = await db.get_chat_top_messages(chat_id, 3) or []
         
-        # Анализ тем
         result['topics'] = await analyze_chat_topics(chat_id, db)
         
-        return result
-        
     except Exception as e:
-        logger.error(f"Error getting chat stats for {chat_id}: {e}")
-        return result
+        logger.error(f"Error getting stats for chat {chat_id}: {e}")
+    
+    return result
 
 
-# ==================== ПУБЛИЧНЫЕ ФУНКЦИИ ====================
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
-async def track_and_delete_bot_message(
-    bot: Bot,
-    chat_id: int,
-    user_id: int,
-    message_id: int,
-    delay: Optional[int] = None
-) -> None:
-    """Отслеживание сообщения бота для последующей очистки."""
+async def track_and_delete_bot_message(bot: Bot, chat_id: int, user_id: int, message_id: int, delay: Optional[int] = None) -> None:
     if bot is None or chat_id is None or message_id is None:
         return
     await _tracker.add_pending(chat_id, message_id)
     await _tracker.add_active_chat(chat_id)
 
 
-async def delete_bot_message_after(
-    bot: Bot,
-    chat_id: int,
-    message_id: int,
-    delay: int = 30
-) -> None:
-    """Удалить сообщение бота с задержкой."""
+async def delete_bot_message_after(bot: Bot, chat_id: int, message_id: int, delay: int = 30) -> None:
     if bot is None or chat_id is None or message_id is None:
         return
     await _tracker.add_active_chat(chat_id)
@@ -290,13 +237,13 @@ async def delete_bot_message_after(
                 await bot.delete_message(chat_id, message_id)
             except TelegramAPIError:
                 pass
-        await _safe_create_task(_delayed_delete())
+        asyncio.create_task(_delayed_delete())
     else:
         await _tracker.add_pending(chat_id, message_id)
 
 
 async def delete_bot_messages(bot: Bot, chat_id: int) -> int:
-    """Удалить все отслеженные сообщения бота в конкретном чате."""
+    """Удалить все сообщения бота в конкретном чате."""
     if bot is None or chat_id is None:
         return 0
     
@@ -315,56 +262,68 @@ async def delete_bot_messages(bot: Bot, chat_id: int) -> int:
         except TelegramAPIError:
             pass
     
-    logger.info(f"🗑️ Deleted {deleted} messages in chat {chat_id}")
+    if deleted > 0:
+        logger.info(f"🗑️ Deleted {deleted} messages in chat {chat_id}")
     return deleted
 
 
-async def send_daily_summary(bot: Bot, chat_id: int) -> None:
-    """Отправить сводку дня в конкретный чат."""
+async def send_daily_summary(bot: Bot, chat_id: int) -> bool:
+    """
+    Отправить сводку дня в КОНКРЕТНЫЙ чат.
+    🔥 ВСЕГДА отправляет сообщение, даже если статистика пустая!
+    Возвращает True если отправлено успешно.
+    """
     if bot is None or chat_id is None:
-        return
+        return False
     
     from database import db
     
     try:
         stats = await get_chat_stats_for_greeting(chat_id, db)
         
-        if not stats or (stats['total_messages'] == 0 and stats['unique_users'] == 0):
-            logger.debug(f"No stats to report for chat {chat_id}")
-            return
-        
-        text = f"📊 <b>ИТОГИ ДНЯ В ЧАТЕ</b>\n\n"
-        text += f"💬 Сообщений: <b>{stats['total_messages']}</b>\n"
-        text += f"👥 Активных участников: <b>{stats['unique_users']}</b>\n\n"
-        
-        if stats['top_messages']:
-            text += "<b>💬 ТОП-3 ПО СООБЩЕНИЯМ:</b>\n"
-            medals = ["🥇", "🥈", "🥉"]
-            for i, u in enumerate(stats['top_messages'][:3]):
-                name = format_top_name(u)
-                msgs = u.get('messages_total', u.get('message_count', 0)) or 0
-                text += f"{medals[i]} {name} — {msgs} сообщ.\n"
-            text += "\n"
-        
-        if stats['topics']:
-            text += "<b>📝 О ЧЁМ ГОВОРИЛИ:</b>\n"
-            for topic, count in stats['topics'][:5]:
-                text += f"• {topic} — {count} упоминаний\n"
-            text += "\n"
+        # 🔥 ВСЕГДА формируем текст
+        if not stats or stats.get('total_messages', 0) == 0:
+            text = (
+                "📊 <b>ИТОГИ ДНЯ В ЧАТЕ</b>\n\n"
+                "💬 Сообщений: <b>0</b>\n"
+                "👥 Активных участников: <b>0</b>\n\n"
+                "😴 <i>Похоже, вчера все отдыхали!</i>"
+            )
+        else:
+            text = f"📊 <b>ИТОГИ ДНЯ В ЧАТЕ</b>\n\n"
+            text += f"💬 Сообщений: <b>{stats['total_messages']}</b>\n"
+            text += f"👥 Активных участников: <b>{stats['unique_users']}</b>\n\n"
+            
+            if stats.get('top_messages'):
+                text += "<b>💬 ТОП-3 ПО СООБЩЕНИЯМ:</b>\n"
+                medals = ["🥇", "🥈", "🥉"]
+                for i, u in enumerate(stats['top_messages'][:3]):
+                    name = format_top_name(u)
+                    msgs = u.get('messages_total', u.get('message_count', 0)) or 0
+                    text += f"{medals[i]} {name} — {msgs} сообщ.\n"
+                text += "\n"
+            
+            if stats.get('topics'):
+                text += "<b>📝 О ЧЁМ ГОВОРИЛИ:</b>\n"
+                for topic, count in stats['topics'][:5]:
+                    text += f"• {topic} — {count} упоминаний\n"
+                text += "\n"
         
         await _send_with_retry(bot, chat_id, text)
-        logger.info(f"Sent daily summary to chat {chat_id}")
+        logger.info(f"📊 Сводка отправлена в чат {chat_id}")
+        return True
         
     except TelegramForbiddenError:
-        logger.warning(f"Bot was kicked from chat {chat_id}")
+        logger.warning(f"🚫 Бот заблокирован в чате {chat_id}")
+        return False
     except Exception as e:
-        logger.error(f"Error sending daily summary to {chat_id}: {e}")
+        logger.error(f"❌ Ошибка отправки сводки в чат {chat_id}: {e}")
+        return False
 
 
 async def morning_cleanup_and_greeting(bot: Bot) -> None:
-    """Утренняя очистка и отправка приветствия в каждый чат отдельно."""
+    """Утренняя очистка и отправка приветствия В КАЖДЫЙ ЧАТ ОТДЕЛЬНО."""
     if bot is None:
-        logger.error("Bot is None in morning_cleanup")
         return
     
     from database import db
@@ -372,9 +331,9 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
     await _tracker.sync_chats_from_db(db)
     
     active_chats = await _tracker.get_active_chats()
-    logger.info(f"🌅 Starting morning cleanup for {len(active_chats)} chats")
+    logger.info(f"🌅 Утренняя очистка для {len(active_chats)} чатов")
     
-    # Удаляем все накопившиеся сообщения
+    # 1. Удаление сообщений
     pending = await _tracker.get_and_clear_pending()
     deleted = 0
     for chat_id, message_id in pending:
@@ -387,9 +346,9 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
         except TelegramAPIError:
             pass
     
-    logger.info(f"🗑️ Deleted {deleted} total messages")
+    logger.info(f"🗑️ Удалено {deleted} сообщений")
     
-    # Отправляем приветствие в каждый чат с уникальной статистикой
+    # 2. Отправка приветствия в каждый чат
     sent = 0
     failed = 0
     
@@ -402,40 +361,35 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
             
             greeting = "☀️ <b>ДОБРОЕ УТРО, NEXUS!</b>\n\n"
             
-            if stats:
-                if stats.get('top_balance'):
-                    greeting += "<b>🏆 ТОП-3 ПО БАЛАНСУ:</b>\n"
-                    medals = ["🥇", "🥈", "🥉"]
-                    for i, u in enumerate(stats['top_balance'][:3]):
-                        name = format_top_name(u)
-                        balance = u.get('balance', 0) or 0
-                        greeting += f"{medals[i]} {name} — {format_number(balance)} NCoin\n"
-                    greeting += "\n"
-                
-                if stats.get('top_xo'):
-                    greeting += "<b>🎮 ТОП-3 ПО КРЕСТИКАМ-НОЛИКАМ:</b>\n"
-                    medals = ["🥇", "🥈", "🥉"]
-                    for i, u in enumerate(stats['top_xo'][:3]):
-                        name = format_top_name(u)
-                        wins = u.get('wins', 0) or 0
-                        games = u.get('games_played', 0) or 0
-                        greeting += f"{medals[i]} {name} — {wins} побед ({games} игр)\n"
-                    greeting += "\n"
-                
-                if stats.get('top_messages'):
-                    greeting += "<b>💬 ТОП-3 ПО СООБЩЕНИЯМ:</b>\n"
-                    medals = ["🥇", "🥈", "🥉"]
-                    for i, u in enumerate(stats['top_messages'][:3]):
-                        name = format_top_name(u)
-                        msgs = u.get('messages_total', u.get('message_count', 0)) or 0
-                        greeting += f"{medals[i]} {name} — {msgs} сообщ.\n"
-                    greeting += "\n"
-                
-                if stats.get('topics'):
-                    greeting += "<b>📝 О ЧЁМ ГОВОРИЛИ ВЧЕРА:</b>\n"
-                    for topic, count in stats['topics'][:3]:
-                        greeting += f"• {topic} — {count} упоминаний\n"
-                    greeting += "\n"
+            if stats.get('top_balance'):
+                greeting += "<b>🏆 ТОП-3 ПО БАЛАНСУ:</b>\n"
+                medals = ["🥇", "🥈", "🥉"]
+                for i, u in enumerate(stats['top_balance'][:3]):
+                    name = format_top_name(u)
+                    greeting += f"{medals[i]} {name} — {format_number(u.get('balance', 0))} NCoin\n"
+                greeting += "\n"
+            
+            if stats.get('top_xo'):
+                greeting += "<b>🎮 ТОП-3 ПО КРЕСТИКАМ-НОЛИКАМ:</b>\n"
+                medals = ["🥇", "🥈", "🥉"]
+                for i, u in enumerate(stats['top_xo'][:3]):
+                    name = format_top_name(u)
+                    greeting += f"{medals[i]} {name} — {u.get('wins', 0)} побед ({u.get('games_played', 0)} игр)\n"
+                greeting += "\n"
+            
+            if stats.get('top_messages'):
+                greeting += "<b>💬 ТОП-3 ПО СООБЩЕНИЯМ:</b>\n"
+                medals = ["🥇", "🥈", "🥉"]
+                for i, u in enumerate(stats['top_messages'][:3]):
+                    name = format_top_name(u)
+                    greeting += f"{medals[i]} {name} — {u.get('messages_total', u.get('message_count', 0))} сообщ.\n"
+                greeting += "\n"
+            
+            if stats.get('topics'):
+                greeting += "<b>📝 О ЧЁМ ГОВОРИЛИ ВЧЕРА:</b>\n"
+                for topic, count in stats['topics'][:3]:
+                    greeting += f"• {topic} — {count} упоминаний\n"
+                greeting += "\n"
             
             greeting += (
                 "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -446,59 +400,46 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
                 "Удачного дня! 🚀"
             )
             
-            msg = await _send_with_retry(bot, chat_id, greeting)
-            if msg:
-                # Если отправка успешна, добавляем сообщение в очередь на очистку
-                # (реализация зависит от того, возвращает ли _send_with_retry объект сообщения)
+            success = await _send_with_retry(bot, chat_id, greeting)
+            if success:
                 sent += 1
+            else:
+                failed += 1
             
             await asyncio.sleep(SEND_DELAY)
             
         except TelegramForbiddenError:
-            logger.debug(f"Bot was kicked from chat {chat_id}")
             failed += 1
         except Exception as e:
-            logger.error(f"Failed to send greeting to {chat_id}: {e}")
+            logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
             failed += 1
     
-    logger.info(f"🌅 Morning cleanup completed: {sent}/{len(active_chats)} greetings sent")
+    logger.info(f"🌅 Утренняя очистка: {sent}/{len(active_chats)} приветствий, {failed} ошибок")
     
-    # Отчёт админам
-    await _send_admin_report(bot, deleted, sent, failed, len(active_chats))
-
-
-async def _send_admin_report(bot: Bot, deleted: int, sent: int, failed: int, total: int) -> None:
-    """Отправить отчёт об очистке администраторам."""
-    if not ADMIN_IDS:
-        return
-    
-    report = (
-        f"✅ <b>УТРЕННЯЯ ОЧИСТКА ЗАВЕРШЕНА!</b>\n\n"
-        f"🗑️ Удалено сообщений: {deleted}\n"
-        f"📨 Отправлено приветствий: {sent}/{total} чатов\n"
-        f"❌ Ошибок отправки: {failed}\n"
-        f"⏰ Время: {datetime.now(MSK_OFFSET).strftime('%H:%M:%S')}"
-    )
-    
-    for admin_id in ADMIN_IDS:
-        if admin_id is None:
-            continue
-        try:
-            await _send_with_retry(bot, admin_id, report)
-        except TelegramForbiddenError:
-            logger.debug(f"Admin {admin_id} blocked the bot")
-        except Exception as e:
-            logger.warning(f"Failed to send report to admin {admin_id}: {e}")
-        # Продолжаем отправку остальным админам независимо от ошибок
+    # 3. Отчёт админам
+    if ADMIN_IDS:
+        report = (
+            f"✅ <b>УТРЕННЯЯ ОЧИСТКА ЗАВЕРШЕНА!</b>\n\n"
+            f"🗑️ Удалено сообщений: {deleted}\n"
+            f"📨 Отправлено приветствий: {sent}/{len(active_chats)}\n"
+            f"❌ Ошибок: {failed}\n"
+            f"⏰ Время: {datetime.now(MSK_OFFSET).strftime('%H:%M:%S')}"
+        )
+        for admin_id in ADMIN_IDS:
+            if admin_id is None:
+                continue
+            try:
+                await _send_with_retry(bot, admin_id, report)
+            except Exception:
+                pass
 
 
 async def schedule_morning_cleanup(bot: Bot) -> None:
     """Планировщик ежедневной утренней очистки."""
     if bot is None:
-        logger.error("Bot is None in schedule_morning_cleanup")
         return
     
-    logger.info(f"⏰ Morning cleanup scheduler started (target hour: {CLEANUP_HOUR}:00 MSK)")
+    logger.info(f"⏰ Планировщик запущен (очистка в {CLEANUP_HOUR}:00 МСК)")
     
     while not _shutdown_event.is_set():
         try:
@@ -509,12 +450,10 @@ async def schedule_morning_cleanup(bot: Bot) -> None:
                 next_run += timedelta(days=1)
             
             wait_seconds = (next_run - now).total_seconds()
-            hours = wait_seconds / 3600
-            logger.info(f"⏰ Next morning cleanup in {hours:.1f} hours (at {CLEANUP_HOUR}:00 MSK)")
+            logger.info(f"⏰ Следующая очистка через {wait_seconds/3600:.1f} ч")
             
             try:
                 await asyncio.wait_for(_shutdown_event.wait(), timeout=wait_seconds)
-                logger.info("Scheduler interrupted by shutdown")
                 break
             except asyncio.TimeoutError:
                 pass
@@ -525,65 +464,48 @@ async def schedule_morning_cleanup(bot: Bot) -> None:
             await morning_cleanup_and_greeting(bot)
                 
         except asyncio.CancelledError:
-            logger.info("Scheduler cancelled")
             break
         except Exception as e:
-            logger.error(f"Scheduler error: {e}", exc_info=True)
+            logger.error(f"Ошибка планировщика: {e}")
             await asyncio.sleep(3600)
     
-    logger.info("Morning cleanup scheduler stopped")
+    logger.info("Планировщик остановлен")
 
 
 def signal_shutdown() -> None:
-    """Сигнализирует о необходимости завершения."""
     _shutdown_event.set()
 
 
 async def add_active_chat(chat_id: int) -> None:
-    """Добавить чат в список активных."""
     await _tracker.add_active_chat(chat_id)
 
 
 async def get_active_chats_count() -> int:
-    """Получить количество активных чатов."""
-    return await _tracker.get_active_chats_count()
+    return len(await _tracker.get_active_chats())
 
 
 async def cleanup_all_chats(bot: Bot) -> None:
-    """Глобальная очистка всех чатов."""
-    if bot is None:
-        return
-    
-    logger.info("🌍 Starting global cleanup...")
     await morning_cleanup_and_greeting(bot)
-    logger.info("✅ Global cleanup completed")
 
 
-# ==================== СОВМЕСТИМОСТЬ (заглушки с логированием) ====================
+# ==================== ЗАГЛУШКИ ДЛЯ СОВМЕСТИМОСТИ ====================
 
 async def get_chat_daily_stats(chat_id: int) -> Dict:
-    """Заглушка для совместимости — перенаправляет на реальный метод БД."""
-    logger.warning("⚠️ get_chat_daily_stats called as stub — use DB directly")
     from database import db
-    if db and hasattr(db, 'get_chat_daily_stats'):
+    if db:
         return await db.get_chat_daily_stats(chat_id) or {}
     return {'total_messages': 0, 'unique_users': 0}
 
 
 async def get_chat_top_words(chat_id: int, limit: int = 10) -> List:
-    """Заглушка для совместимости — перенаправляет на реальный метод БД."""
-    logger.warning("⚠️ get_chat_top_words called as stub — use DB directly")
     from database import db
-    if db and hasattr(db, 'get_chat_top_words'):
+    if db:
         return await db.get_chat_top_words(chat_id, limit) or []
     return []
 
 
 async def get_chat_active_users(chat_id: int, limit: int = 5) -> List:
-    """Заглушка для совместимости — перенаправляет на реальный метод БД."""
-    logger.warning("⚠️ get_chat_active_users called as stub — use DB directly")
     from database import db
-    if db and hasattr(db, 'get_chat_active_users'):
+    if db:
         return await db.get_chat_active_users(chat_id, limit) or []
     return []
-
