@@ -1,90 +1,105 @@
-"""
-Клавиатуры для NEXUS Chat Manager
-ПОЛНОСТЬЮ ПРОВЕРЕНО НА NULL
-"""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ============================================
+# ФАЙЛ: utils/keyboards.py
+# ВЕРСИЯ: 2.0.0-production
+# ОПИСАНИЕ: Клавиатуры NEXUS Chat Manager
+# ============================================
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Optional, List
 
 
+# ==================== ГЛАВНОЕ МЕНЮ ====================
+
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню — разбито на категории"""
+    """Главное меню бота."""
     if is_admin is None:
         is_admin = False
     
-    row1 = [
-        InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="vip"),
-        InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="profile")
+    keyboard = [
+        [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="menu_vip"),
+         InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="menu_balance"),
+         InlineKeyboardButton(text="🏆 РАНГ", callback_data="menu_rank")],
+        [InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="menu_xo"),
+         InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="menu_stats")],
+        [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="menu_all"),
+         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="menu_ref")],
+        [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="menu_relations"),
+         InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="menu_groups")],
+        [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="menu_rp"),
+         InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="menu_tags")],
+        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="menu_topchats"),
+         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="menu_privacy")],
+        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="menu_help"),
+         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="menu_donate")],
+        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="menu_feedback")]
     ]
-    
-    row2 = [
-        InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
-        InlineKeyboardButton(text="🏆 РАНГ", callback_data="rank_menu")
-    ]
-    
-    row3 = [
-        InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo"),
-        InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="stats")
-    ]
-    
-    row4 = [
-        InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
-        InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="ref_menu")
-    ]
-    
-    row5 = [
-        InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
-        InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")
-    ]
-    
-    row6 = [
-        InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="rp_menu"),
-        InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")
-    ]
-    
-    row7 = [
-        InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="top_chats"),
-        InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy")
-    ]
-    
-    row8 = [
-        InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="help"),
-        InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="donate")
-    ]
-    
-    row9 = [
-        InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")
-    ]
-    
-    keyboard = [row1, row2, row3, row4, row5, row6, row7, row8, row9]
     
     if is_admin:
-        keyboard.insert(3, [InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
+        keyboard.insert(3, [InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="menu_admin")])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def admin_panel_menu() -> InlineKeyboardMarkup:
-    """Панель администратора"""
+# ==================== УНИВЕРСАЛЬНЫЕ ====================
+
+def back_button(callback_data: str = "back_to_menu", text: str = "◀️ НАЗАД") -> InlineKeyboardMarkup:
+    """Кнопка возврата."""
+    if not callback_data:
+        callback_data = "back_to_menu"
+    if not text:
+        text = "◀️ НАЗАД"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=callback_data)]
+    ])
+
+
+def get_back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
+    """Алиас для back_button."""
+    return back_button(callback_data)
+
+
+def confirm_cancel_keyboard(confirm_data: str = "confirm", cancel_data: str = "back_to_menu") -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения/отмены."""
+    if not confirm_data:
+        confirm_data = "confirm"
+    if not cancel_data:
+        cancel_data = "back_to_menu"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=confirm_data),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data=cancel_data)]
+    ])
+
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+
+def admin_panel_menu() -> InlineKeyboardMarkup:
+    """Панель администратора."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ЧАТ", callback_data="admin_cleanup")],
+        [InlineKeyboardButton(text="🌅 СВОДКА ДНЯ", callback_data="admin_summary")],
+        [InlineKeyboardButton(text="📋 ВСЕ ЧАТЫ", callback_data="admin_chats")],
         [InlineKeyboardButton(text="🏷️ УПРАВЛЕНИЕ ТЭГАМИ", callback_data="tag_admin_menu")],
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data="stats_chat")],
+        [InlineKeyboardButton(text="🔄 ПЕРЕЗАГРУЗКА РП", callback_data="admin_reload")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
 
+# ==================== КАТЕГОРИИ МЕНЮ ====================
+
 def games_category_menu() -> InlineKeyboardMarkup:
-    """Подменю ИГРЫ — только крестики-нолики"""
+    """Подменю ИГРЫ."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 ИГРАТЬ", callback_data="game_xo")],
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="xo_stats")],
-        [InlineKeyboardButton(text="❓ ПРАВИЛА", callback_data="xo_help")],
+        [InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="game_xo")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
 
 def profile_category_menu() -> InlineKeyboardMarkup:
-    """Подменю ПРОФИЛЬ"""
+    """Подменю ПРОФИЛЬ."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 МОЙ ПРОФИЛЬ", callback_data="profile"),
          InlineKeyboardButton(text="🏆 МОЙ РАНГ", callback_data="rank_menu")],
@@ -95,7 +110,7 @@ def profile_category_menu() -> InlineKeyboardMarkup:
 
 
 def finance_category_menu() -> InlineKeyboardMarkup:
-    """Подменю ФИНАНСЫ"""
+    """Подменю ФИНАНСЫ."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
          InlineKeyboardButton(text="🎁 ЕЖЕДНЕВНЫЙ БОНУС", callback_data="daily")],
@@ -107,7 +122,7 @@ def finance_category_menu() -> InlineKeyboardMarkup:
 
 
 def social_category_menu() -> InlineKeyboardMarkup:
-    """Подменю СОЦИАЛКА"""
+    """Подменю СОЦИАЛКА."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="relationships_menu"),
          InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="groups_menu")],
@@ -117,7 +132,7 @@ def social_category_menu() -> InlineKeyboardMarkup:
 
 
 def notifications_category_menu() -> InlineKeyboardMarkup:
-    """Подменю ОПОВЕЩЕНИЯ"""
+    """Подменю ОПОВЕЩЕНИЯ."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="start_all"),
          InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="my_tags_menu")],
@@ -127,7 +142,7 @@ def notifications_category_menu() -> InlineKeyboardMarkup:
 
 
 def settings_category_menu() -> InlineKeyboardMarkup:
-    """Подменю НАСТРОЙКИ"""
+    """Подменю НАСТРОЙКИ."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="privacy"),
          InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="feedback_menu")],
@@ -136,10 +151,38 @@ def settings_category_menu() -> InlineKeyboardMarkup:
     ])
 
 
-# ==================== КЛАВИАТУРЫ КРЕСТИКОВ-НОЛИКОВ ====================
+# ==================== ТОПЫ ====================
+
+def tops_menu_keyboard() -> InlineKeyboardMarkup:
+    """Меню выбора топов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 ТОП ПО БАЛАНСУ", callback_data="top_balance")],
+        [InlineKeyboardButton(text="💬 ТОП ПО СООБЩЕНИЯМ", callback_data="top_messages")],
+        [InlineKeyboardButton(text="🎮 ТОП ПО XO", callback_data="top_xo")],
+        [InlineKeyboardButton(text="🔥 ТОП ПО АКТИВНОСТИ", callback_data="top_activity")],
+        [InlineKeyboardButton(text="🎁 ТОП ПО DAILY", callback_data="top_daily")],
+        [InlineKeyboardButton(text="💎 ТОП ДОНАТЕРОВ", callback_data="top_donors")],
+        [InlineKeyboardButton(text="👑 ТОП ПО РАНГУ", callback_data="top_ranks")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+
+
+# ==================== РАНГИ ====================
+
+def rank_menu_keyboard() -> InlineKeyboardMarkup:
+    """Меню рангов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 МОЙ РАНГ", callback_data="rank_menu")],
+        [InlineKeyboardButton(text="📊 ТОП ИГРОКОВ", callback_data="top_ranks")],
+        [InlineKeyboardButton(text="ℹ️ КАК ПОВЫСИТЬ", callback_data="rank_help")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+
+
+# ==================== КРЕСТИКИ-НОЛИКИ ====================
 
 def xo_menu_keyboard() -> InlineKeyboardMarkup:
-    """Меню крестиков-ноликов"""
+    """Меню крестиков-ноликов."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤖 ИГРАТЬ С БОТОМ", callback_data="xo_vs_bot")],
         [InlineKeyboardButton(text="👤 ВЫЗВАТЬ ИГРОКА", callback_data="xo_vs_player")],
@@ -150,7 +193,7 @@ def xo_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def xo_difficulty_keyboard() -> InlineKeyboardMarkup:
-    """Выбор сложности бота"""
+    """Выбор сложности бота."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="😊 ЛЁГКИЙ", callback_data="xo_diff_easy")],
         [InlineKeyboardButton(text="🤔 СРЕДНИЙ", callback_data="xo_diff_medium")],
@@ -160,18 +203,18 @@ def xo_difficulty_keyboard() -> InlineKeyboardMarkup:
 
 
 def xo_side_choice_keyboard(difficulty: str = "medium") -> InlineKeyboardMarkup:
-    """Выбор стороны (X или O) для игры с ботом"""
+    """Выбор стороны для игры с ботом."""
     if not difficulty:
         difficulty = "medium"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Играть за X (ходить первым)", callback_data=f"xo_side_X_{difficulty}")],
-        [InlineKeyboardButton(text="⭕ Играть за O (ходить вторым)", callback_data=f"xo_side_O_{difficulty}")],
+        [InlineKeyboardButton(text="❌ Играть за X (первый ход)", callback_data=f"xo_side_X_{difficulty}")],
+        [InlineKeyboardButton(text="⭕ Играть за O (второй ход)", callback_data=f"xo_side_O_{difficulty}")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="xo_vs_bot")]
     ])
 
 
 def xo_board_keyboard(board: Optional[List] = None, game_id: str = "", can_play: bool = True) -> InlineKeyboardMarkup:
-    """Игровое поле 3x3"""
+    """Игровое поле 3x3."""
     if board is None:
         board = [[" ", " ", " "], [" ", " ", " "], [" ", " ", " "]]
     if game_id is None:
@@ -183,11 +226,7 @@ def xo_board_keyboard(board: Optional[List] = None, game_id: str = "", can_play:
     for r in range(3):
         row = []
         for c in range(3):
-            if r < len(board) and c < len(board[r]):
-                cell = board[r][c] if board[r][c] is not None else " "
-            else:
-                cell = " "
-            
+            cell = board[r][c] if r < len(board) and c < len(board[r]) else " "
             text = symbols.get(cell, "▫️")
             
             if can_play and cell == " ":
@@ -204,7 +243,7 @@ def xo_board_keyboard(board: Optional[List] = None, game_id: str = "", can_play:
 
 
 def xo_bet_keyboard() -> InlineKeyboardMarkup:
-    """Выбор ставки для PvP"""
+    """Выбор ставки для PvP."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 БЕЗ СТАВКИ", callback_data="xo_bet_0")],
         [InlineKeyboardButton(text="50 NCoin", callback_data="xo_bet_50"),
@@ -215,42 +254,21 @@ def xo_bet_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ КЛАВИАТУРЫ ====================
+# ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 
-def back_button(callback_data: str = "back_to_menu", text: str = "◀️ НАЗАД") -> InlineKeyboardMarkup:
-    """Кнопка возврата"""
-    if not callback_data:
-        callback_data = "back_to_menu"
-    if not text:
-        text = "◀️ НАЗАД"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=text, callback_data=callback_data)]
-    ])
-
-
-def confirm_cancel_keyboard(confirm_data: str = "confirm", cancel_data: str = "back_to_menu") -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения/отмены"""
-    if not confirm_data:
-        confirm_data = "confirm"
-    if not cancel_data:
-        cancel_data = "back_to_menu"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=confirm_data),
-         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data=cancel_data)]
-    ])
-
-
-def ref_menu() -> InlineKeyboardMarkup:
-    """Меню реферальной системы"""
+def ref_menu_keyboard() -> InlineKeyboardMarkup:
+    """Меню реферальной системы."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 МОЯ ССЫЛКА", callback_data="my_ref")],
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="ref_stats")],
+        [InlineKeyboardButton(text="📊 ТОП ПРИГЛАСИТЕЛЕЙ", callback_data="ref_top")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
 
+# ==================== VIP ====================
+
 def vip_purchase_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура покупки VIP"""
+    """Клавиатура покупки VIP."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🥉 БРОНЗА (500)", callback_data="buy_vip_1")],
         [InlineKeyboardButton(text="🥈 СЕРЕБРО (1000)", callback_data="buy_vip_2")],
@@ -259,3 +277,21 @@ def vip_purchase_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💠 АЛМАЗ (10000)", callback_data="buy_vip_5")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="vip")]
     ])
+
+
+# ==================== ТЕГИ ====================
+
+def tag_admin_menu_keyboard() -> InlineKeyboardMarkup:
+    """Меню управления тегами для админа."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 ВКЛЮЧИТЬ КАТЕГОРИИ", callback_data="tag_enable_categories")],
+        [InlineKeyboardButton(text="📊 СТАТИСТИКА ТЕГОВ", callback_data="tag_stats")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="tag_admin_menu")]
+    ])
+
+
+# ==================== АЛИАСЫ ДЛЯ СОВМЕСТИМОСТИ ====================
+
+# Алиасы для старых названий
+ref_menu = ref_menu_keyboard
+stats_menu_keyboard = tops_menu_keyboard
