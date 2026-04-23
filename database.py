@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ФАЙЛ: database.py
-ВЕРСИЯ: 3.1.2-final
-ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — ИСПРАВЛЕНО
+ВЕРСИЯ: 3.2.0-final
+ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — ПОЛНОСТЬЮ ИСПРАВЛЕНО
 """
 
 import asyncio
@@ -114,8 +114,6 @@ class Database:
                     
                     cursor = await conn.execute(query, params)
                     
-                    # 🔥 КОММИТ ПРОИСХОДИТ АВТОМАТИЧЕСКИ ПРИ ВЫХОДЕ ИЗ КОНТЕКСТА
-                    
                     if fetch_one:
                         row = await cursor.fetchone()
                         return dict(row) if row else None
@@ -123,7 +121,10 @@ class Database:
                         rows = await cursor.fetchall()
                         return [dict(r) for r in rows] if rows else []
                     else:
-                        return cursor.rowcount
+                        # Обновляем счетчик строк
+                        affected = cursor.rowcount
+                        await conn.commit()
+                        return affected
                         
             except aiosqlite.OperationalError as e:
                 if "database is locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
@@ -136,6 +137,8 @@ class Database:
             except Exception as e:
                 logger.error(f"Unexpected DB error: {e}")
                 raise DatabaseError(f"Unexpected error: {e}") from e
+        
+        return None
 
     async def _execute_transaction(self, queries: List[Tuple[str, tuple]]) -> bool:
         """Выполняет несколько запросов в одной транзакции."""
@@ -436,9 +439,10 @@ class Database:
                 user1_id INTEGER NOT NULL,
                 user2_id INTEGER NOT NULL,
                 type TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
+                status TEXT DEFAULT 'active',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user1_id, user2_id, type)
+                ended_at TIMESTAMP,
+                UNIQUE(user1_id, user2_id, type, status)
             )
             """,
             # groups
@@ -595,6 +599,7 @@ class Database:
         """Получить пользователя по username."""
         if not username:
             return None
+        username = username.lstrip('@')
         return await self._execute_with_retry(
             "SELECT * FROM users WHERE username = ?",
             (username,),
@@ -1535,6 +1540,199 @@ class Database:
             result[uid][row["command"]] = row["action_text"]
         
         return result
+
+    # ==================== РЕЛЯЦИОННЫЕ СВЯЗИ (ОТНОШЕНИЯ) ====================
+
+    async def create_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> bool:
+        """Создать отношение между пользователями."""
+        if user1_id is None or user2_id is None or not rel_type:
+            return False
+        
+        try:
+            await self._execute_with_retry(
+                """INSERT OR IGNORE INTO relationships (user1_id, user2_id, type, status)
+                   VALUES (?, ?, ?, 'active')""",
+                (user1_id, user2_id, rel_type)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Create relationship error: {e}")
+            return False
+
+    async def get_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> Optional[Dict]:
+        """Получить отношение между пользователями."""
+        if user1_id is None or user2_id is None or not rel_type:
+            return None
+        
+        return await self._execute_with_retry(
+            """SELECT * FROM relationships 
+               WHERE ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
+               AND type = ? AND status = 'active'""",
+            (user1_id, user2_id, user2_id, user1_id, rel_type),
+            fetch_one=True
+        )
+
+    async def get_relationship_status(self, user_id: int, rel_type: str = "marriage") -> Optional[Dict]:
+        """Получить активное отношение пользователя."""
+        if user_id is None:
+            return None
+        
+        return await self._execute_with_retry(
+            """SELECT * FROM relationships 
+               WHERE (user1_id = ? OR user2_id = ?)
+               AND type = ? AND status = 'active'
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id, user_id, rel_type),
+            fetch_one=True
+        )
+
+    async def end_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> bool:
+        """Завершить отношение (развод)."""
+        if user1_id is None or user2_id is None or not rel_type:
+            return False
+        
+        result = await self._execute_with_retry(
+            """UPDATE relationships SET status = 'ended', ended_at = CURRENT_TIMESTAMP
+               WHERE ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
+               AND type = ? AND status = 'active'""",
+            (user1_id, user2_id, user2_id, user1_id, rel_type)
+        )
+        return result > 0
+
+    async def get_marriage_partner(self, user_id: int) -> Optional[int]:
+        """Получить ID партнёра по браку."""
+        rel = await self.get_relationship_status(user_id, "marriage")
+        if not rel:
+            return None
+        return rel["user2_id"] if rel["user1_id"] == user_id else rel["user1_id"]
+
+    # ==================== ГРУППЫ ====================
+
+    async def create_group(self, chat_id: int, group_name: str, leader_id: int) -> Optional[int]:
+        """Создать новую группу."""
+        if chat_id is None or not group_name or leader_id is None:
+            return None
+        
+        try:
+            result = await self._execute_with_retry(
+                """INSERT INTO groups (chat_id, group_name, group_leader, member_count)
+                   VALUES (?, ?, ?, 1)""",
+                (chat_id, group_name, leader_id)
+            )
+            
+            if result > 0:
+                row = await self._execute_with_retry(
+                    "SELECT id FROM groups WHERE chat_id = ? AND group_name = ?",
+                    (chat_id, group_name),
+                    fetch_one=True
+                )
+                if row:
+                    group_id = row["id"]
+                    await self._execute_with_retry(
+                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
+                        (group_id, leader_id)
+                    )
+                    return group_id
+            return None
+        except Exception as e:
+            logger.error(f"Create group error: {e}")
+            return None
+
+    async def join_group(self, group_id: int, user_id: int) -> bool:
+        """Присоединиться к группе."""
+        if group_id is None or user_id is None:
+            return False
+        
+        try:
+            await self._execute_with_retry(
+                """INSERT OR IGNORE INTO group_members (group_id, user_id)
+                   VALUES (?, ?)""",
+                (group_id, user_id)
+            )
+            await self._execute_with_retry(
+                "UPDATE groups SET member_count = member_count + 1 WHERE id = ?",
+                (group_id,)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Join group error: {e}")
+            return False
+
+    async def leave_group(self, group_id: int, user_id: int) -> bool:
+        """Покинуть группу."""
+        if group_id is None or user_id is None:
+            return False
+        
+        try:
+            group = await self._execute_with_retry(
+                "SELECT group_leader FROM groups WHERE id = ?",
+                (group_id,),
+                fetch_one=True
+            )
+            
+            if group and group["group_leader"] == user_id:
+                return False
+            
+            result = await self._execute_with_retry(
+                "DELETE FROM group_members WHERE group_id = ? AND user_id = ?",
+                (group_id, user_id)
+            )
+            
+            if result > 0:
+                await self._execute_with_retry(
+                    "UPDATE groups SET member_count = MAX(member_count - 1, 0) WHERE id = ?",
+                    (group_id,)
+                )
+            return result > 0
+        except Exception as e:
+            logger.error(f"Leave group error: {e}")
+            return False
+
+    async def get_user_groups(self, user_id: int) -> List[Dict]:
+        """Получить все группы пользователя."""
+        if user_id is None:
+            return []
+        
+        return await self._execute_with_retry(
+            """SELECT g.* FROM groups g
+               JOIN group_members gm ON g.id = gm.group_id
+               WHERE gm.user_id = ?""",
+            (user_id,),
+            fetch_all=True
+        ) or []
+
+    async def get_group_members(self, group_id: int) -> List[Dict]:
+        """Получить всех участников группы."""
+        if group_id is None:
+            return []
+        
+        return await self._execute_with_retry(
+            """SELECT u.user_id, u.username, u.first_name
+               FROM group_members gm
+               LEFT JOIN users u ON gm.user_id = u.user_id
+               WHERE gm.group_id = ?""",
+            (group_id,),
+            fetch_all=True
+        ) or []
+
+    async def delete_group(self, group_id: int) -> bool:
+        """Удалить группу."""
+        if group_id is None:
+            return False
+        
+        try:
+            await self._execute_with_retry(
+                "DELETE FROM group_members WHERE group_id = ?",
+                (group_id,)
+            )
+            result = await self._execute_with_retry(
+                "DELETE FROM groups WHERE id = ?",
+                (group_id,)
+            )
+            return result > 0
+        except Exception as e:
+            logger.error(f"Delete group error: {e}")
+            return False
 
     # ==================== ЗАКРЫТИЕ ====================
 
