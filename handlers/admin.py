@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/admin.py
-# ВЕРСИЯ: 3.0.0-full-fixed
-# ОПИСАНИЕ: Админ-панель — ПОЛНОСТЬЮ РАБОЧАЯ
+# ВЕРСИЯ: 3.0.2-final
+# ОПИСАНИЕ: Админ-панель — С ХАРДКОДОМ ВЛАДЕЛЬЦА
 # ============================================
 
 import asyncio
@@ -11,7 +11,7 @@ import html
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
@@ -20,7 +20,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramBadRequest
 
 from database import db, DatabaseError
-from config import ADMIN_IDS, SUPER_ADMIN_IDS
+from config import SUPER_ADMIN_IDS
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -31,21 +31,18 @@ TIMEOUT_STATS = 10.0
 TIMEOUT_CLEANUP = 30.0
 TIMEOUT_CHAT_INFO = 5.0
 MAX_CHATS_DISPLAY = 20
-MAX_TOP_WORDS = 15
-MAX_ACTIVE_USERS = 10
 
-# Callback данные
 CB_ADMIN_STATS = "admin_stats"
 CB_ADMIN_CLEANUP = "admin_cleanup"
 CB_ADMIN_SUMMARY = "admin_summary"
 CB_ADMIN_CHATS = "admin_chats"
-CB_ADMIN_SEARCH = "admin_search"
-CB_ADMIN_BALANCE = "admin_balance"
-CB_ADMIN_BROADCAST = "admin_broadcast"
 CB_ADMIN_RELOAD = "admin_reload"
 CB_ADMIN_BACK = "admin_back"
 CB_ADMIN_CLOSE = "admin_close"
 CB_ADMIN_CLEANUP_ALL = "admin_cleanup_all"
+
+# 🔥 ЖЁСТКИЙ ХАРДКОД ВЛАДЕЛЬЦА
+OWNER_ID = 895844198
 
 # ==================== ПРОВЕРКА ПРАВ ====================
 
@@ -53,8 +50,12 @@ def is_super_admin(user_id: Optional[int]) -> bool:
     """Проверка прав супер-админа."""
     if user_id is None:
         return False
-    if not SUPER_ADMIN_IDS:
-        return False
+    
+    # 🔥 ВЛАДЕЛЕЦ ВСЕГДА ИМЕЕТ ДОСТУП
+    if user_id == OWNER_ID:
+        return True
+    
+    # Проверяем через конфиг
     return user_id in SUPER_ADMIN_IDS
 
 
@@ -64,13 +65,17 @@ def require_super_admin(func):
         if not message or not message.from_user:
             return
         if not is_super_admin(message.from_user.id):
-            await message.answer("❌ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\nЭта команда только для владельца бота.", parse_mode=ParseMode.HTML)
+            await message.answer(
+                "❌ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\n"
+                "Эта команда только для владельца бота.",
+                parse_mode=ParseMode.HTML
+            )
             return
         return await func(message, *args, **kwargs)
     return wrapper
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
     if text is None: return ""
@@ -83,7 +88,6 @@ def format_number(num: Any) -> str:
     except: return "0"
 
 async def safe_edit_or_reply(callback: CallbackQuery, text: str, markup: Optional[InlineKeyboardMarkup] = None) -> None:
-    """Безопасное редактирование сообщения."""
     if not callback or not callback.message:
         return
     try:
@@ -101,7 +105,6 @@ async def safe_edit_or_reply(callback: CallbackQuery, text: str, markup: Optiona
         logger.error(f"Edit failed: {e}")
 
 async def run_with_timeout(coro, timeout: float, name: str) -> Any:
-    """Выполнение с таймаутом."""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -129,7 +132,6 @@ def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
 @router.message(Command("admin"))
 @require_super_admin
 async def cmd_admin_panel(message: Message) -> None:
-    """Главная панель администратора."""
     if not message or not message.from_user or not message.chat:
         return
     
@@ -149,7 +151,6 @@ async def cmd_admin_panel(message: Message) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
 async def admin_stats_callback(callback: CallbackQuery) -> None:
-    """Статистика чата."""
     if not callback or not callback.message or not callback.from_user:
         return
     
@@ -161,12 +162,11 @@ async def admin_stats_callback(callback: CallbackQuery) -> None:
     await callback.answer("📊 Загружаю статистику...")
     
     try:
-        # Получаем данные из БД
         from utils.auto_delete import get_chat_daily_stats, get_chat_top_words, get_chat_active_users
         
         stats = await run_with_timeout(get_chat_daily_stats(chat_id), TIMEOUT_STATS, "get_stats")
-        top_words = await run_with_timeout(get_chat_top_words(chat_id, MAX_TOP_WORDS), TIMEOUT_STATS, "get_words")
-        active_users = await run_with_timeout(get_chat_active_users(chat_id, MAX_ACTIVE_USERS), TIMEOUT_STATS, "get_users")
+        top_words = await run_with_timeout(get_chat_top_words(chat_id, 15), TIMEOUT_STATS, "get_words")
+        active_users = await run_with_timeout(get_chat_active_users(chat_id, 10), TIMEOUT_STATS, "get_users")
         
         total_users = await run_with_timeout(db.get_total_users(), TIMEOUT_STATS, "total_users") if db else 0
         total_messages = await run_with_timeout(db.get_total_messages_count(), TIMEOUT_STATS, "total_msgs") if db else 0
@@ -208,7 +208,6 @@ async def admin_stats_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_CLEANUP)
 async def admin_cleanup_callback(callback: CallbackQuery) -> None:
-    """Очистка сообщений бота."""
     if not callback or not callback.message or not callback.from_user:
         return
     
@@ -238,7 +237,6 @@ async def admin_cleanup_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_SUMMARY)
 async def admin_summary_callback(callback: CallbackQuery) -> None:
-    """Отправить сводку дня."""
     if not callback or not callback.message or not callback.from_user:
         return
     
@@ -266,7 +264,6 @@ async def admin_summary_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_CHATS)
 async def admin_chats_callback(callback: CallbackQuery) -> None:
-    """Список всех чатов."""
     if not callback or not callback.message or not callback.from_user:
         return
     
@@ -307,7 +304,6 @@ async def admin_chats_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_CLEANUP_ALL)
 async def admin_cleanup_all_callback(callback: CallbackQuery) -> None:
-    """Глобальная очистка."""
     if not callback or not callback.from_user:
         return
     
@@ -332,7 +328,6 @@ async def admin_cleanup_all_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_RELOAD)
 async def admin_reload_callback(callback: CallbackQuery) -> None:
-    """Перезагрузка кастомных РП."""
     if not callback or not callback.from_user:
         return
     
@@ -351,7 +346,6 @@ async def admin_reload_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_BACK)
 async def admin_back_callback(callback: CallbackQuery) -> None:
-    """Возврат в меню админа."""
     if not callback or not callback.message or not callback.from_user:
         return
     
@@ -374,7 +368,6 @@ async def admin_back_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CB_ADMIN_CLOSE)
 async def admin_close_callback(callback: CallbackQuery) -> None:
-    """Закрыть админ-панель."""
     if not callback or not callback.message:
         return
     try:
@@ -385,30 +378,6 @@ async def admin_close_callback(callback: CallbackQuery) -> None:
         except:
             pass
     await callback.answer()
-
-
-# ==================== ЗАГЛУШКИ ====================
-
-@router.callback_query(F.data == CB_ADMIN_SEARCH)
-async def admin_search_stub(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    await callback.answer("🔍 В разработке", show_alert=True)
-
-@router.callback_query(F.data == CB_ADMIN_BALANCE)
-async def admin_balance_stub(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    await callback.answer("💰 В разработке", show_alert=True)
-
-@router.callback_query(F.data == CB_ADMIN_BROADCAST)
-async def admin_broadcast_stub(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    await callback.answer("📢 В разработке", show_alert=True)
 
 
 # ==================== БЫСТРЫЕ КОМАНДЫ ====================
