@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ФАЙЛ: database.py
-ВЕРСИЯ: 3.1.0-production
-ОПИСАНИЕ: Асинхронная база данных NEXUS Bot
-ИСПРАВЛЕНИЯ: Исправлены транзакции в update_user_streaks, очистка таблиц
+ВЕРСИЯ: 3.1.2-final
+ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — ИСПРАВЛЕНО
 """
 
 import asyncio
@@ -28,6 +27,10 @@ RETRY_DELAY = 0.1
 
 ALLOWED_ACTIVITY_TYPES = frozenset({
     "message", "voice", "sticker", "gif", "photo", "video", "xo_game"
+})
+
+VALID_ACTIVITY_COLUMNS = frozenset({
+    "messages", "voice", "stickers", "gifs", "photos", "videos", "xo_games"
 })
 
 STOP_WORDS = frozenset({
@@ -93,7 +96,6 @@ class Database:
         self,
         query: str,
         params: tuple = (),
-        commit: bool = False,
         fetch_one: bool = False,
         fetch_all: bool = False
     ) -> Any:
@@ -112,8 +114,7 @@ class Database:
                     
                     cursor = await conn.execute(query, params)
                     
-                    if commit:
-                        await conn.commit()
+                    # 🔥 КОММИТ ПРОИСХОДИТ АВТОМАТИЧЕСКИ ПРИ ВЫХОДЕ ИЗ КОНТЕКСТА
                     
                     if fetch_one:
                         row = await cursor.fetchone()
@@ -261,6 +262,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS user_activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
+                chat_id BIGINT NOT NULL,
                 date TEXT NOT NULL,
                 messages INTEGER DEFAULT 0,
                 voice INTEGER DEFAULT 0,
@@ -270,7 +272,7 @@ class Database:
                 videos INTEGER DEFAULT 0,
                 games_played INTEGER DEFAULT 0,
                 xo_games INTEGER DEFAULT 0,
-                UNIQUE(user_id, date)
+                UNIQUE(user_id, chat_id, date)
             )
             """,
             # xo_stats
@@ -469,7 +471,7 @@ class Database:
     async def _create_indexes(self) -> None:
         """Создание индексов для оптимизации."""
         indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_activity_log_user_date ON user_activity_log(user_id, date);",
+            "CREATE INDEX IF NOT EXISTS idx_activity_log_user_chat_date ON user_activity_log(user_id, chat_id, date);",
             "CREATE INDEX IF NOT EXISTS idx_chat_words_chat_date ON chat_word_stats(chat_id, date);",
             "CREATE INDEX IF NOT EXISTS idx_transactions_from_id ON transactions(from_id);",
             "CREATE INDEX IF NOT EXISTS idx_transactions_to_id ON transactions(to_id);",
@@ -517,13 +519,7 @@ class Database:
                 "last_streak_update": "TEXT",
             },
             "user_activity_log": {
-                "voice": "INTEGER DEFAULT 0",
-                "stickers": "INTEGER DEFAULT 0",
-                "gifs": "INTEGER DEFAULT 0",
-                "photos": "INTEGER DEFAULT 0",
-                "videos": "INTEGER DEFAULT 0",
-                "games_played": "INTEGER DEFAULT 0",
-                "xo_games": "INTEGER DEFAULT 0",
+                "chat_id": "BIGINT NOT NULL DEFAULT 0",
             },
             "chat_rating": {
                 "owner_id": "INTEGER",
@@ -558,12 +554,13 @@ class Database:
             fetch_one=True
         )
         if row and row.get("cnt", 0) == 0:
+            queries = []
             for name, price, desc in DEFAULT_SHOP_ITEMS:
-                await self._execute_with_retry(
+                queries.append((
                     "INSERT INTO shop_items (name, price, description) VALUES (?, ?, ?)",
-                    (name, price, desc),
-                    commit=True
-                )
+                    (name, price, desc)
+                ))
+            await self._execute_transaction(queries)
             logger.info("Added default shop items")
 
         # Tag categories
@@ -572,13 +569,14 @@ class Database:
             fetch_one=True
         )
         if row and row.get("cnt", 0) == 0:
+            queries = []
             for slug, name, desc, icon in DEFAULT_CATEGORIES:
-                await self._execute_with_retry(
+                queries.append((
                     """INSERT OR IGNORE INTO tag_categories 
                        (slug, name, description, icon_emoji) VALUES (?, ?, ?, ?)""",
-                    (slug, name, desc, icon),
-                    commit=True
-                )
+                    (slug, name, desc, icon)
+                ))
+            await self._execute_transaction(queries)
             logger.info("Added default tag categories")
 
     # ==================== ОСНОВНЫЕ МЕТОДЫ ====================
@@ -710,17 +708,15 @@ class Database:
         if to_id is None or from_id == to_id:
             return False
         
-        # Проверка баланса
-        row = await self._execute_with_retry(
-            "SELECT balance FROM users WHERE user_id = ?",
-            (from_id,),
-            fetch_one=True
+        result = await self._execute_with_retry(
+            """UPDATE users SET balance = balance - ? 
+               WHERE user_id = ? AND balance >= ?""",
+            (amount, from_id, amount)
         )
-        if not row or row["balance"] < amount:
+        if result == 0:
             return False
         
         queries = [
-            ("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, from_id)),
             ("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, to_id)),
             (
                 """INSERT INTO transactions (from_id, to_id, amount, reason, date)
@@ -771,8 +767,7 @@ class Database:
             """INSERT OR REPLACE INTO user_profiles 
                (user_id, full_name, age, city, timezone, about, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, full_name or "", age or 0, city or "", timezone or "", about or "", created_at, now),
-            commit=True
+            (user_id, full_name or "", age or 0, city or "", timezone or "", about or "", created_at, now)
         )
 
     async def get_profile(self, user_id: int) -> Optional[Dict]:
@@ -791,8 +786,7 @@ class Database:
             return
         await self._execute_with_retry(
             "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-            (streak or 0, datetime.now().isoformat(), user_id),
-            commit=True
+            (streak or 0, datetime.now().isoformat(), user_id)
         )
 
     async def claim_daily_bonus(
@@ -896,8 +890,7 @@ class Database:
                    total_donated = total_donated + ?,
                    last_donate = CURRENT_TIMESTAMP,
                    donor_rank = ?""",
-            (user_id, amount_rub, donor_rank, amount_rub, donor_rank),
-            commit=True
+            (user_id, amount_rub, donor_rank, amount_rub, donor_rank)
         )
 
     async def add_warn(self, user_id: int, warn_text: str) -> None:
@@ -921,8 +914,7 @@ class Database:
             
             await self._execute_with_retry(
                 "UPDATE users SET warns = ? WHERE user_id = ?",
-                (json.dumps(warns), user_id),
-                commit=True
+                (json.dumps(warns), user_id)
             )
 
     async def get_user_warns(self, user_id: int) -> List[Dict]:
@@ -946,15 +938,14 @@ class Database:
             return
         await self._execute_with_retry(
             "UPDATE users SET warns = '[]' WHERE user_id = ?",
-            (user_id,),
-            commit=True
+            (user_id,)
         )
 
     # ==================== СТАТИСТИКА ====================
 
-    async def track_user_activity(self, user_id: int, activity_type: str, value: int = 1) -> None:
+    async def track_user_activity(self, user_id: int, chat_id: int, activity_type: str, value: int = 1) -> None:
         """Логирование активности пользователя."""
-        if user_id is None or activity_type not in ALLOWED_ACTIVITY_TYPES:
+        if user_id is None or chat_id is None or activity_type not in ALLOWED_ACTIVITY_TYPES:
             return
         
         today = datetime.now().strftime("%Y-%m-%d")
@@ -971,6 +962,10 @@ class Database:
             "xo_game": "xo_games"
         }
         col = column_mapping.get(activity_type, "messages")
+        
+        if col not in VALID_ACTIVITY_COLUMNS:
+            logger.error(f"Invalid activity column: {col}")
+            return
         
         queries = [
             ("INSERT OR IGNORE INTO user_stats (user_id, register_date) VALUES (?, ?)", (user_id, today)),
@@ -1003,11 +998,11 @@ class Database:
             ))
         
         queries.append((
-            f"""INSERT INTO user_activity_log (user_id, date, {col})
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id, date) DO UPDATE SET
+            f"""INSERT INTO user_activity_log (user_id, chat_id, date, {col})
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, chat_id, date) DO UPDATE SET
                     {col} = COALESCE({col}, 0) + ?""",
-            (user_id, today, value, value)
+            (user_id, chat_id, today, value, value)
         ))
         
         await self._execute_transaction(queries)
@@ -1068,7 +1063,7 @@ class Database:
         if user_id is None:
             return None
         
-        return await self._execute_with_retry(
+        result = await self._execute_with_retry(
             """SELECT 
                 s.user_id,
                 COALESCE(s.messages_total, 0) as messages_total,
@@ -1116,6 +1111,10 @@ class Database:
             (user_id,),
             fetch_one=True
         )
+        return result or {
+            'messages_total': 0, 'wins': 0, 'games_played': 0, 'balance': 0,
+            'daily_streak': 0, 'vip_level': 0
+        }
 
     async def get_top_messages(self, limit: int = 10) -> List[Dict]:
         """Топ по сообщениям."""
@@ -1257,12 +1256,14 @@ class Database:
                    VALUES (?, ?, ?, 1)
                    ON CONFLICT(chat_id, date, word) DO UPDATE SET
                        count = count + 1""",
-                (chat_id, today, word),
-                commit=True
+                (chat_id, today, word)
             )
 
     async def get_chat_daily_stats(self, chat_id: int) -> Dict:
         """Получить статистику чата за сегодня."""
+        if chat_id is None:
+            return {'unique_users': 0, 'total_messages': 0}
+        
         today = datetime.now().strftime("%Y-%m-%d")
         
         row = await self._execute_with_retry(
@@ -1270,8 +1271,8 @@ class Database:
                 COUNT(DISTINCT user_id) as unique_users,
                 COALESCE(SUM(messages), 0) as total_messages
                FROM user_activity_log
-               WHERE date = ?""",
-            (today,),
+               WHERE chat_id = ? AND date = ?""",
+            (chat_id, today),
             fetch_one=True
         )
         
@@ -1284,6 +1285,9 @@ class Database:
 
     async def get_chat_top_words(self, chat_id: int, limit: int = 10) -> List[Tuple[str, int]]:
         """Получить топ слов в чате за сегодня."""
+        if chat_id is None:
+            return []
+        
         today = datetime.now().strftime("%Y-%m-%d")
         limit = limit if limit is not None else 10
         
@@ -1300,6 +1304,9 @@ class Database:
 
     async def get_chat_active_users(self, chat_id: int, limit: int = 5) -> List[Dict]:
         """Получить активных пользователей чата."""
+        if chat_id is None:
+            return []
+        
         today = datetime.now().strftime("%Y-%m-%d")
         limit = limit if limit is not None else 5
         
@@ -1310,9 +1317,43 @@ class Database:
                 ual.messages as message_count
                FROM user_activity_log ual
                LEFT JOIN users u ON ual.user_id = u.user_id
-               WHERE ual.date = ?
+               WHERE ual.chat_id = ? AND ual.date = ?
                ORDER BY ual.messages DESC LIMIT ?""",
-            (today, limit),
+            (chat_id, today, limit),
+            fetch_all=True
+        ) or []
+
+    async def get_chat_top_balance(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Получить топ пользователей по балансу в чате."""
+        if chat_id is None:
+            return []
+        limit = limit if limit is not None else 3
+        return await self.get_top_balance(limit)
+
+    async def get_chat_top_xo(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Получить топ по крестикам-ноликам в чате."""
+        if chat_id is None:
+            return []
+        limit = limit if limit is not None else 3
+        return await self.get_top_xo(limit)
+
+    async def get_chat_top_messages(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Получить топ по сообщениям в чате."""
+        if chat_id is None:
+            return []
+        limit = limit if limit is not None else 3
+        return await self._execute_with_retry(
+            """SELECT 
+                ual.user_id,
+                u.first_name,
+                u.username,
+                SUM(ual.messages) as messages_total
+               FROM user_activity_log ual
+               LEFT JOIN users u ON ual.user_id = u.user_id
+               WHERE ual.chat_id = ?
+               GROUP BY ual.user_id
+               ORDER BY messages_total DESC LIMIT ?""",
+            (chat_id, limit),
             fetch_all=True
         ) or []
 
@@ -1334,7 +1375,16 @@ class Database:
 
     async def get_chat_members_count(self, chat_id: int) -> int:
         """Получить количество участников чата."""
-        return 0
+        if chat_id is None:
+            return 0
+        row = await self._execute_with_retry(
+            """SELECT COUNT(*) as cnt FROM group_members gm
+               JOIN groups g ON gm.group_id = g.id
+               WHERE g.chat_id = ?""",
+            (chat_id,),
+            fetch_one=True
+        )
+        return row.get("cnt", 0) if row else 0
 
     async def get_all_chats_with_bot(self) -> List[int]:
         """Получить все чаты, где есть бот."""
@@ -1360,22 +1410,19 @@ class Database:
     async def reset_daily_counters(self) -> None:
         """Сбросить дневные счётчики."""
         await self._execute_with_retry(
-            "UPDATE user_stats SET messages_today = 0",
-            commit=True
+            "UPDATE user_stats SET messages_today = 0"
         )
 
     async def reset_weekly_counters(self) -> None:
         """Сбросить недельные счётчики."""
         await self._execute_with_retry(
-            "UPDATE user_stats SET messages_week = 0",
-            commit=True
+            "UPDATE user_stats SET messages_week = 0"
         )
 
     async def reset_monthly_counters(self) -> None:
         """Сбросить месячные счётчики."""
         await self._execute_with_retry(
-            "UPDATE user_stats SET messages_month = 0",
-            commit=True
+            "UPDATE user_stats SET messages_month = 0"
         )
 
     async def cleanup_bot_from_all_tables(self, bot_id: int) -> None:
@@ -1383,14 +1430,12 @@ class Database:
         if bot_id is None:
             return
         
-        # Таблицы с колонкой user_id
         tables_with_user_id = [
             'users', 'user_stats', 'user_economy_stats', 'xo_stats',
             'user_profiles', 'custom_rp', 'user_activity_log',
             'user_tag_subscriptions', 'ref_links', 'donors'
         ]
         
-        # Особые таблицы
         special_tables = {
             'transactions': ("from_id = ? OR to_id = ?", (bot_id, bot_id)),
             'relationships': ("user1_id = ? OR user2_id = ?", (bot_id, bot_id)),
@@ -1446,8 +1491,7 @@ class Database:
         await self._execute_with_retry(
             """INSERT INTO custom_rp (user_id, command, action_text)
                VALUES (?, ?, ?)""",
-            (user_id, command, action_text),
-            commit=True
+            (user_id, command, action_text)
         )
         logger.info(f"Added custom RP: {command} for user {user_id}")
 
@@ -1458,8 +1502,7 @@ class Database:
         
         result = await self._execute_with_retry(
             "DELETE FROM custom_rp WHERE user_id = ? AND command = ?",
-            (user_id, command),
-            commit=True
+            (user_id, command)
         )
         return result > 0
 
@@ -1475,10 +1518,12 @@ class Database:
         )
         return {r["command"]: r["action_text"] for r in rows} if rows else {}
 
-    async def get_all_custom_rp(self) -> Dict[int, Dict[str, str]]:
-        """Получить ВСЕ кастомные РП команды."""
+    async def get_all_custom_rp(self, limit: int = 1000, offset: int = 0) -> Dict[int, Dict[str, str]]:
+        """Получить ВСЕ кастомные РП команды с пагинацией."""
+        limit = limit if limit is not None else 1000
         rows = await self._execute_with_retry(
-            "SELECT user_id, command, action_text FROM custom_rp",
+            "SELECT user_id, command, action_text FROM custom_rp ORDER BY user_id LIMIT ? OFFSET ?",
+            (limit, offset),
             fetch_all=True
         )
         
