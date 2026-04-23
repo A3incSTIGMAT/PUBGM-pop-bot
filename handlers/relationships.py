@@ -166,7 +166,7 @@ async def get_user_by_username(username: str):
 
 # ==================== ВХОД В РАЗДЕЛ ОТНОШЕНИЙ ====================
 
-@router.message(lambda message: message.text == "💕 Отношения" or message.text == "🔙 НАЗАД" and message.from_user)
+@router.message(lambda message: message.text == "💕 Отношения" or message.text == "🔙 НАЗАД")
 async def relations_menu(message: Message, state: FSMContext):
     """Вход в раздел отношений"""
     await state.clear()
