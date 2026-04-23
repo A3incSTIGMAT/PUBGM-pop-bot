@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 6.0.2-rate-limit
-# ОПИСАНИЕ: NEXUS Chat Manager — С RATE LIMITER (ПОЛНЫЙ)
+# ВЕРСИЯ: 6.0.3-final
+# ОПИСАНИЕ: NEXUS Chat Manager — ПОЛНЫЙ РАБОЧИЙ БОТ
 # ============================================
 
 import asyncio
@@ -47,7 +47,7 @@ ADMIN_IDS = ADMIN_IDS if ADMIN_IDS is not None else []
 SUPER_ADMIN_IDS = SUPER_ADMIN_IDS if SUPER_ADMIN_IDS is not None else []
 START_BALANCE = START_BALANCE if START_BALANCE is not None else 1000
 
-logger.info(f"🔧 Bot starting with ADMIN_IDS: {ADMIN_IDS}")
+logger.info(f"🔧 Bot starting with SUPER_ADMIN_IDS: {SUPER_ADMIN_IDS}")
 
 # ==================== БОТ ====================
 
@@ -61,28 +61,23 @@ _background_tasks: Set[asyncio.Task] = set()
 from utils.rate_limiter import (
     RateLimiter, 
     start_cleanup_task, 
-    stop_cleanup_task,
-    rate_limit as rate_limit_decorator
+    stop_cleanup_task
 )
 
-# Создаем лимитеры для разных команд
-daily_limiter = RateLimiter(limit=1, period=10)      # /daily — раз в 10 сек
-transfer_limiter = RateLimiter(limit=5, period=60)   # /transfer — 5 в минуту
-game_limiter = RateLimiter(limit=10, period=60)      # Игры — 10 в минуту
-all_limiter = RateLimiter(limit=3, period=300)       # /all — 3 раза в 5 минут
+daily_limiter = RateLimiter(limit=1, period=10)
+transfer_limiter = RateLimiter(limit=5, period=60)
+game_limiter = RateLimiter(limit=10, period=60)
+all_limiter = RateLimiter(limit=3, period=300)
 
 # ==================== БАЗА ДАННЫХ ====================
 
 from database import db, DatabaseError
-
-# ==================== КЕШ ====================
 
 _user_cache: Dict[int, dict] = {}
 _cache_time: Dict[int, float] = {}
 CACHE_TTL = 30
 
 async def get_user_cached(user_id: int) -> Optional[dict]:
-    """Получение пользователя с кешем."""
     if user_id is None or db is None:
         return None
     now = time.time()
@@ -125,6 +120,35 @@ def safe_int(value: Any) -> int:
     try: return int(value)
     except: return 0
 
+# ==================== ПРОВЕРКА АДМИНА ====================
+
+# 🔥 ХАРДКОД ВЛАДЕЛЬЦА
+OWNER_ID = 895844198
+
+async def check_is_admin(user_id: int, chat_id: int) -> bool:
+    """Проверка прав администратора."""
+    if user_id is None:
+        return False
+    
+    # Владелец всегда админ
+    if user_id == OWNER_ID:
+        return True
+    
+    if user_id in SUPER_ADMIN_IDS:
+        return True
+    
+    if user_id in ADMIN_IDS:
+        return True
+    
+    if chat_id and bot:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            return member.status in ['creator', 'administrator']
+        except:
+            pass
+    
+    return False
+
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 
 def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -156,18 +180,6 @@ def get_back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMark
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
     ])
 
-# ==================== ПРОВЕРКА АДМИНА ====================
-
-async def check_is_admin(user_id: int, chat_id: int) -> bool:
-    if user_id is None: return False
-    if user_id in ADMIN_IDS or user_id in SUPER_ADMIN_IDS: return True
-    if chat_id and bot:
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            return member.status in ['creator', 'administrator']
-        except: pass
-    return False
-
 # ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -182,7 +194,6 @@ async def cmd_start(message: Message, command: CommandObject):
     
     is_admin = await check_is_admin(user_id, chat_id)
     
-    # Создаем пользователя если нужно
     user = await get_user_cached(user_id)
     if not user and db:
         try:
@@ -275,6 +286,12 @@ def setup_bot_for_modules():
         logger.info("✅ Bot set for smart_commands")
     except Exception as e:
         logger.warning(f"smart_commands set_bot: {e}")
+    try:
+        from handlers.referral import set_bot as set_ref_bot
+        set_ref_bot(bot)
+        logger.info("✅ Bot set for referral")
+    except Exception as e:
+        logger.warning(f"referral set_bot: {e}")
 
 setup_bot_for_modules()
 
@@ -294,6 +311,8 @@ def load_all_routers():
         ("handlers.referral", "router"),
         ("handlers.tag_user", "router"),
         ("handlers.ranks", "router"),
+        ("handlers.tag_admin", "router"),
+        ("handlers.tag_trigger", "router"),
     ]
     for module_name, attr_name in routers:
         try:
@@ -350,7 +369,7 @@ async def menu_rank(callback: CallbackQuery):
         await cmd_rank(callback.message)
     except Exception as e:
         logger.error(f"Rank error: {e}")
-        await callback.message.answer("❌ В разработке", reply_markup=get_back_keyboard())
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_xo")
@@ -390,11 +409,11 @@ async def menu_all(callback: CallbackQuery):
 async def menu_ref(callback: CallbackQuery):
     if not callback or not callback.message: return
     try:
-        from handlers.referral import ref_menu_callback as target
-        await target(callback)
+        from handlers.referral import ref_menu_callback
+        await ref_menu_callback(callback)
     except Exception as e:
         logger.error(f"Ref error: {e}")
-        await callback.message.answer("❌ В разработке", reply_markup=get_back_keyboard())
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_relations")
@@ -424,8 +443,8 @@ async def menu_rp(callback: CallbackQuery):
 async def menu_tags(callback: CallbackQuery):
     if not callback or not callback.message: return
     try:
-        from handlers.tag_user import cmd_mytags
-        await cmd_mytags(callback.message)
+        from handlers.tag_user import my_tags_menu_callback
+        await my_tags_menu_callback(callback)
     except Exception as e:
         logger.error(f"Tags error: {e}")
         await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -476,7 +495,7 @@ async def menu_feedback(callback: CallbackQuery):
 async def menu_admin(callback: CallbackQuery):
     if not callback or not callback.message or not callback.from_user: return
     user_id = callback.from_user.id
-    if user_id not in ADMIN_IDS and user_id not in SUPER_ADMIN_IDS:
+    if user_id != OWNER_ID and user_id not in SUPER_ADMIN_IDS:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     try:
@@ -490,9 +509,8 @@ async def menu_admin(callback: CallbackQuery):
 # ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
 
 async def on_startup():
-    logger.info("🚀 NEXUS Bot v6.0.2-rate-limit starting...")
+    logger.info("🚀 NEXUS Bot v6.0.3 starting...")
     
-    # Запускаем очистку rate limiter
     start_cleanup_task()
     logger.info("✅ Rate limiter cleanup started")
     
@@ -530,7 +548,6 @@ async def on_startup():
 async def on_shutdown():
     logger.info("🛑 Shutting down...")
     
-    # Останавливаем очистку rate limiter
     await stop_cleanup_task()
     logger.info("✅ Rate limiter cleanup stopped")
     
@@ -539,8 +556,6 @@ async def on_shutdown():
     await asyncio.sleep(1)
     logger.info("👋 Stopped")
 
-# ==================== ОТЛАДКА ====================
-
 @dp.message()
 async def debug_unhandled(message: Message):
     if not message: return
@@ -548,8 +563,6 @@ async def debug_unhandled(message: Message):
     chat_id = message.chat.id if message.chat else "N/A"
     user_id = message.from_user.id if message.from_user else "N/A"
     logger.warning(f"⚠️ UNHANDLED: chat={chat_id} user={user_id} text={text}")
-
-# ==================== ЗАПУСК ====================
 
 async def main():
     dp.startup.register(on_startup)
