@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 7.0.0-production
-# ОПИСАНИЕ: NEXUS Chat Manager — ВСЕ СООБЩЕНИЯ СОХРАНЯЮТСЯ ДЛЯ СТАТИСТИКИ
+# ВЕРСИЯ: 7.1.0-production
+# ОПИСАНИЕ: NEXUS Chat Manager — АВТОУДАЛЕНИЕ МЕНЮ + DAILY_BONUS CALLBACK
 # ============================================
 
 import asyncio
@@ -60,6 +60,105 @@ dp = Dispatcher()
 
 _background_tasks: Set[asyncio.Task] = set()
 _cleanup_tasks: list[asyncio.Task] = []
+
+# ==================== АВТОУДАЛЕНИЕ СООБЩЕНИЙ ====================
+
+# Хранит ID последних сообщений бота: {chat_id: {user_id: [message_ids]}}
+_bot_messages: Dict[int, Dict[int, list]] = {}
+MAX_STORED_MESSAGES = 20  # Максимум хранимых ID сообщений на пользователя
+
+
+async def delete_previous_bot_messages(chat_id: int, user_id: int, keep_last: int = 0) -> None:
+    """
+    Удаляет предыдущие сообщения бота для конкретного пользователя в чате.
+    Оставляет keep_last последних сообщений (0 = удалить все).
+    🔥 ДОБАВЛЕНО В V7.1.0
+    """
+    if chat_id is None or user_id is None:
+        return
+    
+    if chat_id not in _bot_messages:
+        _bot_messages[chat_id] = {}
+    
+    if user_id not in _bot_messages[chat_id]:
+        _bot_messages[chat_id][user_id] = []
+        return
+    
+    messages = _bot_messages[chat_id][user_id]
+    
+    if len(messages) <= keep_last:
+        return
+    
+    # Удаляем все кроме keep_last последних
+    to_delete = messages[:len(messages) - keep_last]
+    _bot_messages[chat_id][user_id] = messages[len(messages) - keep_last:]
+    
+    for msg_id in to_delete:
+        if msg_id is None:
+            continue
+        try:
+            await bot.delete_message(chat_id, msg_id)
+            await asyncio.sleep(0.05)
+        except TelegramAPIError:
+            pass
+
+
+async def track_bot_message(chat_id: int, user_id: int, message_id: int) -> None:
+    """
+    Сохраняет ID сообщения бота для последующего автоудаления.
+    🔥 ДОБАВЛЕНО В V7.1.0
+    """
+    if chat_id is None or user_id is None or message_id is None:
+        return
+    
+    if chat_id not in _bot_messages:
+        _bot_messages[chat_id] = {}
+    
+    if user_id not in _bot_messages[chat_id]:
+        _bot_messages[chat_id][user_id] = []
+    
+    _bot_messages[chat_id][user_id].append(message_id)
+    
+    # Ограничиваем историю
+    if len(_bot_messages[chat_id][user_id]) > MAX_STORED_MESSAGES:
+        _bot_messages[chat_id][user_id] = _bot_messages[chat_id][user_id][-MAX_STORED_MESSAGES:]
+
+
+async def safe_send_message(
+    chat_id: int,
+    text: str,
+    user_id: Optional[int] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    delete_previous: bool = True,
+    keep_last: int = 0
+) -> Optional[Message]:
+    """
+    Безопасная отправка сообщения с автоудалением предыдущих.
+    🔥 ДОБАВЛЕНО В V7.1.0
+    """
+    if chat_id is None or not text:
+        return None
+    
+    if delete_previous and user_id is not None:
+        await delete_previous_bot_messages(chat_id, user_id, keep_last)
+    
+    try:
+        msg = await bot.send_message(
+            chat_id,
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+        
+        if msg and user_id is not None:
+            await track_bot_message(chat_id, user_id, msg.message_id)
+        
+        return msg
+        
+    except TelegramAPIError as e:
+        logger.error(f"Failed to send message to {chat_id}: {e}")
+        return None
+
 
 # ==================== RATE LIMITER ====================
 
@@ -285,10 +384,14 @@ async def cmd_vip_direct(message: Message):
     except Exception as e: logger.error(f"VIP: {e}")
 
 
-# ==================== CALLBACK: НАЗАД ====================
+# ==================== CALLBACK: НАЗАД (С АВТОУДАЛЕНИЕМ) ====================
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery):
+    """
+    Обработчик кнопки НАЗАД.
+    🔥 V7.1.0: Удаляет предыдущее меню и показывает новое.
+    """
     if not callback or not callback.message: return
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
@@ -305,10 +408,44 @@ async def back_to_menu(callback: CallbackQuery):
         f"👇 Выберите категорию:"
     )
     
+    # Пробуем отредактировать текущее сообщение
     if not await safe_callback_edit(callback, text, get_main_menu(is_admin)):
-        await callback.answer("⚠️ Ошибка", show_alert=False)
-    else:
+        # Если не получилось — удаляем старое и отправляем новое
+        await delete_previous_bot_messages(chat_id, user_id, keep_last=0)
+        await safe_send_message(chat_id, text, user_id, reply_markup=get_main_menu(is_admin), delete_previous=False)
+    
+    await callback.answer()
+
+
+# ==================== CALLBACK: DAILY_BONUS (ИЗ СВОДКИ) ====================
+
+@dp.callback_query(F.data == "daily_bonus")
+async def callback_daily_bonus(callback: CallbackQuery):
+    """
+    Обработчик инлайн-кнопки «Ежедневная награда» из сводки.
+    🔥 ДОБАВЛЕНО В V7.1.0
+    """
+    if not callback or not callback.message: return
+    
+    try:
         await callback.answer()
+    except Exception:
+        pass
+    
+    try:
+        from handlers.economy import cmd_daily
+        # Создаём фейковое сообщение для передачи в обработчик
+        # cmd_daily ожидает Message, но мы можем передать callback.message
+        await cmd_daily(callback.message)
+    except Exception as e:
+        logger.error(f"Daily bonus callback error: {e}")
+        try:
+            await callback.message.answer(
+                "❌ Ошибка получения бонуса. Попробуйте /daily",
+                reply_markup=get_back_keyboard()
+            )
+        except Exception:
+            pass
 
 
 # ==================== УСТАНОВКА БОТА ====================
@@ -358,88 +495,152 @@ def load_all_routers():
         except Exception as e: logger.warning(f"⚠️ {module_name}: {e}")
 
 
-# ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ ====================
+# ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ (С АВТОУДАЛЕНИЕМ) ====================
 
 @dp.callback_query(F.data == "menu_vip")
 async def menu_vip(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.vip import cmd_vip; await cmd_vip(callback.message)
     except Exception as e: logger.error(f"VIP: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_profile")
 async def menu_profile(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.profile import cmd_profile; await cmd_profile(callback.message)
     except Exception as e: logger.error(f"Profile: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_balance")
 async def menu_balance(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.economy import cmd_balance; await cmd_balance(callback.message)
     except Exception as e: logger.error(f"Balance: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_rank")
 async def menu_rank(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.ranks import cmd_rank; await cmd_rank(callback.message)
     except Exception as e: logger.error(f"Rank: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_xo")
 async def menu_xo(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.tictactoe import cmd_xo; await cmd_xo(callback.message)
     except Exception as e: logger.error(f"XO: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_stats")
 async def menu_stats(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.stats import cmd_stats; await cmd_stats(callback.message)
     except Exception as e: logger.error(f"Stats: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_all")
 async def menu_all(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.tag import cmd_all; await cmd_all(callback.message)
     except Exception as e: logger.error(f"Tag: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_ref")
 async def menu_ref(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.referral import ref_menu_callback; await ref_menu_callback(callback)
     except Exception as e: logger.error(f"Ref: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_relations")
 async def menu_relations(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.relationships import relationships_menu; await relationships_menu(callback)
     except Exception as e: logger.error(f"Relations: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_groups")
 async def menu_groups(callback: CallbackQuery):
-    await callback.message.edit_text("👥 <b>ГРУППЫ</b>\n\nВ разработке.", parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+    text = "👥 <b>ГРУППЫ</b>\n\nВ разработке."
+    if not await safe_callback_edit(callback, text, get_back_keyboard()):
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_rp")
 async def menu_rp(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.smart_commands import cmd_my_custom_rp; await cmd_my_custom_rp(callback.message)
     except Exception as e: logger.error(f"RP: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_tags")
 async def menu_tags(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.tag_user import my_tags_menu_callback; await my_tags_menu_callback(callback)
     except Exception as e: logger.error(f"Tags: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_topchats")
 async def menu_topchats(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.rating import cmd_top_chats; await cmd_top_chats(callback.message)
     except Exception as e: logger.error(f"TopChats: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_privacy")
 async def menu_privacy(callback: CallbackQuery):
-    await callback.message.edit_text("🔒 <b>ПОЛИТИКА</b>\n\n• Telegram ID\n• Имя\n• Баланс\n• Статистика\n\nУдаление: /delete_my_data", parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+    text = "🔒 <b>ПОЛИТИКА</b>\n\n• Telegram ID\n• Имя\n• Баланс\n• Статистика\n\nУдаление: /delete_my_data"
+    if not await safe_callback_edit(callback, text, get_back_keyboard()):
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_help")
@@ -448,13 +649,20 @@ async def menu_help(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_donate")
 async def menu_donate(callback: CallbackQuery):
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else callback.from_user.id,
+        callback.from_user.id,
+        keep_last=0
+    )
     try: from handlers.economy import cmd_donate as economy_donate; await economy_donate(callback.message)
     except Exception as e: logger.error(f"Donate: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_feedback")
 async def menu_feedback(callback: CallbackQuery):
-    await callback.message.edit_text("💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\nНапишите: <code>/feedback ваш текст</code>", parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+    text = "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\nНапишите: <code>/feedback ваш текст</code>"
+    if not await safe_callback_edit(callback, text, get_back_keyboard()):
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_admin")
@@ -463,6 +671,11 @@ async def menu_admin(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not is_super_admin(user_id):
         await callback.answer("❌ Доступ запрещён", show_alert=True); return
+    await delete_previous_bot_messages(
+        callback.message.chat.id if callback.message.chat else user_id,
+        user_id,
+        keep_last=0
+    )
     try:
         from handlers.admin import admin_panel_callback
         await admin_panel_callback(callback)
@@ -499,7 +712,7 @@ async def on_startup():
     me = await bot.get_me()
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
-    logger.info("🚀 NEXUS Bot v7.0.0 starting...")
+    logger.info("🚀 NEXUS Bot v7.1.0 starting...")
     
     setup_bot_for_modules()
     load_all_routers()
@@ -526,6 +739,7 @@ async def on_shutdown():
     logger.info("🛑 Shutting down...")
     await stop_all_background_tasks()
     _user_cache.clear()
+    _bot_messages.clear()
     if db and hasattr(db, 'close'):
         try: await db.close()
         except: pass
