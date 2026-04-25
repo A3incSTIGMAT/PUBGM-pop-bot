@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: bot.py
-# ВЕРСИЯ: 7.1.0-production
-# ОПИСАНИЕ: NEXUS Chat Manager — АВТОУДАЛЕНИЕ МЕНЮ + DAILY_BONUS CALLBACK
+# ВЕРСИЯ: 7.2.0-production
+# ОПИСАНИЕ: NEXUS Chat Manager — ИСПРАВЛЕНЫ РАНГИ, СТАТИСТИКА, ДУБЛЬ ТРЕКИНГА
 # ============================================
 
 import asyncio
@@ -47,7 +47,6 @@ ADMIN_IDS = ADMIN_IDS if ADMIN_IDS is not None else []
 SUPER_ADMIN_IDS = SUPER_ADMIN_IDS if SUPER_ADMIN_IDS is not None else []
 START_BALANCE = START_BALANCE if START_BALANCE is not None else 1000
 
-# 🔥 ВЛАДЕЛЕЦ
 OWNER_ID = 895844198
 BOT_ID: Optional[int] = None
 
@@ -63,17 +62,11 @@ _cleanup_tasks: list[asyncio.Task] = []
 
 # ==================== АВТОУДАЛЕНИЕ СООБЩЕНИЙ ====================
 
-# Хранит ID последних сообщений бота: {chat_id: {user_id: [message_ids]}}
 _bot_messages: Dict[int, Dict[int, list]] = {}
-MAX_STORED_MESSAGES = 20  # Максимум хранимых ID сообщений на пользователя
+MAX_STORED_MESSAGES = 20
 
 
 async def delete_previous_bot_messages(chat_id: int, user_id: int, keep_last: int = 0) -> None:
-    """
-    Удаляет предыдущие сообщения бота для конкретного пользователя в чате.
-    Оставляет keep_last последних сообщений (0 = удалить все).
-    🔥 ДОБАВЛЕНО В V7.1.0
-    """
     if chat_id is None or user_id is None:
         return
     
@@ -89,7 +82,6 @@ async def delete_previous_bot_messages(chat_id: int, user_id: int, keep_last: in
     if len(messages) <= keep_last:
         return
     
-    # Удаляем все кроме keep_last последних
     to_delete = messages[:len(messages) - keep_last]
     _bot_messages[chat_id][user_id] = messages[len(messages) - keep_last:]
     
@@ -104,10 +96,6 @@ async def delete_previous_bot_messages(chat_id: int, user_id: int, keep_last: in
 
 
 async def track_bot_message(chat_id: int, user_id: int, message_id: int) -> None:
-    """
-    Сохраняет ID сообщения бота для последующего автоудаления.
-    🔥 ДОБАВЛЕНО В V7.1.0
-    """
     if chat_id is None or user_id is None or message_id is None:
         return
     
@@ -119,7 +107,6 @@ async def track_bot_message(chat_id: int, user_id: int, message_id: int) -> None
     
     _bot_messages[chat_id][user_id].append(message_id)
     
-    # Ограничиваем историю
     if len(_bot_messages[chat_id][user_id]) > MAX_STORED_MESSAGES:
         _bot_messages[chat_id][user_id] = _bot_messages[chat_id][user_id][-MAX_STORED_MESSAGES:]
 
@@ -132,10 +119,6 @@ async def safe_send_message(
     delete_previous: bool = True,
     keep_last: int = 0
 ) -> Optional[Message]:
-    """
-    Безопасная отправка сообщения с автоудалением предыдущих.
-    🔥 ДОБАВЛЕНО В V7.1.0
-    """
     if chat_id is None or not text:
         return None
     
@@ -194,15 +177,6 @@ async def get_balance_safe(user_id: int) -> int:
     except: return 0
 
 
-async def get_user_stats_safe(user_id: int) -> dict:
-    if user_id is None or db is None: return {'wins': 0, 'games_played': 0}
-    try:
-        stats = await db.get_user_stats(user_id)
-        if stats: return {'wins': stats.get('wins',0) or 0, 'games_played': stats.get('games_played',0) or 0}
-    except: pass
-    return {'wins': 0, 'games_played': 0}
-
-
 def safe_int(value: Any) -> int:
     if value is None: return 0
     try: return int(value)
@@ -215,6 +189,27 @@ def safe_html_escape(text: Optional[str]) -> str:
         import html
         return html.escape(str(text))
     except: return ""
+
+
+# ==================== ЦЕНТРАЛИЗОВАННАЯ СТАТИСТИКА ====================
+
+from utils.stats_central import get_full_user_stats
+
+
+async def get_user_stats_safe(user_id: int) -> dict:
+    """Быстрый доступ к wins/games_played для главного меню."""
+    if user_id is None or db is None:
+        return {'wins': 0, 'games_played': 0}
+    try:
+        stats = await get_full_user_stats(user_id)
+        if stats:
+            return {
+                'wins': stats.get('wins', 0) or 0,
+                'games_played': stats.get('games_played', 0) or 0
+            }
+    except Exception:
+        pass
+    return {'wins': 0, 'games_played': 0}
 
 
 # ==================== ПРОВЕРКА АДМИНА ====================
@@ -384,18 +379,13 @@ async def cmd_vip_direct(message: Message):
     except Exception as e: logger.error(f"VIP: {e}")
 
 
-# ==================== CALLBACK: НАЗАД (С АВТОУДАЛЕНИЕМ) ====================
+# ==================== CALLBACK: НАЗАД ====================
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery):
-    """
-    Обработчик кнопки НАЗАД.
-    🔥 V7.1.0: Удаляет предыдущее меню и показывает новое.
-    """
     if not callback or not callback.message: return
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
-    first_name = callback.from_user.first_name or "Пользователь"
     
     is_admin = is_super_admin(user_id)
     balance = await get_balance_safe(user_id)
@@ -408,9 +398,7 @@ async def back_to_menu(callback: CallbackQuery):
         f"👇 Выберите категорию:"
     )
     
-    # Пробуем отредактировать текущее сообщение
     if not await safe_callback_edit(callback, text, get_main_menu(is_admin)):
-        # Если не получилось — удаляем старое и отправляем новое
         await delete_previous_bot_messages(chat_id, user_id, keep_last=0)
         await safe_send_message(chat_id, text, user_id, reply_markup=get_main_menu(is_admin), delete_previous=False)
     
@@ -421,10 +409,6 @@ async def back_to_menu(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "daily_bonus")
 async def callback_daily_bonus(callback: CallbackQuery):
-    """
-    Обработчик инлайн-кнопки «Ежедневная награда» из сводки.
-    🔥 ДОБАВЛЕНО В V7.1.0
-    """
     if not callback or not callback.message: return
     
     try:
@@ -434,8 +418,6 @@ async def callback_daily_bonus(callback: CallbackQuery):
     
     try:
         from handlers.economy import cmd_daily
-        # Создаём фейковое сообщение для передачи в обработчик
-        # cmd_daily ожидает Message, но мы можем передать callback.message
         await cmd_daily(callback.message)
     except Exception as e:
         logger.error(f"Daily bonus callback error: {e}")
@@ -495,14 +477,13 @@ def load_all_routers():
         except Exception as e: logger.warning(f"⚠️ {module_name}: {e}")
 
 
-# ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ (С АВТОУДАЛЕНИЕМ) ====================
+# ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ ====================
 
 @dp.callback_query(F.data == "menu_vip")
 async def menu_vip(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.vip import cmd_vip; await cmd_vip(callback.message)
     except Exception as e: logger.error(f"VIP: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -512,8 +493,7 @@ async def menu_vip(callback: CallbackQuery):
 async def menu_profile(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.profile import cmd_profile; await cmd_profile(callback.message)
     except Exception as e: logger.error(f"Profile: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -523,8 +503,7 @@ async def menu_profile(callback: CallbackQuery):
 async def menu_balance(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.economy import cmd_balance; await cmd_balance(callback.message)
     except Exception as e: logger.error(f"Balance: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -534,8 +513,7 @@ async def menu_balance(callback: CallbackQuery):
 async def menu_rank(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.ranks import cmd_rank; await cmd_rank(callback.message)
     except Exception as e: logger.error(f"Rank: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -545,8 +523,7 @@ async def menu_rank(callback: CallbackQuery):
 async def menu_xo(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.tictactoe import cmd_xo; await cmd_xo(callback.message)
     except Exception as e: logger.error(f"XO: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -556,19 +533,21 @@ async def menu_xo(callback: CallbackQuery):
 async def menu_stats(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
-    try: from handlers.stats import cmd_stats; await cmd_stats(callback.message)
-    except Exception as e: logger.error(f"Stats: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
+    try:
+        from handlers.stats import stats_menu_callback
+        await stats_menu_callback(callback)
+    except Exception as e:
+        logger.error(f"Stats: {e}")
+        await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_all")
 async def menu_all(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.tag import cmd_all; await cmd_all(callback.message)
     except Exception as e: logger.error(f"Tag: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -578,8 +557,7 @@ async def menu_all(callback: CallbackQuery):
 async def menu_ref(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.referral import ref_menu_callback; await ref_menu_callback(callback)
     except Exception as e: logger.error(f"Ref: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -589,8 +567,7 @@ async def menu_ref(callback: CallbackQuery):
 async def menu_relations(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.relationships import relationships_menu; await relationships_menu(callback)
     except Exception as e: logger.error(f"Relations: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -607,8 +584,7 @@ async def menu_groups(callback: CallbackQuery):
 async def menu_rp(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.smart_commands import cmd_my_custom_rp; await cmd_my_custom_rp(callback.message)
     except Exception as e: logger.error(f"RP: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -618,8 +594,7 @@ async def menu_rp(callback: CallbackQuery):
 async def menu_tags(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.tag_user import my_tags_menu_callback; await my_tags_menu_callback(callback)
     except Exception as e: logger.error(f"Tags: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -629,8 +604,7 @@ async def menu_tags(callback: CallbackQuery):
 async def menu_topchats(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.rating import cmd_top_chats; await cmd_top_chats(callback.message)
     except Exception as e: logger.error(f"TopChats: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -651,8 +625,7 @@ async def menu_help(callback: CallbackQuery):
 async def menu_donate(callback: CallbackQuery):
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else callback.from_user.id,
-        callback.from_user.id,
-        keep_last=0
+        callback.from_user.id, keep_last=0
     )
     try: from handlers.economy import cmd_donate as economy_donate; await economy_donate(callback.message)
     except Exception as e: logger.error(f"Donate: {e}"); await callback.message.answer("❌ Ошибка", reply_markup=get_back_keyboard())
@@ -673,8 +646,7 @@ async def menu_admin(callback: CallbackQuery):
         await callback.answer("❌ Доступ запрещён", show_alert=True); return
     await delete_previous_bot_messages(
         callback.message.chat.id if callback.message.chat else user_id,
-        user_id,
-        keep_last=0
+        user_id, keep_last=0
     )
     try:
         from handlers.admin import admin_panel_callback
@@ -712,25 +684,40 @@ async def on_startup():
     me = await bot.get_me()
     BOT_ID = me.id
     logger.info(f"🤖 Bot ID: {BOT_ID}")
-    logger.info("🚀 NEXUS Bot v7.1.0 starting...")
+    logger.info("🚀 NEXUS Bot v7.2.0 starting...")
     
     setup_bot_for_modules()
     load_all_routers()
     await start_all_background_tasks()
     
     if db:
-        try: await db.initialize(); logger.info("✅ Database initialized")
-        except Exception as e: logger.error(f"DB: {e}")
+        try:
+            await db.initialize()
+            logger.info("✅ Database initialized")
+        except Exception as e:
+            logger.error(f"DB: {e}")
+    
+    # 🔥 ИНИЦИАЛИЗАЦИЯ ТАБЛИЦЫ РАНГОВ
+    try:
+        from handlers.ranks import init_ranks_table
+        await init_ranks_table()
+        logger.info("✅ Ranks table initialized")
+    except Exception as e:
+        logger.warning(f"Ranks init: {e}")
     
     try:
         from handlers.smart_commands import load_custom_rp_commands
-        await load_custom_rp_commands(); logger.info("✅ Custom RP loaded")
-    except Exception as e: logger.warning(f"Custom RP: {e}")
+        await load_custom_rp_commands()
+        logger.info("✅ Custom RP loaded")
+    except Exception as e:
+        logger.warning(f"Custom RP: {e}")
     
     try:
         from handlers.stats import update_all_streaks
-        await update_all_streaks(); logger.info("✅ Streaks updated")
-    except Exception as e: logger.warning(f"Streaks: {e}")
+        await update_all_streaks()
+        logger.info("✅ Streaks updated")
+    except Exception as e:
+        logger.warning(f"Streaks: {e}")
     
     logger.info("✅ ALL SYSTEMS GO!")
 
@@ -747,13 +734,12 @@ async def on_shutdown():
     logger.info("👋 Stopped")
 
 
-# 🔥 СОХРАНЕНИЕ ВСЕХ СООБЩЕНИЙ ДЛЯ СТАТИСТИКИ
+# 🔥 СОХРАНЕНИЕ ВСЕХ СООБЩЕНИЙ ДЛЯ СТАТИСТИКИ (без дубля трекинга)
 @dp.message()
 async def save_all_messages(message: Message):
     """
-    Сохраняет ВСЕ сообщения в БД для статистики.
-    🔥 Это критически важно для работы сводки дня!
-    Без этой функции статистика всегда будет показывать 0.
+    Сохраняет ВСЕ сообщения в БД для анализа тем и статистики чатов.
+    Трекинг активности (track_user_activity) вызывается ОДИН раз — здесь.
     """
     if not message or not db or not message.chat or not message.from_user:
         return
@@ -767,7 +753,7 @@ async def save_all_messages(message: Message):
         if text and len(text) >= 3:
             await db.log_chat_message(chat_id, user_id, text)
         
-        # Трекинг активности с chat_id
+        # Трекинг активности с chat_id — ЕДИНСТВЕННЫЙ вызов
         activity_type = "message"
         if message.sticker:
             activity_type = "sticker"
