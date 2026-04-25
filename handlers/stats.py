@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/stats.py
-# ВЕРСИЯ: 2.1.0-production
-# ОПИСАНИЕ: Модуль статистики — ИСПРАВЛЕН chat_id В track_user_activity
+# ВЕРСИЯ: 2.2.0-production
+# ОПИСАНИЕ: Модуль статистики — ЦЕНТРАЛИЗОВАННЫЙ ИСТОЧНИК
+# ИСПРАВЛЕНИЯ V2.2.0: Единый get_full_user_stats, убран дубль трекинга
 # ============================================
 
 import html
@@ -17,6 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import db, DatabaseError
+from utils.stats_central import get_full_user_stats
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -74,32 +76,6 @@ def escape_name(user: Optional[Dict]) -> str:
     return "Пользователь"
 
 
-async def get_user_stats_safe(user_id: int) -> Optional[Dict]:
-    try:
-        stats = await db.get_user_stats(user_id)
-        if stats: return stats
-        
-        user = await db.get_user(user_id)
-        if not user: return None
-        
-        balance = await db.get_balance(user_id)
-        return {
-            "balance": balance, "vip_level": user.get("vip_level",0) or 0,
-            "daily_streak": user.get("daily_streak",0) or 0,
-            "user_register_date": user.get("register_date",""),
-            "messages_total":0,"messages_today":0,"messages_week":0,"messages_month":0,
-            "total_voice":0,"total_stickers":0,"total_photos":0,"total_videos":0,"total_gifs":0,
-            "days_active":0,"current_streak":0,"max_streak":0,
-            "games_played":0,"wins":0,"losses":0,"draws":0,
-            "wins_vs_bot":0,"losses_vs_bot":0,"max_win_streak":0,
-            "total_earned":0,"total_spent":0,"daily_claims":0,
-            "total_donated_rub":0,"total_donated_coins":0,
-        }
-    except DatabaseError as e:
-        logger.error(f"Database error getting stats for {user_id}: {e}")
-        return None
-
-
 # ==================== КЛАВИАТУРЫ ====================
 
 def stats_menu_keyboard() -> InlineKeyboardMarkup:
@@ -149,9 +125,10 @@ def format_top_list(title: str, users: List[Dict], value_key: str, suffix: str =
     return "\n".join(lines)
 
 
-def format_user_stats(user: Dict, stats: Dict) -> str:
-    name_display = escape_name(user)
-    first_name = safe_html_escape(user.get("first_name") or "Пользователь")
+def format_user_stats(stats: Dict) -> str:
+    """Форматирование статистики из единого источника."""
+    name_display = escape_name(stats)
+    first_name = safe_html_escape(stats.get("first_name") or "Пользователь")
     register_date = format_date(safe_get(stats, "user_register_date", ""))
     days_active = safe_get(stats, "days_active", 0)
     games = safe_get(stats, "games_played", 0)
@@ -201,37 +178,39 @@ def format_user_stats(user: Dict, stats: Dict) -> str:
 
 
 async def show_user_stats(target_id: int, target: Message | CallbackQuery, is_callback: bool = False) -> None:
+    """Показать статистику пользователя из единого источника."""
     try:
-        user = await db.get_user(target_id)
-        if not user:
+        stats = await get_full_user_stats(target_id)
+        if not stats:
             text = "❌ Пользователь не найден!\nИспользуйте /start для регистрации."
-            if is_callback: await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_menu"))
-            else: await target.answer(text, parse_mode=ParseMode.HTML)
+            if is_callback:
+                await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_menu"))
+            else:
+                await target.answer(text, parse_mode=ParseMode.HTML)
             return
         
-        stats = await get_user_stats_safe(target_id)
-        if stats is None:
-            text = "❌ Ошибка при загрузке статистики."
-            if is_callback: await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_menu"))
-            else: await target.answer(text, parse_mode=ParseMode.HTML)
-            return
-        
-        text = format_user_stats(user, stats)
+        text = format_user_stats(stats)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏆 ТОПЫ", callback_data="stats_tops")],
             [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="stats_menu")]
         ])
         
-        if is_callback: await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard); await target.answer()
-        else: await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=stats_menu_keyboard())
+        if is_callback:
+            await target.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            await target.answer()
+        else:
+            await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=stats_menu_keyboard())
     except DatabaseError as e:
         logger.error(f"Database error: {e}")
         text = "❌ Ошибка базы данных."
-        if is_callback: await target.message.edit_text(text, parse_mode=ParseMode.HTML); await target.answer("❌ Ошибка", show_alert=True)
-        else: await target.answer(text, parse_mode=ParseMode.HTML)
+        if is_callback:
+            await target.message.edit_text(text, parse_mode=ParseMode.HTML)
+            await target.answer("❌ Ошибка", show_alert=True)
+        else:
+            await target.answer(text, parse_mode=ParseMode.HTML)
 
 
-async def show_top_list(callback: CallbackQuery, title: str, fetch_func, value_key: str, suffix: str = "", show_extra: bool = False, empty_message: str = "Пока нет данных!", user_stats_func=None) -> None:
+async def show_top_list(callback: CallbackQuery, title: str, fetch_func, value_key: str, suffix: str = "", show_extra: bool = False, empty_message: str = "Пока нет данных!") -> None:
     try:
         top_users = await fetch_func(TOP_LIMIT)
         if not top_users:
@@ -239,11 +218,10 @@ async def show_top_list(callback: CallbackQuery, title: str, fetch_func, value_k
             await callback.answer(); return
         
         text = format_top_list(title, top_users, value_key, suffix, show_extra)
-        if user_stats_func:
-            user_stats = await user_stats_func(callback.from_user.id)
-            if user_stats:
-                value = safe_get(user_stats, value_key, 0)
-                text += f"\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваш результат: <b>{format_number(value)}{suffix}</b>"
+        user_stats = await get_full_user_stats(callback.from_user.id)
+        if user_stats:
+            value = safe_get(user_stats, value_key, 0)
+            text += f"\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 Ваш результат: <b>{format_number(value)}{suffix}</b>"
         
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
@@ -286,13 +264,15 @@ async def cmd_top(message: Message) -> None:
 # ==================== ОБРАБОТЧИКИ КНОПОК ====================
 
 @router.callback_query(F.data == "stats_menu")
-@router.callback_query(F.data == "stats")
+@router.callback_query(F.data == "menu_stats")
 async def stats_menu_callback(callback: CallbackQuery) -> None:
     if not callback or not callback.message: return
     try:
         await callback.message.edit_text("📊 <b>СТАТИСТИКА</b>\n\nВыберите действие:", parse_mode=ParseMode.HTML, reply_markup=stats_menu_keyboard())
         await callback.answer()
-    except Exception as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data == "stats_my")
@@ -307,7 +287,9 @@ async def stats_tops_callback(callback: CallbackQuery) -> None:
     try:
         await callback.message.edit_text("🏆 <b>ТОПЫ NEXUS</b>\n\nВыберите категорию:", parse_mode=ParseMode.HTML, reply_markup=tops_menu_keyboard())
         await callback.answer()
-    except Exception as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 
 # ==================== ТОПЫ ====================
@@ -315,15 +297,12 @@ async def stats_tops_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "top_messages")
 async def top_messages_callback(callback: CallbackQuery):
     if not callback: return
-    await show_top_list(callback, "💬 <b>ТОП-15 ПО СООБЩЕНИЯМ</b>", db.get_top_messages, "messages_total", " сообщ.", False, "Пока нет данных!", db.get_user_stats)
-
+    await show_top_list(callback, "💬 <b>ТОП-15 ПО СООБЩЕНИЯМ</b>", db.get_top_messages, "messages_total", " сообщ.")
 
 @router.callback_query(F.data == "top_balance")
 async def top_balance_callback(callback: CallbackQuery):
     if not callback: return
-    async def get_balance(u): bal = await db.get_balance(u); return {"balance": bal} if bal else None
-    await show_top_list(callback, "💰 <b>ТОП-15 ПО БАЛАНСУ</b>", db.get_top_balance, "balance", " NCoin", True, "Пока нет данных!", get_balance)
-
+    await show_top_list(callback, "💰 <b>ТОП-15 ПО БАЛАНСУ</b>", db.get_top_balance, "balance", " NCoin", True)
 
 @router.callback_query(F.data == "top_xo")
 async def top_xo_callback(callback: CallbackQuery):
@@ -339,15 +318,18 @@ async def top_xo_callback(callback: CallbackQuery):
             if u is None: continue
             lines.append(f"{get_medal(i)} <b>{escape_name(u)}</b> — {safe_get(u,'wins',0)} побед ({safe_get(u,'games_played',0)} игр)")
         
-        user_stats = await get_user_stats_safe(callback.from_user.id)
+        user_stats = await get_full_user_stats(callback.from_user.id)
         if user_stats:
             lines.extend(["", "━━━━━━━━━━━━━━━━━━━━━", f"🎮 Ваши победы: <b>{safe_get(user_stats,'wins',0)}</b> ({safe_get(user_stats,'games_played',0)} игр)"])
         
         await callback.message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
-    except DatabaseError as e: logger.error(f"Database error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-    except Exception as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-
+    except DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 @router.callback_query(F.data == "top_activity")
 async def top_activity_callback(callback: CallbackQuery):
@@ -363,15 +345,18 @@ async def top_activity_callback(callback: CallbackQuery):
             if u is None: continue
             lines.append(f"{get_medal(i)} <b>{escape_name(u)}</b> — {safe_get(u,'days_active',0)} дней (стрик {safe_get(u,'current_streak',0)})")
         
-        user_stats = await get_user_stats_safe(callback.from_user.id)
+        user_stats = await get_full_user_stats(callback.from_user.id)
         if user_stats:
             lines.extend(["", "━━━━━━━━━━━━━━━━━━━━━", f"📊 Ваша активность: <b>{safe_get(user_stats,'days_active',0)} дней (стрик {safe_get(user_stats,'current_streak',0)})</b>"])
         
         await callback.message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
-    except DatabaseError as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-    except Exception as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-
+    except DatabaseError as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 @router.callback_query(F.data == "top_daily")
 async def top_daily_callback(callback: CallbackQuery):
@@ -393,9 +378,12 @@ async def top_daily_callback(callback: CallbackQuery):
         
         await callback.message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_keyboard("stats_tops"))
         await callback.answer()
-    except DatabaseError as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-    except Exception as e: logger.error(f"Error: {e}"); await callback.answer("❌ Ошибка", show_alert=True)
-
+    except DatabaseError as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 @router.callback_query(F.data == "top_donors")
 async def top_donors_callback(callback: CallbackQuery):
@@ -406,7 +394,7 @@ async def top_donors_callback(callback: CallbackQuery):
 # ==================== ИНТЕГРАЦИОННЫЕ ФУНКЦИИ ====================
 
 async def track_message(user_id: int, message: Message) -> None:
-    """Отслеживание сообщения для статистики."""
+    """Отслеживание сообщения для статистики. Вызывается из bot.py."""
     if user_id is None or message is None or message.chat is None:
         return
     
@@ -433,8 +421,10 @@ async def track_xo_game(user_id: int, result_type: str, bet: int = 0, won: int =
     try:
         await db.update_xo_stats(user_id, result_type, bet or 0, won or 0)
         await db.track_user_activity(user_id, 0, "xo_game", 1)
-    except DatabaseError as e: logger.error(f"Database error: {e}")
-    except Exception as e: logger.error(f"Unexpected error: {e}")
+    except DatabaseError as e:
+        logger.error(f"Database error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
 
 
 async def update_all_streaks() -> None:
@@ -442,8 +432,10 @@ async def update_all_streaks() -> None:
     try:
         await db.update_user_streaks()
         logger.info("✅ Activity streaks updated")
-    except DatabaseError as e: logger.error(f"Database error: {e}")
-    except Exception as e: logger.error(f"Unexpected error: {e}")
+    except DatabaseError as e:
+        logger.error(f"Database error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
 
 
 async def reset_daily_counters() -> None:
@@ -451,5 +443,7 @@ async def reset_daily_counters() -> None:
     try:
         await db.reset_daily_counters()
         logger.info("✅ Daily counters reset")
-    except DatabaseError as e: logger.error(f"Database error: {e}")
-    except Exception as e: logger.error(f"Unexpected error: {e}")
+    except DatabaseError as e:
+        logger.error(f"Database error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
