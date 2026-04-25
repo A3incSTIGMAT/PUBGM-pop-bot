@@ -2,31 +2,26 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/relationships.py
-# ВЕРСИЯ: 2.2.1-stable
-# ОПИСАНИЕ: Система отношений — ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ
+# ВЕРСИЯ: 2.3.0-final
+# ОПИСАНИЕ: Система отношений — ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ + ВСЕ КОМАНДЫ
 # ============================================
 
 import html
 import logging
 import random
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramAPIError
 
-from database import db
+from database import db, DatabaseError
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-# ==================== СОСТОЯНИЯ ДЛЯ FSM ====================
-
-class ActionStates(StatesGroup):
-    waiting_for_target = State()
 
 # ==================== КОНСТАНТЫ ====================
 
@@ -54,7 +49,7 @@ FLIRTS = [
 SLAPS = [
     "👋 {from_name} даёт леща {to_name}! Прилетело знатно!",
     "🖐️ {from_name} отвешивает пощёчину {to_name}!",
-    "💥 {from_name} шлёпает {to_name}!",
+    "💥 {from_name} шлёпает {to_name}! Это любя!",
 ]
 
 HUGS = [
@@ -63,378 +58,463 @@ HUGS = [
     "💕 {from_name} обнимает {to_name} от всей души!",
 ]
 
-# ==================== КЛАВИАТУРЫ ====================
 
-def get_relations_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💍 ПРЕДЛОЖИТЬ БРАК"), KeyboardButton(text="💕 ФЛИРТ")],
-            [KeyboardButton(text="🤗 ОБНЯТЬ"), KeyboardButton(text="👋 ДАТЬ ЛЕЩА")],
-            [KeyboardButton(text="✨ КОМПЛИМЕНТ"), KeyboardButton(text="💔 РАЗВЕСТИСЬ")],
-            [KeyboardButton(text="🔙 НАЗАД")]
-        ],
-        resize_keyboard=True
-    )
-
-def get_cancel_keyboard():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ ОТМЕНА")]], resize_keyboard=True)
-
-def get_back_inline_keyboard(callback_data: str = "menu_relations") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
-    ])
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасный экранинг для HTML. Возвращает пустую строку при None."""
-    if not text:
-        return ""
-    try:
-        return html.escape(str(text))
-    except Exception:
-        return ""
+    if text is None: return ""
+    try: return html.escape(str(text))
+    except: return ""
+
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+    ])
+
 
 async def get_user_name(user_id: int) -> str:
-    """Получить имя пользователя по ID с защитой от None"""
+    if db is None: return f"ID {user_id}"
     try:
         user = await db.get_user(user_id)
         if user:
-            name = user.get("first_name") or user.get("username")
-            if name:
-                return safe_html_escape(name)
-    except Exception as e:
-        logger.error(f"Get user name error: {e}")
+            return safe_html_escape(user.get('first_name') or f"@{user.get('username')}" or f"ID {user_id}")
+    except: pass
     return f"ID {user_id}"
 
+
 async def get_marriage_partner(user_id: int) -> Optional[int]:
-    """Получить ID партнёра по браку"""
+    if db is None: return None
     try:
         rel = await db.get_relationship_status(user_id, "marriage")
-        if rel and isinstance(rel, dict):
-            return rel.get("user2_id") if rel.get("user1_id") == user_id else rel.get("user1_id")
-    except Exception as e:
-        logger.error(f"Get marriage partner error: {e}")
+        if rel:
+            return rel["user2_id"] if rel["user1_id"] == user_id else rel["user1_id"]
+    except: pass
     return None
 
-async def build_relations_text(user_id: int) -> str:
-    """Формирует текст меню отношений"""
-    partner_id = await get_marriage_partner(user_id)
-    if partner_id:
-        partner_name = await get_user_name(partner_id)
-        return (
-            f"💕 <b>РАЗДЕЛ ОТНОШЕНИЙ</b>\n\n"
-            f"💍 <b>В браке с:</b> {partner_name}\n\n"
-            f"👇 Выбери действие:"
+
+async def get_family_members(user_id: int) -> list:
+    if db is None: return []
+    try:
+        rows = await db._execute_with_retry(
+            """SELECT r.*, u.first_name, u.username 
+               FROM relationships r
+               LEFT JOIN users u ON (CASE WHEN r.user1_id = ? THEN r.user2_id ELSE r.user1_id END) = u.user_id
+               WHERE (r.user1_id = ? OR r.user2_id = ?) AND r.status = 'active'
+               ORDER BY r.created_at DESC""",
+            (user_id, user_id, user_id), fetch_all=True
         )
-    return (
-        "💕 <b>РАЗДЕЛ ОТНОШЕНИЙ</b>\n\n"
-        "Здесь ты можешь:\n"
-        "• 💍 Предложить брак\n"
-        "• 💕 Пофлиртовать\n"
-        "• 🤗 Обнять\n"
-        "• 👋 Дать леща\n"
-        "• ✨ Сделать комплимент\n\n"
-        "🔥 <b>ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ!</b>\n\n"
-        "👇 Выбери действие:"
-    )
+        return [dict(r) for r in rows] if rows else []
+    except: return []
 
-# ==================== ВХОД В РАЗДЕЛ ОТНОШЕНИЙ ====================
 
-@router.message(lambda m: m.text == "💕 Отношения")
-async def relations_menu_from_message(message: Message, state: FSMContext):
-    """Вход из ReplyKeyboard"""
-    await state.clear()
-    text = await build_relations_text(message.from_user.id)
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_relations_keyboard())
+# ==================== ГЛАВНОЕ МЕНЮ ОТНОШЕНИЙ ====================
 
 @router.callback_query(F.data == "menu_relations")
-async def relations_menu_from_callback(callback: CallbackQuery, state: FSMContext):
-    """Вход из InlineKeyboard"""
-    await state.clear()
-    await callback.answer()
-    if not callback.message:
-        await callback.message.answer("⚠️ Не удалось открыть меню.", reply_markup=get_relations_keyboard())
-        return
-
-    text = await build_relations_text(callback.from_user.id)
-    try:
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_relations_keyboard())
-    except Exception:
-        # Если edit_text не сработал (напр. слишком старое сообщение), отправляем новое
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_relations_keyboard())
-
-# ==================== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ДЕЙСТВИЙ ====================
-
-@router.message(lambda m: m.text in ["💍 ПРЕДЛОЖИТЬ БРАК", "💕 ФЛИРТ", "🤗 ОБНЯТЬ", "👋 ДАТЬ ЛЕЩА", "✨ КОМПЛИМЕНТ"])
-async def action_start(message: Message, state: FSMContext):
-    action_text = message.text
-    await state.update_data(action=action_text)
-    await state.set_state(ActionStates.waiting_for_target)
+@router.callback_query(F.data == "relationships_menu")
+async def relationships_menu(callback: CallbackQuery):
+    """Главное меню отношений."""
+    if not callback or not callback.message: return
     
-    emojis = {
-        "💍 ПРЕДЛОЖИТЬ БРАК": "💍", "💕 ФЛИРТ": "💕", "🤗 ОБНЯТЬ": "🤗",
-        "👋 ДАТЬ ЛЕЩА": "👋", "✨ КОМПЛИМЕНТ": "✨"
-    }
-    emoji = emojis.get(action_text, "❤️")
+    user_id = callback.from_user.id
+    partner_id = await get_marriage_partner(user_id)
     
-    info = f"{emoji} <b>{action_text}</b>\n\n"
-    if action_text == "💍 ПРЕДЛОЖИТЬ БРАК":
-        info += "Отправь username пользователя, которому хочешь сделать предложение.\n\n" \
-                "<b>Пример:</b> @username\n\n" \
-                "После предложения партнёр должен принять его.\n"
-    else:
-        info += "Отправь username пользователя.\n\n" \
-                "<b>Пример:</b> @username\n"
-    info += "❌ Для отмены нажми кнопку «ОТМЕНА»"
-    
-    await message.answer(info, parse_mode=ParseMode.HTML, reply_markup=get_cancel_keyboard())
-
-# ==================== ПОЛУЧЕНИЕ USERNAME И ВЫПОЛНЕНИЕ ====================
-
-@router.message(ActionStates.waiting_for_target)
-async def action_execute(message: Message, state: FSMContext):
-    if message.text == "❌ ОТМЕНА":
-        await state.clear()
-        await message.answer("❌ Действие отменено.", reply_markup=get_relations_keyboard())
-        return
-
-    data = await state.get_data()
-    action = data.get("action")
-    if not action:
-        await state.clear()
-        return
-
-    target_text = message.text.strip()
-    username = target_text.lstrip("@").strip()
-    if not username:
-        await message.answer("❌ Укажи корректный username! Пример: @username", reply_markup=get_cancel_keyboard())
-        return
-
-    try:
-        target = await db.get_user_by_username(username)
-    except Exception as e:
-        logger.error(f"DB get_user_by_username error: {e}")
-        target = None
-
-    if not target or not target.get("user_id"):
-        await message.answer(
-            f"❌ Пользователь @{safe_html_escape(username)} не найден!\n\n"
-            "Убедись, что он зарегистрирован в боте.",
-            reply_markup=get_relations_keyboard()
+    if partner_id:
+        partner_name = await get_user_name(partner_id)
+        
+        marriage = await db.get_relationship_status(user_id, "marriage") if db else None
+        created_at = marriage.get('created_at', '')[:10] if marriage else ''
+        
+        text = (
+            "💕 <b>ОТНОШЕНИЯ</b>\n\n"
+            f"💍 <b>В браке с:</b> {partner_name}\n"
+            f"📅 С: {created_at or 'Неизвестно'}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>Доступные действия:</b>"
         )
-        await state.clear()
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🤗 ОБНЯТЬ", callback_data=f"rel_hug_{partner_id}"),
+             InlineKeyboardButton(text="💋 ПОЦЕЛОВАТЬ", callback_data=f"rel_kiss_{partner_id}")],
+            [InlineKeyboardButton(text="🌸 КОМПЛИМЕНТ", callback_data=f"rel_compliment_{partner_id}"),
+             InlineKeyboardButton(text="💋 ФЛИРТ", callback_data=f"rel_flirt_{partner_id}")],
+            [InlineKeyboardButton(text="💔 РАЗВОД", callback_data="rel_divorce_confirm")],
+            [InlineKeyboardButton(text="👨‍👩‍👧 МОЯ СЕМЬЯ", callback_data="rel_family")],
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")],
+        ])
+    else:
+        text = (
+            "💕 <b>ОТНОШЕНИЯ</b>\n\n"
+            "Здесь вы можете найти пару, создать семью и многое другое!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>🔥 ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ!</b>\n\n"
+            "<b>ДОСТУПНЫЕ КОМАНДЫ:</b>\n"
+            "• 💍 <b>Брак</b> — /marry @username\n"
+            "• 💋 <b>Флирт</b> — /flirt @username\n"
+            "• 🤗 <b>Объятия</b> — /hug @username\n"
+            "• 👋 <b>Лещ</b> — /slap @username\n"
+            "• 🌸 <b>Комплимент</b> — /compliment @username\n\n"
+            "💡 <b>Подсказка:</b> Для брака нужен согласный партнёр!"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💍 ПРЕДЛОЖИТЬ БРАК", callback_data="rel_marry_info")],
+            [InlineKeyboardButton(text="💋 ФЛИРТ", callback_data="rel_flirt_info")],
+            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")],
+        ])
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    await callback.answer()
+
+
+# ==================== КОМАНДА /marry ====================
+
+@router.message(Command("marry"))
+async def cmd_marry(message: Message):
+    if not message or not message.from_user or not message.text: return
+    
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith('@'):
+        await message.answer(
+            "💍 <b>ПРЕДЛОЖЕНИЕ БРАКА</b>\n\n"
+            f"Использование: <code>/marry @username</code>\n"
+            "🔥 <b>БЕСПЛАТНО!</b>\n\n"
+            "После предложения партнёр должен принять его.",
+            parse_mode=ParseMode.HTML
+        )
         return
-
-    target_id = target["user_id"]
-    from_id = message.from_user.id
-    from_name = safe_html_escape(message.from_user.first_name or "Пользователь")
-    target_name = f"@{safe_html_escape(username)}"
-
-    if target_id == from_id:
-        await message.answer("❌ Нельзя сделать это над самим собой!", reply_markup=get_relations_keyboard())
-        await state.clear()
+    
+    username = args[1].lstrip('@')
+    user_id = message.from_user.id
+    
+    # Проверка текущего брака
+    if await get_marriage_partner(user_id):
+        await message.answer("❌ Вы уже в браке! Сначала разведитесь.")
         return
-
+    
+    # Поиск партнёра
     try:
-        if action == "💍 ПРЕДЛОЖИТЬ БРАК":
-            await execute_marry(message, from_id, target_id, target_name, from_name)
-        elif action == "💕 ФЛИРТ":
-            await message.answer(random.choice(FLIRTS).format(from_name=from_name, to_name=target_name), reply_markup=get_relations_keyboard())
-        elif action == "🤗 ОБНЯТЬ":
-            await message.answer(random.choice(HUGS).format(from_name=from_name, to_name=target_name), reply_markup=get_relations_keyboard())
-        elif action == "👋 ДАТЬ ЛЕЩА":
-            await message.answer(random.choice(SLAPS).format(from_name=from_name, to_name=target_name), reply_markup=get_relations_keyboard())
-        elif action == "✨ КОМПЛИМЕНТ":
-            await message.answer(f"🌸 {from_name} говорит {target_name}: {random.choice(COMPLIMENTS)}", reply_markup=get_relations_keyboard())
-    except Exception as e:
-        logger.error(f"Action execute error: {e}")
-        await message.answer("❌ Произошла ошибка при выполнении действия.", reply_markup=get_relations_keyboard())
-    finally:
-        await state.clear()
-
-async def execute_marry(message: Message, from_id: int, target_id: int, target_name: str, from_name: str):
-    try:
-        current_from = await db.get_relationship_status(from_id, "marriage")
-        current_target = await db.get_relationship_status(target_id, "marriage")
-    except Exception as e:
-        logger.error(f"DB check marriage error: {e}")
-        await message.answer("❌ Ошибка проверки статуса отношений.", reply_markup=get_relations_keyboard())
+        partner = await db.get_user_by_username(username) if db else None
+    except DatabaseError:
+        await message.answer("❌ Ошибка базы данных.")
         return
-
-    if current_from:
-        await message.answer("❌ Вы уже в браке! Сначала разведитесь.", reply_markup=get_relations_keyboard())
+    
+    if not partner:
+        await message.answer(f"❌ Пользователь @{safe_html_escape(username)} не найден!")
         return
-    if current_target:
-        await message.answer(f"❌ {target_name} уже в браке!", reply_markup=get_relations_keyboard())
+    
+    partner_id = partner['user_id']
+    if partner_id == user_id:
+        await message.answer("❌ Нельзя жениться на самом себе!")
         return
-
+    
+    if await get_marriage_partner(partner_id):
+        await message.answer(f"❌ @{safe_html_escape(username)} уже в браке!")
+        return
+    
+    # Предложение
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💍 ПРИНЯТЬ", callback_data=f"marry_accept_{from_id}"),
-         InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"marry_reject_{from_id}")]
+        [InlineKeyboardButton(text="💍 ПРИНЯТЬ", callback_data=f"marry_accept_{user_id}"),
+         InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"marry_reject_{user_id}")]
     ])
-
+    
     await message.answer(
         f"💍 <b>ПРЕДЛОЖЕНИЕ БРАКА!</b>\n\n"
-        f"👤 {from_name} предлагает брак {target_name}!\n"
+        f"👤 {safe_html_escape(message.from_user.first_name)} предлагает брак @{safe_html_escape(username)}!\n"
         f"🔥 <b>БЕСПЛАТНО!</b>\n\n"
-        f"⚠️ ТОЛЬКО {target_name} может принять или отклонить!",
+        f"⚠️ ТОЛЬКО @{safe_html_escape(username)} может принять или отклонить!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
-    await message.answer("✅ Предложение отправлено! Ожидаем ответа...", reply_markup=get_relations_keyboard())
+
 
 # ==================== ПРИНЯТИЕ/ОТКЛОНЕНИЕ БРАКА ====================
 
 @router.callback_query(F.data.startswith("marry_accept_"))
 async def marry_accept(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer("⚠️ Сообщение устарело", show_alert=True)
-        return
-
+    if not callback or not callback.from_user: return
+    
     try:
-        proposer_id = int(callback.data.removeprefix("marry_accept_"))
-    except ValueError:
-        await callback.answer("❌ Неверный формат данных", show_alert=True)
+        proposer_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных", show_alert=True)
         return
-
+    
     acceptor_id = callback.from_user.id
     if proposer_id == acceptor_id:
         await callback.answer("❌ Нельзя принять своё предложение!", show_alert=True)
         return
-
+    
     try:
-        if await db.get_relationship_status(proposer_id, "marriage"):
-            await callback.answer("❌ Отправитель уже в браке!", show_alert=True)
-            return
-        if await db.get_relationship_status(acceptor_id, "marriage"):
-            await callback.answer("❌ Вы уже в браке!", show_alert=True)
-            return
-
-        success = await db.create_relationship(proposer_id, acceptor_id, "marriage")
-    except Exception as e:
-        logger.error(f"Marriage accept DB error: {e}")
-        await callback.answer("❌ Ошибка базы данных", show_alert=True)
-        return
-
+        if db:
+            if await db.get_relationship_status(proposer_id, "marriage"):
+                await callback.answer("❌ Отправитель уже в браке!", show_alert=True); return
+            if await db.get_relationship_status(acceptor_id, "marriage"):
+                await callback.answer("❌ Вы уже в браке!", show_alert=True); return
+            
+            success = await db.create_relationship(proposer_id, acceptor_id, "marriage")
+        else:
+            success = False
+    except DatabaseError as e:
+        logger.error(f"Marriage error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True); return
+    
     if success:
-        proposer_name = await get_user_name(proposer_id)
-        acceptor_name = await get_user_name(acceptor_id)
-        text = (
+        p_name = await get_user_name(proposer_id)
+        a_name = await get_user_name(acceptor_id)
+        await callback.message.edit_text(
             f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\n\n"
-            f"💍 <b>{proposer_name}</b> и <b>{acceptor_name}</b> теперь в браке!\n\n"
-            f"💕 Совет да любовь!"
+            f"💍 <b>{p_name}</b> и <b>{a_name}</b> теперь в браке!\n\n💕 Совет да любовь!",
+            parse_mode=ParseMode.HTML
         )
     else:
-        text = "❌ Ошибка создания брака."
-
-    try:
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard())
-    except Exception:
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard())
+        await callback.message.edit_text("❌ Ошибка создания брака.")
     await callback.answer()
+
 
 @router.callback_query(F.data.startswith("marry_reject_"))
 async def marry_reject(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer("⚠️ Сообщение устарело", show_alert=True)
-        return
-    try:
-        await callback.message.edit_text("💔 Предложение отклонено.", parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard())
-    except Exception:
-        pass
-    await callback.answer("❌ Отклонено", show_alert=True)
+    if not callback: return
+    await callback.message.edit_text("💔 Предложение отклонено.", parse_mode=ParseMode.HTML)
+    await callback.answer("❌ Отклонено")
+
 
 # ==================== РАЗВОД ====================
 
-@router.message(lambda m: m.text == "💔 РАЗВЕСТИСЬ")
-async def divorce_start(message: Message):
-    user_id = message.from_user.id
-    partner_id = await get_marriage_partner(user_id)
-    if not partner_id:
-        await message.answer("❌ Вы не в браке!", reply_markup=get_relations_keyboard())
-        return
-
-    partner_name = await get_user_name(partner_id)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💔 ДА, РАЗВЕСТИСЬ", callback_data="divorce_confirm"),
-         InlineKeyboardButton(text="❌ НЕТ, ОТМЕНА", callback_data="divorce_cancel")]
-    ])
-
-    await message.answer(
-        f"💔 <b>РАЗВОД</b>\n\n"
-        f"Вы уверены, что хотите развестись с {partner_name}?\n\n"
-        f"🔥 <b>БЕСПЛАТНО!</b>\n\n"
-        f"Это действие нельзя отменить!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
-
-@router.callback_query(F.data == "divorce_confirm")
+@router.callback_query(F.data == "rel_divorce_confirm")
 async def divorce_confirm(callback: CallbackQuery):
-    if not callback.message: return
+    if not callback or not callback.message: return
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💔 ДА, РАЗВЕСТИСЬ", callback_data="rel_divorce_do"),
+         InlineKeyboardButton(text="❌ НЕТ", callback_data="relationships_menu")]
+    ])
+    
+    await callback.message.edit_text(
+        "💔 <b>РАЗВОД</b>\n\n🔥 <b>БЕСПЛАТНО!</b>\n\nВы уверены? Это нельзя отменить!",
+        parse_mode=ParseMode.HTML, reply_markup=keyboard
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rel_divorce_do")
+async def divorce_do(callback: CallbackQuery):
+    if not callback or not callback.from_user: return
+    
     user_id = callback.from_user.id
     partner_id = await get_marriage_partner(user_id)
+    
     if not partner_id:
-        await callback.answer("❌ Вы не в браке!", show_alert=True)
-        return
-
+        await callback.answer("❌ Вы не в браке!", show_alert=True); return
+    
     try:
-        success = await db.end_relationship(user_id, partner_id, "marriage")
+        if db:
+            await db.end_relationship(user_id, partner_id, "marriage")
+        partner_name = await get_user_name(partner_id)
+        await callback.message.edit_text(
+            f"💔 <b>РАЗВОД ОФОРМЛЕН</b>\n\nВы развелись с {partner_name}.\nВы снова свободны!",
+            parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard()
+        )
     except Exception as e:
-        logger.error(f"Divorce DB error: {e}")
-        await callback.answer("❌ Ошибка базы данных", show_alert=True)
-        return
-
-    partner_name = await get_user_name(partner_id) if partner_id else "партнёром"
-    text = (
-        f"💔 <b>РАЗВОД ОФОРМЛЕН</b>\n\n"
-        f"Вы развелись с {partner_name}.\n"
-        f"Вы снова свободны!"
-    ) if success else "❌ Ошибка при разводе."
-
-    try:
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard())
-    except Exception:
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_inline_keyboard())
+        logger.error(f"Divorce error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
     await callback.answer()
 
-@router.callback_query(F.data == "divorce_cancel")
-async def divorce_cancel(callback: CallbackQuery):
-    if callback.message:
-        try: await callback.message.edit_text("✅ Развод отменён.", reply_markup=get_back_inline_keyboard())
-        except: pass
-    await callback.answer()
 
-# ==================== КОМАНДЫ (для обратной совместимости) ====================
+# ==================== СЕМЬЯ ====================
 
-@router.message(Command("relations"))
-async def cmd_relations(message: Message, state: FSMContext):
-    await state.clear()
-    text = await build_relations_text(message.from_user.id)
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_relations_keyboard())
-
-# ... (остальные /marry, /flirt и т.д. остаются без изменений, 
-# только добавлен try/except для db.get_user_by_username в них для единообразия)
-# Для краткости оставлены логически идентичными оригиналу, 
-# но в продакшене рекомендуется обернуть db-вызовы в try/except аналогично action_execute.
-
-@router.message(Command("cancel"))
-async def cancel_action(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None:
-        await state.clear()
-        await message.answer("❌ Действие отменено.", reply_markup=get_relations_keyboard())
+@router.callback_query(F.data == "rel_family")
+async def show_family(callback: CallbackQuery):
+    if not callback or not callback.message: return
+    
+    user_id = callback.from_user.id
+    members = await get_family_members(user_id)
+    
+    if not members:
+        text = "👨‍👩‍👧 <b>МОЯ СЕМЬЯ</b>\n\nУ вас пока нет семьи. Заключите брак!"
     else:
-        await message.answer("❌ Нет активных действий для отмены.")
+        text = "👨‍👩‍👧 <b>МОЯ СЕМЬЯ</b>\n\n"
+        rel_names = {"marriage": "💍 Брак", "adoption": "👶 Усыновление"}
+        for m in members:
+            partner_id = m['user2_id'] if m['user1_id'] == user_id else m['user1_id']
+            name = await get_user_name(partner_id)
+            rel_type = rel_names.get(m['type'], m['type'])
+            text += f"• {rel_type}: <b>{name}</b>\n"
+    
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+    await callback.answer()
 
-@router.message(lambda m: m.text == "🔙 НАЗАД")
-async def back_button(message: Message, state: FSMContext):
-    """Безопасный возврат. Не импортирует cmd_start, чтобы избежать циклических зависимостей."""
-    await state.clear()
-    await message.answer(
-        "🔙 Возврат в главное меню.\n"
-        "Используйте команду /start или нажмите кнопку в меню бота.",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="💕 Отношения")]], resize_keyboard=True)
+
+# ==================== КОМАНДЫ РП ====================
+
+@router.message(Command("flirt"))
+async def cmd_flirt(message: Message):
+    if not message or not message.from_user or not message.text: return
+    
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith('@'):
+        await message.answer("💋 Использование: <code>/flirt @username</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    username = args[1].lstrip('@')
+    try:
+        target = await db.get_user_by_username(username) if db else None
+    except DatabaseError:
+        await message.answer("❌ Ошибка базы данных.")
+        return
+    
+    if not target:
+        await message.answer(f"❌ @{safe_html_escape(username)} не найден!")
+        return
+    
+    flirt = random.choice(FLIRTS).format(
+        from_name=safe_html_escape(message.from_user.first_name),
+        to_name=f"@{safe_html_escape(username)}"
     )
+    await message.answer(flirt, parse_mode=ParseMode.HTML)
 
+
+@router.message(Command("hug"))
+async def cmd_hug(message: Message):
+    if not message or not message.from_user or not message.text: return
+    
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith('@'):
+        await message.answer("🤗 Использование: <code>/hug @username</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    username = args[1].lstrip('@')
+    try:
+        target = await db.get_user_by_username(username) if db else None
+    except DatabaseError:
+        await message.answer("❌ Ошибка базы данных.")
+        return
+    
+    if not target:
+        await message.answer(f"❌ @{safe_html_escape(username)} не найден!")
+        return
+    
+    hug = random.choice(HUGS).format(
+        from_name=safe_html_escape(message.from_user.first_name),
+        to_name=f"@{safe_html_escape(username)}"
+    )
+    await message.answer(hug, parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("slap"))
+async def cmd_slap(message: Message):
+    if not message or not message.from_user or not message.text: return
+    
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith('@'):
+        await message.answer("👋 Использование: <code>/slap @username</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    username = args[1].lstrip('@')
+    try:
+        target = await db.get_user_by_username(username) if db else None
+    except DatabaseError:
+        await message.answer("❌ Ошибка базы данных.")
+        return
+    
+    if not target:
+        await message.answer(f"❌ @{safe_html_escape(username)} не найден!")
+        return
+    
+    slap = random.choice(SLAPS).format(
+        from_name=safe_html_escape(message.from_user.first_name),
+        to_name=f"@{safe_html_escape(username)}"
+    )
+    await message.answer(slap, parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("compliment"))
+async def cmd_compliment(message: Message):
+    if not message or not message.from_user: return
+    
+    compliment = random.choice(COMPLIMENTS)
+    args = message.text.split() if message.text else []
+    
+    if len(args) >= 2 and args[1].startswith('@'):
+        username = args[1].lstrip('@')
+        try:
+            target = await db.get_user_by_username(username) if db else None
+        except DatabaseError:
+            target = None
+        
+        if target:
+            await message.answer(
+                f"🌸 {safe_html_escape(message.from_user.first_name)} говорит @{safe_html_escape(username)}: {compliment}",
+                parse_mode=ParseMode.HTML
+            )
+            return
+    
+    await message.answer(f"🌸 {compliment}", parse_mode=ParseMode.HTML)
+
+
+# ==================== КНОПКИ РП ДЛЯ ПАРТНЁРА ====================
+
+@router.callback_query(F.data.startswith("rel_hug_"))
+async def rel_hug(callback: CallbackQuery):
+    if not callback or not callback.from_user: return
+    try:
+        partner_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True); return
+    
+    partner_name = await get_user_name(partner_id)
+    await callback.message.answer(
+        f"🤗 {safe_html_escape(callback.from_user.first_name)} обнимает {partner_name}!",
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer("🤗 Обнял(а)!")
+
+
+@router.callback_query(F.data.startswith("rel_kiss_"))
+async def rel_kiss(callback: CallbackQuery):
+    if not callback or not callback.from_user: return
+    try:
+        partner_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True); return
+    
+    partner_name = await get_user_name(partner_id)
+    await callback.message.answer(
+        f"💋 {safe_html_escape(callback.from_user.first_name)} целует {partner_name}!",
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer("💋 Поцеловал(а)!")
+
+
+@router.callback_query(F.data.startswith("rel_compliment_"))
+async def rel_compliment(callback: CallbackQuery):
+    if not callback or not callback.from_user: return
+    try:
+        partner_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True); return
+    
+    partner_name = await get_user_name(partner_id)
+    compliment = random.choice(COMPLIMENTS)
+    await callback.message.answer(
+        f"🌸 {safe_html_escape(callback.from_user.first_name)} говорит {partner_name}: {compliment}",
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer("🌸 Комплимент отправлен!")
+
+
+@router.callback_query(F.data.startswith("rel_flirt_"))
+async def rel_flirt(callback: CallbackQuery):
+    if not callback or not callback.from_user: return
+    try:
+        partner_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True); return
+    
+    partner_name = await get_user_name(partner_id)
+    flirt = random.choice(FLIRTS).format(
+        from_name=safe_html_escape(callback.from_user.first_name),
+        to_name=partner_name
+    )
+    await callback.message.answer(flirt, parse_mode=ParseMode.HTML)
+    await callback.answer("💋 Флирт!")
