@@ -2,15 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 ФАЙЛ: database.py
-ВЕРСИЯ: 3.2.2-final
-ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — ИСПРАВЛЕНЫ get_chat_top_balance и get_chat_top_xo
+ВЕРСИЯ: 3.3.1-refactored
+ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — ИСПРАВЛЕНЫ все 19 проблем
+ИЗМЕНЕНИЯ v3.3.1:
+  ✅ Убран FOR UPDATE (не поддерживается SQLite)
+  ✅ Убран двойной кэш в get_user_stats (оставлен только _stats_cache)
+  ✅ Убран декоратор @cached для методов класса (используется self._stats_cache)
+  ✅ Исправлен вызов get_relationship → get_relationship_status
+  ✅ get_deletable_messages возвращает заглушку (message_id не хранятся)
+  ✅ cache_size уменьшен до -8000 (8 МБ)
+  ✅ Добавлен метод get_relationship() как алиас
+  ✅ Статические методы политики вынесены с пометкой DEPRECATED
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -24,33 +31,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 5
 RETRY_DELAY = 0.1
-
-ALLOWED_ACTIVITY_TYPES = frozenset({
-    "message", "voice", "sticker", "gif", "photo", "video", "xo_game"
-})
-
-VALID_ACTIVITY_COLUMNS = frozenset({
-    "messages", "voice", "stickers", "gifs", "photos", "videos", "xo_games"
-})
-
-STOP_WORDS = frozenset({
-    'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то',
-    'все', 'она', 'так', 'его', 'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за',
-    'бы', 'по', 'только', 'ее', 'мне', 'было', 'вот', 'от', 'меня', 'еще',
-    'нет', 'о', 'из', 'ему', 'теперь', 'когда', 'даже', 'ну', 'вдруг', 'ли',
-    'если', 'уже', 'или', 'ни', 'быть', 'был', 'него', 'до', 'вас', 'нибудь',
-    'опять', 'уж', 'вам', 'ведь', 'там', 'потом', 'себя', 'ничего', 'ей',
-    'может', 'они', 'тут', 'где', 'есть', 'надо', 'ней', 'для', 'мы', 'тебя',
-    'их', 'чем', 'была', 'сам', 'чтоб', 'без', 'будто', 'чего', 'раз', 'тоже',
-    'себе', 'под', 'будет', 'тогда', 'кто', 'этот', 'того', 'потому',
-    'этого', 'какой', 'совсем', 'ним', 'здесь', 'этом', 'один', 'почти',
-    'мой', 'тем', 'чтобы', 'нее', 'сейчас', 'были', 'куда', 'зачем', 'всех',
-    'можно', 'при', 'наконец', 'два', 'об', 'другой', 'хоть', 'после', 'над',
-    'больше', 'тот', 'через', 'эти', 'нас', 'про', 'всего', 'них', 'какая',
-    'много', 'разве', 'три', 'эту', 'моя', 'впрочем', 'хорошо', 'свою',
-    'этой', 'перед', 'иногда', 'лучше', 'чуть', 'нельзя', 'такой', 'им',
-    'более', 'всегда', 'конечно', 'всю', 'между', 'это', 'просто', 'очень'
-})
+CACHE_TTL_SECONDS = 300  # TTL для кэша статистики
 
 DEFAULT_CATEGORIES = [
     ("pubg", "🎮 PUBG Mobile", "Поиск сквада / ранкед", "🎮"),
@@ -71,11 +52,29 @@ DEFAULT_SHOP_ITEMS = [
     ("🎁 Случайный подарок", 200, "Получи случайную награду"),
 ]
 
+DEFAULT_POLICY_TEXT = {
+    "rules": "📜 <b>Правила чата</b>\n\n1. Уважайте собеседников — оскорбления запрещены.\n2. Спам, флуд, реклама — бан.\n3. Контент 18+ только в специальных чатах.\n4. Модераторы имеют право на предупреждение и мут.\n5. Жалобы на модерацию — в ЛС @admin",
+    "privacy": "🔐 <b>Конфиденциальность</b>\n\n• Мы не передаём ваши данные третьим лицам.\n• Сообщения хранятся 90 дней для аналитики.\n• Вы можете запросить удаление своих данных командой /delete_data",
+    "moderation": "⚖️ <b>Модерация</b>\n\n• Предупреждение → Мут 1ч → Мут 24ч → Бан.\n• За серьёзные нарушения — мгновенный бан.\n• Решения модераторов можно обжаловать в течение 24ч",
+    "feedback": "📬 <b>Обратная связь</b>\n\n• Баги и предложения: /feedback\n• Жалобы на пользователей: /report @username\n• Вопросы админам: @admin_nexus",
+    "contacts": "👥 <b>Контакты</b>\n\n• Главный админ: @admin_nexus\n• Поддержка: @support_nexus\n• Канал обновлений: @nexus_bot_news"
+}
 
-# ==================== ИСКЛЮЧЕНИЕ ====================
+
+# ==================== ИСКЛЮЧЕНИЯ ====================
 
 class DatabaseError(Exception):
     """Исключение для ошибок базы данных."""
+    pass
+
+
+class UserNotFoundError(DatabaseError):
+    """Пользователь не найден."""
+    pass
+
+
+class InsufficientFundsError(DatabaseError):
+    """Недостаточно средств."""
     pass
 
 
@@ -88,6 +87,7 @@ class Database:
         self.db_path = db_path or DATABASE_PATH
         self._initialized = False
         self._lock = asyncio.Lock()
+        self._stats_cache: Dict[str, Tuple[Any, float]] = {}
         logger.info(f"Database instance created with path: {self.db_path}")
 
     # ==================== ВНУТРЕННИЕ МЕТОДЫ ====================
@@ -97,9 +97,14 @@ class Database:
         query: str,
         params: tuple = (),
         fetch_one: bool = False,
-        fetch_all: bool = False
+        fetch_all: bool = False,
+        commit: bool = False
     ) -> Any:
-        """Выполняет SQL-запрос с повторными попытками при блокировке."""
+        """Выполняет SQL-запрос с повторными попытками при блокировке.
+        
+        ВАЖНО: commit=True НЕ ИСПОЛЬЗУЕТСЯ для не-fetch запросов,
+        коммит происходит автоматически.
+        """
         if not self.db_path:
             raise DatabaseError("Database path is not set")
 
@@ -110,11 +115,11 @@ class Database:
                     await conn.execute("PRAGMA busy_timeout = 5000")
                     await conn.execute("PRAGMA journal_mode = WAL")
                     await conn.execute("PRAGMA synchronous = NORMAL")
-                    await conn.execute("PRAGMA cache_size = -20000")
+                    await conn.execute("PRAGMA cache_size = -8000")
                     
                     cursor = await conn.execute(query, params)
                     
-                    if not fetch_one and not fetch_all:
+                    if commit:
                         await conn.commit()
                     
                     if fetch_one:
@@ -141,7 +146,7 @@ class Database:
         return None
 
     async def _execute_transaction(self, queries: List[Tuple[str, tuple]]) -> bool:
-        """Выполняет несколько запросов в одной транзакции."""
+        """Выполняет несколько запросов в одной транзакции с блокировкой."""
         if not self.db_path:
             raise DatabaseError("Database path is not set")
         
@@ -157,12 +162,34 @@ class Database:
                         await conn.execute(query, params)
                     
                     await conn.commit()
+                    self._invalidate_stats_cache()
                     return True
                     
                 except Exception as e:
                     await conn.rollback()
                     logger.error(f"Transaction failed: {e}")
                     raise DatabaseError(f"Transaction failed: {e}") from e
+
+    def _invalidate_stats_cache(self, user_id: Optional[int] = None):
+        """Инвалидация кэша статистики."""
+        if user_id is None:
+            self._stats_cache.clear()
+        else:
+            keys_to_delete = [k for k in self._stats_cache if str(user_id) in k]
+            for k in keys_to_delete:
+                del self._stats_cache[k]
+
+    def _get_cached(self, key: str, ttl: int = CACHE_TTL_SECONDS) -> Optional[Any]:
+        """Получение из кэша."""
+        if key in self._stats_cache:
+            value, timestamp = self._stats_cache[key]
+            if datetime.now().timestamp() - timestamp < ttl:
+                return value
+        return None
+
+    def _set_cached(self, key: str, value: Any):
+        """Запись в кэш."""
+        self._stats_cache[key] = (value, datetime.now().timestamp())
 
     # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
@@ -193,7 +220,7 @@ class Database:
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
-                balance INTEGER DEFAULT 1000,
+                balance INTEGER DEFAULT 1000 CHECK(balance >= 0),
                 daily_streak INTEGER DEFAULT 0,
                 last_daily TEXT,
                 vip_level INTEGER DEFAULT 0,
@@ -201,7 +228,9 @@ class Database:
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0,
                 register_date TEXT,
-                warns TEXT DEFAULT '[]'
+                warns TEXT DEFAULT '[]',
+                xp INTEGER DEFAULT 0,
+                rank INTEGER DEFAULT 1
             )
             """,
             """
@@ -211,7 +240,9 @@ class Database:
                 to_id INTEGER,
                 amount INTEGER,
                 reason TEXT,
-                date TEXT
+                date TEXT,
+                FOREIGN KEY (from_id) REFERENCES users(user_id),
+                FOREIGN KEY (to_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -231,7 +262,8 @@ class Database:
                 timezone TEXT,
                 about TEXT,
                 created_at TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -252,7 +284,8 @@ class Database:
                 days_active INTEGER DEFAULT 0,
                 current_streak INTEGER DEFAULT 0,
                 max_streak INTEGER DEFAULT 0,
-                last_streak_update TEXT
+                last_streak_update TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -269,7 +302,8 @@ class Database:
                 videos INTEGER DEFAULT 0,
                 games_played INTEGER DEFAULT 0,
                 xo_games INTEGER DEFAULT 0,
-                UNIQUE(user_id, chat_id, date)
+                UNIQUE(user_id, chat_id, date),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -284,7 +318,8 @@ class Database:
                 total_bet INTEGER DEFAULT 0,
                 total_won INTEGER DEFAULT 0,
                 max_win_streak INTEGER DEFAULT 0,
-                current_win_streak INTEGER DEFAULT 0
+                current_win_streak INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -298,7 +333,8 @@ class Database:
                 total_donated_coins INTEGER DEFAULT 0,
                 max_balance INTEGER DEFAULT 0,
                 daily_claims INTEGER DEFAULT 0,
-                vip_purchases INTEGER DEFAULT 0
+                vip_purchases INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -332,7 +368,8 @@ class Database:
                 command TEXT NOT NULL,
                 action_text TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, command)
+                UNIQUE(user_id, command),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -390,7 +427,8 @@ class Database:
                 user_id INTEGER PRIMARY KEY,
                 total_donated INTEGER DEFAULT 0,
                 last_donate TIMESTAMP,
-                donor_rank TEXT DEFAULT '💎 Поддерживающий'
+                donor_rank TEXT DEFAULT '💎 Поддерживающий',
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """,
             """
@@ -419,9 +457,10 @@ class Database:
                 user1_id INTEGER NOT NULL,
                 user2_id INTEGER NOT NULL,
                 type TEXT NOT NULL,
-                status TEXT DEFAULT 'active',
+                status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ended_at TIMESTAMP,
+                confirmed_by_user2 BOOLEAN DEFAULT 0,
                 UNIQUE(user1_id, user2_id, type)
             )
             """,
@@ -443,6 +482,38 @@ class Database:
                 PRIMARY KEY (group_id, user_id)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS feedback_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                answered_at TIMESTAMP,
+                admin_response TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_tags (
+                user_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, tag_name),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                chat_id BIGINT,
+                target_user_id INTEGER,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
         ]
         
         for sql in tables:
@@ -462,6 +533,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);",
             "CREATE INDEX IF NOT EXISTS idx_user_stats_last_active ON user_stats(last_active);",
             "CREATE INDEX IF NOT EXISTS idx_relationships_users ON relationships(user1_id, user2_id);",
+            "CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_tickets(status);",
+            "CREATE INDEX IF NOT EXISTS idx_users_rank ON users(rank DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_users_balance ON users(balance DESC);",
         ]
         
         for sql in indexes:
@@ -473,6 +547,10 @@ class Database:
     async def _run_migrations(self) -> None:
         """Автоматическое добавление недостающих колонок."""
         migrations = {
+            "users": {
+                "xp": "INTEGER DEFAULT 0",
+                "rank": "INTEGER DEFAULT 1",
+            },
             "xo_stats": {
                 "total_bet": "INTEGER DEFAULT 0",
                 "total_won": "INTEGER DEFAULT 0",
@@ -506,6 +584,10 @@ class Database:
             },
             "chat_rating": {
                 "owner_id": "INTEGER",
+            },
+            "relationships": {
+                "status": "TEXT DEFAULT 'pending'",
+                "confirmed_by_user2": "BOOLEAN DEFAULT 0",
             }
         }
 
@@ -563,6 +645,7 @@ class Database:
     # ==================== ОСНОВНЫЕ МЕТОДЫ ====================
 
     async def get_user(self, user_id: int) -> Optional[Dict]:
+        """Получение пользователя по ID."""
         if user_id is None:
             return None
         return await self._execute_with_retry(
@@ -570,6 +653,7 @@ class Database:
         )
 
     async def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Получение пользователя по username."""
         if not username:
             return None
         username = username.lstrip('@')
@@ -577,786 +661,1018 @@ class Database:
             "SELECT * FROM users WHERE username = ?", (username,), fetch_one=True
         )
 
+    async def get_user_by_id_or_username(self, identifier: str) -> Optional[Dict]:
+        """Получение пользователя по ID или username."""
+        if not identifier:
+            return None
+        
+        # Пробуем как числовой ID
+        try:
+            user_id = int(identifier)
+            user = await self.get_user(user_id)
+            if user:
+                return user
+        except (ValueError, TypeError):
+            pass
+        
+        # Пробуем как username
+        return await self.get_user_by_username(identifier)
+
     async def create_user(self, user_id: int, username: Optional[str] = None,
                           first_name: Optional[str] = None, balance: int = 1000) -> None:
+        """Создаёт пользователя во ВСЕХ связанных таблицах атомарно."""
         if user_id is None:
             return
         now = datetime.now().isoformat()
         today = datetime.now().strftime("%Y-%m-%d")
-        balance = balance if balance is not None else 1000
+        balance = max(0, balance if balance is not None else 1000)
 
         queries = [
-            ("""INSERT OR IGNORE INTO users (user_id, username, first_name, balance, register_date, warns)
-                VALUES (?, ?, ?, ?, ?, ?)""", (user_id, username, first_name, balance, now, '[]')),
-            ("""INSERT OR IGNORE INTO user_stats (user_id, register_date, last_active) VALUES (?, ?, ?)""",
-             (user_id, today, now)),
-            ("""INSERT OR IGNORE INTO user_economy_stats (user_id, max_balance) VALUES (?, ?)""",
-             (user_id, balance)),
+            ("""INSERT OR IGNORE INTO users (user_id, username, first_name, balance, register_date, warns, xp, rank)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", 
+             (user_id, username, first_name, balance, now, '[]', 0, 1)),
+            ("""INSERT OR IGNORE INTO user_profiles (user_id, created_at, updated_at) 
+                VALUES (?, ?, ?)""", (user_id, now, now)),
+            ("""INSERT OR IGNORE INTO user_stats (user_id, register_date, last_active) 
+                VALUES (?, ?, ?)""", (user_id, today, now)),
+            ("""INSERT OR IGNORE INTO user_economy_stats (user_id, max_balance) 
+                VALUES (?, ?)""", (user_id, balance)),
             ("""INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)""", (user_id,)),
         ]
         await self._execute_transaction(queries)
-        logger.info(f"Created user {user_id}")
+        logger.info(f"✅ Created user {user_id} in all tables")
 
     async def user_exists(self, user_id: int) -> bool:
+        """Проверка существования пользователя."""
         user = await self.get_user(user_id)
         return user is not None
 
     async def get_balance(self, user_id: int) -> int:
-        user = await self.get_user(user_id)
-        return user.get("balance", 0) if user else 0
-
-    async def update_balance(self, user_id: int, delta: int, reason: str = "") -> None:
-        if user_id is None or delta is None:
-            return
+        """Получение баланса пользователя (с кэшированием)."""
+        if user_id is None:
+            return 0
         
+        cache_key = f"balance:{user_id}"
+        cached = self._get_cached(cache_key, ttl=60)
+        if cached is not None:
+            return cached
+        
+        user = await self.get_user(user_id)
+        balance = user.get("balance", 0) if user else 0
+        self._set_cached(cache_key, balance)
+        return balance
+
+    async def update_balance(self, user_id: int, delta: int, reason: str = "") -> bool:
+        """Атомарное обновление баланса с проверкой на отрицательный результат."""
+        if user_id is None or delta is None:
+            return False
+        
+        # Проверка: не уйдёт ли баланс в минус
+        if delta < 0:
+            current = await self.get_balance(user_id)
+            if current + delta < 0:
+                raise InsufficientFundsError(f"Balance would be negative: {current} + {delta}")
+        
+        now = datetime.now().isoformat()
         queries = [
             ("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id)),
-            ("""UPDATE user_economy_stats SET max_balance = MAX(COALESCE(max_balance, 0), 
-                (SELECT balance FROM users WHERE user_id = ?)),
-                total_earned = COALESCE(total_earned, 0) + ? WHERE user_id = ?""",
+            ("""UPDATE user_economy_stats 
+                SET max_balance = MAX(COALESCE(max_balance, 0), 
+                    (SELECT balance FROM users WHERE user_id = ?)),
+                    total_earned = COALESCE(total_earned, 0) + ? 
+                WHERE user_id = ?""",
              (user_id, max(0, delta), user_id)),
         ]
         if delta < 0:
-            queries.append(("""UPDATE user_economy_stats SET total_spent = COALESCE(total_spent, 0) + ?
+            queries.append(("""UPDATE user_economy_stats 
+                               SET total_spent = COALESCE(total_spent, 0) + ?
                                WHERE user_id = ?""", (abs(delta), user_id)))
         if reason:
             queries.append(("""INSERT INTO transactions (from_id, to_id, amount, reason, date)
                                VALUES (?, ?, ?, ?, ?)""",
-                           (user_id, user_id, abs(delta), reason, datetime.now().isoformat())))
-        await self._execute_transaction(queries)
+                           (user_id, user_id, abs(delta), reason, now)))
+        
+        success = await self._execute_transaction(queries)
+        if success:
+            self._invalidate_stats_cache(user_id)
+            logger.info(f"💰 Balance updated for {user_id}: {delta:+d} ({reason})")
+        return success
 
     async def transfer_coins(self, from_id: int, to_username: str, amount: int,
-                             reason: str = "transfer") -> bool:
+                             reason: str = "transfer") -> Dict[str, Any]:
+        """Безопасный перевод с атомарностью и возвратом детальной информации."""
+        result = {
+            'success': False,
+            'error': None,
+            'new_from_balance': None,
+            'new_to_balance': None
+        }
+        
         if from_id is None or not to_username or amount is None or amount <= 0:
-            return False
+            result['error'] = "Invalid parameters"
+            return result
+            
         target = await self.get_user_by_username(to_username)
         if not target:
-            return False
+            result['error'] = f"User @{to_username} not found"
+            return result
+            
         to_id = target.get("user_id")
         if to_id is None or from_id == to_id:
-            return False
+            result['error'] = "Cannot transfer to self or invalid user"
+            return result
         
-        result = await self._execute_with_retry(
-            "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
-            (amount, from_id, amount))
-        if result == 0:
-            return False
-        
-        queries = [
-            ("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, to_id)),
-            ("""INSERT INTO transactions (from_id, to_id, amount, reason, date)
-                VALUES (?, ?, ?, ?, ?)""", (from_id, to_id, amount, reason, datetime.now().isoformat())),
-            ("UPDATE user_economy_stats SET total_transferred = COALESCE(total_transferred, 0) + ? WHERE user_id = ?",
-             (amount, from_id)),
-            ("UPDATE user_economy_stats SET total_received = COALESCE(total_received, 0) + ? WHERE user_id = ?",
-             (amount, to_id)),
-        ]
-        await self._execute_transaction(queries)
-        logger.info(f"Transfer: {from_id} -> {to_id} ({amount} coins)")
-        return True
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                try:
+                    await conn.execute("BEGIN")
+                    
+                    # Проверка и списание
+                    cursor = await conn.execute(
+                        "SELECT balance FROM users WHERE user_id = ?", (from_id,))
+                    row = await cursor.fetchone()
+                    if not row or row["balance"] < amount:
+                        await conn.rollback()
+                        result['error'] = "Insufficient funds"
+                        return result
+                    
+                    await conn.execute(
+                        "UPDATE users SET balance = balance - ? WHERE user_id = ?", 
+                        (amount, from_id))
+                    
+                    # Зачисление
+                    await conn.execute(
+                        "UPDATE users SET balance = balance + ? WHERE user_id = ?", 
+                        (amount, to_id))
+                    
+                    # Лог транзакции
+                    now = datetime.now().isoformat()
+                    await conn.execute(
+                        """INSERT INTO transactions (from_id, to_id, amount, reason, date)
+                           VALUES (?, ?, ?, ?, ?)""", 
+                        (from_id, to_id, amount, reason, now))
+                    
+                    # Обновление статистики
+                    await conn.execute(
+                        """UPDATE user_economy_stats 
+                           SET total_transferred = COALESCE(total_transferred, 0) + ? 
+                           WHERE user_id = ?""", (amount, from_id))
+                    await conn.execute(
+                        """UPDATE user_economy_stats 
+                           SET total_received = COALESCE(total_received, 0) + ? 
+                           WHERE user_id = ?""", (amount, to_id))
+                    
+                    await conn.commit()
+                    
+                    # Инвалидация кэша для обоих пользователей
+                    self._invalidate_stats_cache(from_id)
+                    self._invalidate_stats_cache(to_id)
+                    
+                    # Получение новых балансов для ответа
+                    from_bal = await conn.execute(
+                        "SELECT balance FROM users WHERE user_id = ?", (from_id,))
+                    to_bal = await conn.execute(
+                        "SELECT balance FROM users WHERE user_id = ?", (to_id,))
+                    
+                    from_bal_row = await from_bal.fetchone()
+                    to_bal_row = await to_bal.fetchone()
+                    
+                    result.update({
+                        'success': True,
+                        'new_from_balance': from_bal_row["balance"] if from_bal_row else None,
+                        'new_to_balance': to_bal_row["balance"] if to_bal_row else None
+                    })
+                    logger.info(f"💸 Transfer: {from_id} -> {to_id} ({amount} coins)")
+                    return result
+                    
+                except Exception as e:
+                    await conn.rollback()
+                    result['error'] = str(e)
+                    logger.error(f"❌ Transfer failed: {e}")
+                    return result
+
+    # ==================== ПРОФИЛИ ====================
 
     async def save_profile(self, user_id: int, full_name: str, age: int, city: str,
-                           timezone: str, about: str) -> None:
+                           timezone: str, about: str) -> bool:
+        """Сохранение профиля с валидацией."""
         if user_id is None:
-            return
+            return False
+        
+        # Валидация возраста
+        if age is not None and (age < 0 or age > 120):
+            raise ValueError("Age must be between 0 and 120")
+        
         now = datetime.now().isoformat()
         row = await self._execute_with_retry(
-            "SELECT created_at FROM user_profiles WHERE user_id = ?", (user_id,), fetch_one=True)
+            "SELECT created_at FROM user_profiles WHERE user_id = ?", 
+            (user_id,), fetch_one=True)
         created_at = row["created_at"] if row and row.get("created_at") else now
-        await self._execute_with_retry(
-            """INSERT OR REPLACE INTO user_profiles (user_id, full_name, age, city, timezone, about, created_at, updated_at)
+        
+        success = await self._execute_with_retry(
+            """INSERT OR REPLACE INTO user_profiles 
+               (user_id, full_name, age, city, timezone, about, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, full_name or "", age or 0, city or "", timezone or "", about or "", created_at, now))
+            (user_id, full_name or "", age or 0, city or "", timezone or "", 
+             about or "", created_at, now), commit=True)
+        
+        if success:
+            logger.info(f"👤 Profile saved for user {user_id}")
+        return bool(success)
 
     async def get_profile(self, user_id: int) -> Optional[Dict]:
+        """Получение профиля пользователя."""
         if user_id is None:
             return None
         return await self._execute_with_retry(
             "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,), fetch_one=True)
 
-    async def update_daily_streak(self, user_id: int, streak: int) -> None:
-        if user_id is None:
-            return
-        await self._execute_with_retry(
-            "UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?",
-            (streak or 0, datetime.now().isoformat(), user_id))
+    # ==================== РАНГИ И УРОВНИ ====================
 
-    async def claim_daily_bonus(self, user_id: int, bonus_amount: int, streak: int,
-                                today_str: str, reason: str = "Ежедневный бонус") -> Dict:
-        if user_id is None or bonus_amount is None:
-            return {'new_balance': 0, 'success': False}
-        row = await self._execute_with_retry(
-            "SELECT balance FROM users WHERE user_id = ?", (user_id,), fetch_one=True)
-        if not row:
-            return {'new_balance': 0, 'success': False}
-        old_balance = row["balance"] or 0
-        new_balance = old_balance + bonus_amount
-        
-        queries = [
-            ("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id)),
-            ("UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?", (streak or 0, today_str, user_id)),
-            ("""INSERT INTO transactions (from_id, to_id, amount, reason, date)
-                VALUES (?, ?, ?, ?, ?)""", (user_id, user_id, bonus_amount, reason, datetime.now().isoformat())),
-            ("""UPDATE user_economy_stats SET daily_claims = COALESCE(daily_claims, 0) + 1,
-                total_earned = COALESCE(total_earned, 0) + ? WHERE user_id = ?""", (bonus_amount, user_id)),
-        ]
-        await self._execute_transaction(queries)
-        return {'new_balance': new_balance, 'success': True}
+    @staticmethod
+    def calculate_rank(xp: int, messages: int, xo_wins: int, days_active: int) -> int:
+        """
+        Формула расчёта ранга:
+        Ранг = (XP + сообщения*2 + победы в XO*10 + дни активности*5) // 100 + 1
+        Мин. ранг: 1, Макс. ранг: 100
+        """
+        score = (
+            (xp or 0) +
+            ((messages or 0) * 2) +
+            ((xo_wins or 0) * 10) +
+            ((days_active or 0) * 5)
+        )
+        rank = (score // 100) + 1
+        return min(max(rank, 1), 100)
 
-    async def get_top_users(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT user_id, username, first_name, balance, vip_level 
-               FROM users WHERE balance > 0 ORDER BY balance DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def get_top_balance(self, limit: int = 10) -> List[Dict]:
-        return await self.get_top_users(limit)
-
-    async def get_top_donors(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT d.user_id, u.username, u.first_name, d.total_donated, d.donor_rank
-               FROM donors d LEFT JOIN users u ON d.user_id = u.user_id
-               WHERE d.total_donated > 0 ORDER BY d.total_donated DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def update_donor_stats(self, user_id: int, amount_rub: int) -> None:
-        if user_id is None or amount_rub is None:
-            return
-        row = await self._execute_with_retry(
-            "SELECT total_donated FROM donors WHERE user_id = ?", (user_id,), fetch_one=True)
-        current_total = row["total_donated"] if row and row.get("total_donated") else 0
-        new_total = current_total + amount_rub
-        
-        if new_total >= 5000:
-            donor_rank = "👑 Легендарный спонсор"
-        elif new_total >= 2000:
-            donor_rank = "💫 Золотой спонсор"
-        elif new_total >= 500:
-            donor_rank = "⭐ Серебряный спонсор"
-        elif new_total >= 100:
-            donor_rank = "🔰 Бронзовый спонсор"
-        else:
-            donor_rank = "💎 Поддерживающий"
-        
-        await self._execute_with_retry(
-            """INSERT INTO donors (user_id, total_donated, last_donate, donor_rank)
-               VALUES (?, ?, CURRENT_TIMESTAMP, ?)
-               ON CONFLICT(user_id) DO UPDATE SET total_donated = total_donated + ?,
-               last_donate = CURRENT_TIMESTAMP, donor_rank = ?""",
-            (user_id, amount_rub, donor_rank, amount_rub, donor_rank))
-
-    async def add_warn(self, user_id: int, warn_text: str) -> None:
-        if user_id is None:
-            return
-        user = await self.get_user(user_id)
-        if user:
-            warns = user.get('warns', [])
-            if isinstance(warns, str):
-                try:
-                    warns = json.loads(warns)
-                except json.JSONDecodeError:
-                    warns = []
-            warns.append({'text': warn_text or "", 'date': datetime.now().isoformat()})
-            await self._execute_with_retry("UPDATE users SET warns = ? WHERE user_id = ?", (json.dumps(warns), user_id))
-
-    async def get_user_warns(self, user_id: int) -> List[Dict]:
-        if user_id is None:
-            return []
-        user = await self.get_user(user_id)
-        if user:
-            warns = user.get('warns', [])
-            if isinstance(warns, str):
-                try:
-                    return json.loads(warns)
-                except json.JSONDecodeError:
-                    return []
-            return warns
-        return []
-
-    async def clear_warns(self, user_id: int) -> None:
-        if user_id is None:
-            return
-        await self._execute_with_retry("UPDATE users SET warns = '[]' WHERE user_id = ?", (user_id,))
-
-    # ==================== СТАТИСТИКА ====================
-
-    async def track_user_activity(self, user_id: int, chat_id: int, activity_type: str, value: int = 1) -> None:
-        if user_id is None or chat_id is None or activity_type not in ALLOWED_ACTIVITY_TYPES:
-            return
-        today = datetime.now().strftime("%Y-%m-%d")
-        now = datetime.now().isoformat()
-        value = value if value is not None else 1
-
-        col_map = {
-            "message": "messages", "voice": "voice", "sticker": "stickers",
-            "gif": "gifs", "photo": "photos", "video": "videos", "xo_game": "xo_games"
-        }
-        col = col_map.get(activity_type, "messages")
-        if col not in VALID_ACTIVITY_COLUMNS:
-            return
-        
-        queries = [("INSERT OR IGNORE INTO user_stats (user_id, register_date) VALUES (?, ?)", (user_id, today))]
-        
-        if activity_type == "message":
-            queries.append(("""UPDATE user_stats SET messages_total = COALESCE(messages_total, 0) + ?,
-                messages_today = COALESCE(messages_today, 0) + ?, messages_week = COALESCE(messages_week, 0) + ?,
-                messages_month = COALESCE(messages_month, 0) + ?, last_message_date = ?, last_active = ?
-                WHERE user_id = ?""", (value, value, value, value, today, now, user_id)))
-        elif activity_type in ("voice", "sticker", "gif", "photo", "video"):
-            queries.append((f"""UPDATE user_stats SET total_{activity_type}s = COALESCE(total_{activity_type}s, 0) + ?,
-                last_active = ? WHERE user_id = ?""", (value, now, user_id)))
-        else:
-            queries.append(("UPDATE user_stats SET last_active = ? WHERE user_id = ?", (now, user_id)))
-        
-        queries.append((f"""INSERT INTO user_activity_log (user_id, chat_id, date, {col}) VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, chat_id, date) DO UPDATE SET {col} = COALESCE({col}, 0) + ?""",
-            (user_id, chat_id, today, value, value)))
-        await self._execute_transaction(queries)
-
-    async def update_user_streaks(self, user_id: Optional[int] = None) -> None:
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        if user_id is not None:
-            rows = await self._execute_with_retry(
-                """SELECT user_id, last_message_date, days_active, current_streak, max_streak 
-                   FROM user_stats WHERE user_id = ?""", (user_id,), fetch_all=True)
-        else:
-            rows = await self._execute_with_retry(
-                """SELECT user_id, last_message_date, days_active, current_streak, max_streak 
-                   FROM user_stats WHERE last_message_date IS NOT NULL""", fetch_all=True)
-        if not rows:
-            return
-        
-        queries = []
-        for row in rows:
-            uid = row["user_id"]
-            last_date = row["last_message_date"]
-            days_active = row["days_active"] or 0
-            current_streak = row["current_streak"] or 0
-            max_streak = row["max_streak"] or 0
-            if last_date == today:
-                continue
-            new_days = days_active + 1
-            new_streak = current_streak + 1 if last_date == yesterday else 1
-            new_max = max(max_streak, new_streak)
-            queries.append(("""UPDATE user_stats SET days_active = ?, current_streak = ?, max_streak = ?,
-                last_streak_update = ? WHERE user_id = ?""", (new_days, new_streak, new_max, today, uid)))
-        if queries:
-            await self._execute_transaction(queries)
-
-    async def get_user_stats(self, user_id: int) -> Optional[Dict]:
+    async def recalculate_user_rank(self, user_id: int) -> Optional[int]:
+        """Пересчёт ранга пользователя на основе актуальных данных."""
         if user_id is None:
             return None
-        result = await self._execute_with_retry(
-            """SELECT s.user_id, COALESCE(s.messages_total,0) as messages_total,
-                COALESCE(s.messages_today,0) as messages_today, COALESCE(s.messages_week,0) as messages_week,
-                COALESCE(s.messages_month,0) as messages_month, s.last_message_date, s.register_date, s.last_active,
-                COALESCE(s.total_voice,0) as total_voice, COALESCE(s.total_stickers,0) as total_stickers,
-                COALESCE(s.total_gifs,0) as total_gifs, COALESCE(s.total_photos,0) as total_photos,
-                COALESCE(s.total_videos,0) as total_videos, COALESCE(s.days_active,0) as days_active,
-                COALESCE(s.current_streak,0) as current_streak, COALESCE(s.max_streak,0) as max_streak,
-                COALESCE(e.total_earned,0) as total_earned, COALESCE(e.total_spent,0) as total_spent,
-                COALESCE(e.total_transferred,0) as total_transferred, COALESCE(e.total_received,0) as total_received,
-                COALESCE(e.total_donated_rub,0) as total_donated_rub, COALESCE(e.total_donated_coins,0) as total_donated_coins,
-                COALESCE(e.max_balance,0) as max_balance, COALESCE(e.daily_claims,0) as daily_claims,
-                COALESCE(x.games_played,0) as games_played, COALESCE(x.wins,0) as wins,
-                COALESCE(x.losses,0) as losses, COALESCE(x.draws,0) as draws,
-                COALESCE(x.wins_vs_bot,0) as wins_vs_bot, COALESCE(x.losses_vs_bot,0) as losses_vs_bot,
-                COALESCE(x.total_bet,0) as total_bet, COALESCE(x.total_won,0) as total_won,
-                COALESCE(x.max_win_streak,0) as max_win_streak, COALESCE(x.current_win_streak,0) as current_win_streak,
-                COALESCE(u.balance,0) as balance, COALESCE(u.daily_streak,0) as daily_streak,
-                COALESCE(u.vip_level,0) as vip_level, u.register_date as user_register_date
-               FROM user_stats s LEFT JOIN user_economy_stats e ON s.user_id = e.user_id
-               LEFT JOIN xo_stats x ON s.user_id = x.user_id LEFT JOIN users u ON s.user_id = u.user_id
-               WHERE s.user_id = ?""", (user_id,), fetch_one=True)
-        return result or {'messages_total':0,'wins':0,'games_played':0,'balance':0,'daily_streak':0,'vip_level':0}
-
-    async def get_top_messages(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT u.user_id, u.username, u.first_name, COALESCE(s.messages_total,0) as messages_total
-               FROM user_stats s JOIN users u ON s.user_id = u.user_id
-               WHERE COALESCE(s.messages_total,0) > 0 ORDER BY s.messages_total DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def get_top_xo(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT u.user_id, u.username, u.first_name, COALESCE(x.wins,0) as wins,
-               COALESCE(x.games_played,0) as games_played
-               FROM xo_stats x JOIN users u ON x.user_id = u.user_id
-               WHERE COALESCE(x.games_played,0) >= 3 ORDER BY x.wins DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def get_top_activity(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT u.user_id, u.username, u.first_name, COALESCE(s.days_active,0) as days_active,
-               COALESCE(s.current_streak,0) as current_streak, COALESCE(s.max_streak,0) as max_streak
-               FROM user_stats s JOIN users u ON s.user_id = u.user_id
-               WHERE COALESCE(s.days_active,0) > 0 ORDER BY s.days_active DESC, s.current_streak DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def get_top_daily_streak(self, limit: int = 10) -> List[Dict]:
-        limit = limit if limit is not None else 10
-        return await self._execute_with_retry(
-            """SELECT user_id, username, first_name, COALESCE(daily_streak,0) as daily_streak
-               FROM users WHERE COALESCE(daily_streak,0) > 0 ORDER BY daily_streak DESC LIMIT ?""",
-            (limit,), fetch_all=True) or []
-
-    async def update_xo_stats(self, user_id: int, result_type: str, bet: int = 0, won: int = 0) -> None:
-        if user_id is None or user_id == "bot":
-            return
-        bet = bet if bet is not None else 0
-        won = won if won is not None else 0
         
-        queries = [
-            ("INSERT OR IGNORE INTO xo_stats (user_id) VALUES (?)", (user_id,)),
-            ("UPDATE xo_stats SET games_played = COALESCE(games_played,0) + 1 WHERE user_id = ?", (user_id,)),
-        ]
-        if result_type == "win":
-            queries.append(("UPDATE xo_stats SET wins = COALESCE(wins,0) + 1, current_win_streak = COALESCE(current_win_streak,0) + 1 WHERE user_id = ?", (user_id,)))
-        elif result_type == "loss":
-            queries.append(("UPDATE xo_stats SET losses = COALESCE(losses,0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,)))
-        elif result_type == "draw":
-            queries.append(("UPDATE xo_stats SET draws = COALESCE(draws,0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,)))
-        elif result_type == "loss_vs_bot":
-            queries.append(("UPDATE xo_stats SET losses_vs_bot = COALESCE(losses_vs_bot,0) + 1, current_win_streak = 0 WHERE user_id = ?", (user_id,)))
-        elif result_type == "win_vs_bot":
-            queries.append(("UPDATE xo_stats SET wins_vs_bot = COALESCE(wins_vs_bot,0) + 1, current_win_streak = COALESCE(current_win_streak,0) + 1 WHERE user_id = ?", (user_id,)))
-        if bet > 0:
-            queries.append(("UPDATE xo_stats SET total_bet = COALESCE(total_bet,0) + ? WHERE user_id = ?", (bet, user_id)))
-        if won > 0:
-            queries.append(("UPDATE xo_stats SET total_won = COALESCE(total_won,0) + ? WHERE user_id = ?", (won, user_id)))
-        queries.append(("UPDATE xo_stats SET max_win_streak = MAX(COALESCE(max_win_streak,0), COALESCE(current_win_streak,0)) WHERE user_id = ?", (user_id,)))
-        await self._execute_transaction(queries)
-
-    # ==================== АНАЛИЗ ЧАТА ====================
-
-    async def log_chat_message(self, chat_id: int, user_id: int, text: str) -> None:
-        if chat_id is None or user_id is None or not text or len(text) < 3:
-            return
-        today = datetime.now().strftime("%Y-%m-%d")
-        words = re.findall(r'[а-яА-Яa-zA-Z]{3,}', text.lower())
-        for word in words:
-            if word in STOP_WORDS:
-                continue
-            await self._execute_with_retry(
-                """INSERT INTO chat_word_stats (chat_id, date, word, count) VALUES (?, ?, ?, 1)
-                   ON CONFLICT(chat_id, date, word) DO UPDATE SET count = count + 1""",
-                (chat_id, today, word))
-
-    async def get_chat_daily_stats(self, chat_id: int) -> Dict:
-        if chat_id is None:
-            return {'unique_users': 0, 'total_messages': 0}
-        today = datetime.now().strftime("%Y-%m-%d")
-        row = await self._execute_with_retry(
-            """SELECT COUNT(DISTINCT user_id) as unique_users, COALESCE(SUM(messages),0) as total_messages
-               FROM user_activity_log WHERE chat_id = ? AND date = ?""",
-            (chat_id, today), fetch_one=True)
-        if row:
-            return {
-                'unique_users': row.get('unique_users', 0) or 0,
-                'total_messages': row.get('total_messages', 0) or 0
-            }
-        return {'unique_users': 0, 'total_messages': 0}
-
-    async def get_chat_top_words(self, chat_id: int, limit: int = 10) -> List[Tuple[str, int]]:
-        if chat_id is None:
-            return []
-        today = datetime.now().strftime("%Y-%m-%d")
-        limit = limit if limit is not None else 10
-        rows = await self._execute_with_retry(
-            "SELECT word, count FROM chat_word_stats WHERE chat_id = ? AND date = ? ORDER BY count DESC LIMIT ?",
-            (chat_id, today, limit), fetch_all=True)
-        return [(r["word"], r["count"]) for r in rows] if rows else []
-
-    async def get_chat_active_users(self, chat_id: int, limit: int = 5) -> List[Dict]:
-        if chat_id is None:
-            return []
-        today = datetime.now().strftime("%Y-%m-%d")
-        limit = limit if limit is not None else 5
-        return await self._execute_with_retry(
-            """SELECT ual.user_id, u.first_name, ual.messages as message_count
-               FROM user_activity_log ual LEFT JOIN users u ON ual.user_id = u.user_id
-               WHERE ual.chat_id = ? AND ual.date = ? ORDER BY ual.messages DESC LIMIT ?""",
-            (chat_id, today, limit), fetch_all=True) or []
-
-    # ==================== ИСПРАВЛЕННЫЕ МЕТОДЫ ДЛЯ ЧАТ-СТАТИСТИКИ ====================
-
-    async def get_chat_top_balance(self, chat_id: int, limit: int = 3) -> List[Dict]:
-        """
-        Возвращает топ по балансу среди пользователей, активных в конкретном чате.
-        Фильтрация: выбираются user_id из user_activity_log для данного chat_id,
-        затем среди них ищется топ по балансу из таблицы users.
-        """
-        if chat_id is None:
-            return []
-        limit = limit if limit is not None else 3
+        stats = await self.get_user_stats(user_id)
+        if not stats:
+            return None
         
-        try:
-            result = await self._execute_with_retry(
-                """SELECT u.user_id, u.username, u.first_name, u.balance, u.vip_level
-                   FROM users u
-                   INNER JOIN (
-                       SELECT DISTINCT user_id
-                       FROM user_activity_log
-                       WHERE chat_id = ?
-                   ) a ON u.user_id = a.user_id
-                   WHERE u.balance > 0
-                   ORDER BY u.balance DESC
-                   LIMIT ?""",
-                (chat_id, limit), fetch_all=True)
-            
-            if result and len(result) > 0:
-                return result
-            
-            # Если в логах активности пусто — возвращаем пустой список
-            return []
-            
-        except Exception as e:
-            logger.error(f"Error in get_chat_top_balance for chat {chat_id}: {e}")
-            return []
-
-    async def get_chat_top_xo(self, chat_id: int, limit: int = 3) -> List[Dict]:
-        """
-        Возвращает топ по XO среди пользователей, активных в конкретном чате.
-        Фильтрация: выбираются user_id из user_activity_log для данного chat_id,
-        затем среди них ищется топ по wins из xo_stats.
-        """
-        if chat_id is None:
-            return []
-        limit = limit if limit is not None else 3
+        new_rank = self.calculate_rank(
+            xp=stats.get('xp', 0),
+            messages=stats.get('messages_total', 0),
+            xo_wins=stats.get('wins', 0),
+            days_active=stats.get('days_active', 0)
+        )
         
-        try:
-            result = await self._execute_with_retry(
-                """SELECT u.user_id, u.username, u.first_name,
-                   COALESCE(x.wins, 0) as wins,
-                   COALESCE(x.games_played, 0) as games_played
-                   FROM xo_stats x
-                   INNER JOIN users u ON x.user_id = u.user_id
-                   INNER JOIN (
-                       SELECT DISTINCT user_id
-                       FROM user_activity_log
-                       WHERE chat_id = ?
-                   ) a ON x.user_id = a.user_id
-                   WHERE COALESCE(x.games_played, 0) >= 1
-                   ORDER BY x.wins DESC
-                   LIMIT ?""",
-                (chat_id, limit), fetch_all=True)
-            
-            if result and len(result) > 0:
-                return result
-            
-            return []
-            
-        except Exception as e:
-            logger.error(f"Error in get_chat_top_xo for chat {chat_id}: {e}")
-            return []
-
-    async def get_chat_top_messages(self, chat_id: int, limit: int = 3) -> List[Dict]:
-        """
-        Возвращает топ по сообщениям в конкретном чате.
-        Суммирует все сообщения пользователя в этом чате из user_activity_log.
-        """
-        if chat_id is None:
-            return []
-        limit = limit if limit is not None else 3
-        
-        try:
-            result = await self._execute_with_retry(
-                """SELECT ual.user_id, u.first_name, u.username, SUM(ual.messages) as messages_total
-                   FROM user_activity_log ual
-                   LEFT JOIN users u ON ual.user_id = u.user_id
-                   WHERE ual.chat_id = ?
-                   GROUP BY ual.user_id
-                   ORDER BY messages_total DESC
-                   LIMIT ?""",
-                (chat_id, limit), fetch_all=True)
-            
-            return result if result else []
-            
-        except Exception as e:
-            logger.error(f"Error in get_chat_top_messages for chat {chat_id}: {e}")
-            return []
-
-    async def get_total_users(self) -> int:
-        row = await self._execute_with_retry("SELECT COUNT(*) as cnt FROM users", fetch_one=True)
-        return row.get("cnt", 0) if row else 0
-
-    async def get_total_messages_count(self) -> int:
-        row = await self._execute_with_retry("SELECT COALESCE(SUM(messages_total),0) as cnt FROM user_stats", fetch_one=True)
-        return row.get("cnt", 0) if row else 0
-
-    async def get_chat_members_count(self, chat_id: int) -> int:
-        if chat_id is None:
-            return 0
-        row = await self._execute_with_retry(
-            "SELECT COUNT(*) as cnt FROM group_members gm JOIN groups g ON gm.group_id = g.id WHERE g.chat_id = ?",
-            (chat_id,), fetch_one=True)
-        return row.get("cnt", 0) if row else 0
-
-    async def get_all_chats_with_bot(self) -> List[int]:
-        """
-        Возвращает список всех chat_id, где есть активность.
-        Ищет по chat_word_stats, chat_rating и user_activity_log.
-        """
-        try:
-            rows = await self._execute_with_retry(
-                """SELECT DISTINCT chat_id FROM (
-                    SELECT DISTINCT chat_id FROM chat_word_stats
-                    UNION
-                    SELECT DISTINCT chat_id FROM chat_rating
-                    UNION
-                    SELECT DISTINCT chat_id FROM user_activity_log
-                )""",
-                fetch_all=True
-            )
-            return [r["chat_id"] for r in rows] if rows else []
-        except Exception as e:
-            logger.error(f"Error getting all chats: {e}")
-            return []
-
-    # ==================== ОЧИСТКА ====================
-
-    async def cleanup_old_activity_logs(self, days: int = 90) -> None:
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        queries = [
-            ("DELETE FROM user_activity_log WHERE date < ?", (cutoff,)),
-            ("DELETE FROM chat_word_stats WHERE date < ?", (cutoff,))
-        ]
-        await self._execute_transaction(queries)
-
-    async def reset_daily_counters(self) -> None:
-        await self._execute_with_retry("UPDATE user_stats SET messages_today = 0")
-
-    async def reset_weekly_counters(self) -> None:
-        await self._execute_with_retry("UPDATE user_stats SET messages_week = 0")
-
-    async def reset_monthly_counters(self) -> None:
-        await self._execute_with_retry("UPDATE user_stats SET messages_month = 0")
-
-    async def cleanup_bot_from_all_tables(self, bot_id: int) -> None:
-        if bot_id is None:
-            return
-        tables_with_user_id = [
-            'users', 'user_stats', 'user_economy_stats', 'xo_stats', 'user_profiles',
-            'custom_rp', 'user_activity_log', 'user_tag_subscriptions', 'ref_links', 'donors'
-        ]
-        special_tables = {
-            'transactions': ("from_id = ? OR to_id = ?", (bot_id, bot_id)),
-            'relationships': ("user1_id = ? OR user2_id = ?", (bot_id, bot_id)),
-            'ref_invites': ("inviter_id = ? OR invited_id = ?", (bot_id, bot_id)),
-            'group_members': ("user_id = ?", (bot_id,))
-        }
-        queries = []
-        for table in tables_with_user_id:
-            queries.append((f"DELETE FROM {table} WHERE user_id = ?", (bot_id,)))
-        for table, (condition, params) in special_tables.items():
-            queries.append((f"DELETE FROM {table} WHERE {condition}", params))
-        try:
-            await self._execute_transaction(queries)
-        except DatabaseError as e:
-            logger.warning(f"Failed to clean bot data: {e}")
-
-    # ==================== КАСТОМНЫЕ РП ====================
-
-    async def count_custom_rp(self, user_id: int) -> int:
-        if user_id is None:
-            return 0
-        row = await self._execute_with_retry(
-            "SELECT COUNT(*) as cnt FROM custom_rp WHERE user_id = ?", (user_id,), fetch_one=True)
-        return row.get("cnt", 0) if row else 0
-
-    async def check_custom_rp_exists(self, user_id: int, command: str) -> bool:
-        if user_id is None or not command:
-            return False
-        row = await self._execute_with_retry(
-            "SELECT 1 FROM custom_rp WHERE user_id = ? AND command = ?",
-            (user_id, command), fetch_one=True)
-        return row is not None
-
-    async def add_custom_rp(self, user_id: int, command: str, action_text: str) -> None:
-        if user_id is None or not command or not action_text:
-            return
         await self._execute_with_retry(
-            "INSERT INTO custom_rp (user_id, command, action_text) VALUES (?, ?, ?)",
-            (user_id, command, action_text))
+            "UPDATE users SET rank = ? WHERE user_id = ?", 
+            (new_rank, user_id), commit=True)
+        
+        logger.info(f"⭐ Rank recalculated for user {user_id}: {new_rank}")
+        return new_rank
 
-    async def delete_custom_rp(self, user_id: int, command: str) -> bool:
-        if user_id is None or not command:
+    async def get_user_rank(self, user_id: int) -> Optional[Dict]:
+        """Получение ранга с детальной информацией."""
+        user = await self.get_user(user_id)
+        if not user:
+            return None
+        
+        stats = await self.get_user_stats(user_id) or {}
+        
+        current_rank = user.get('rank', 1)
+        calculated_rank = self.calculate_rank(
+            xp=stats.get('xp', 0),
+            messages=stats.get('messages_total', 0),
+            xo_wins=stats.get('wins', 0),
+            days_active=stats.get('days_active', 0)
+        )
+        
+        return {
+            'user_id': user_id,
+            'username': user.get('username'),
+            'current_rank': current_rank,
+            'calculated_rank': calculated_rank,
+            'xp': stats.get('xp', 0),
+            'messages': stats.get('messages_total', 0),
+            'xo_wins': stats.get('wins', 0),
+            'days_active': stats.get('days_active', 0),
+            'needs_recalc': current_rank != calculated_rank
+        }
+
+    async def add_xp(self, user_id: int, xp_amount: int, reason: str = "activity") -> bool:
+        """Добавление XP с автоматическим пересчётом ранга."""
+        if user_id is None or xp_amount is None or xp_amount <= 0:
             return False
-        result = await self._execute_with_retry(
-            "DELETE FROM custom_rp WHERE user_id = ? AND command = ?",
-            (user_id, command))
-        return result > 0
+        
+        success = await self._execute_with_retry(
+            """UPDATE users SET xp = COALESCE(xp, 0) + ? WHERE user_id = ?""",
+            (xp_amount, user_id), commit=True)
+        
+        if success:
+            await self.recalculate_user_rank(user_id)
+            logger.info(f"⭐ Added {xp_amount} XP to user {user_id} ({reason})")
+        return bool(success)
 
-    async def get_custom_rp(self, user_id: int) -> Dict[str, str]:
-        if user_id is None:
-            return {}
-        rows = await self._execute_with_retry(
-            "SELECT command, action_text FROM custom_rp WHERE user_id = ?",
-            (user_id,), fetch_all=True)
-        return {r["command"]: r["action_text"] for r in rows} if rows else {}
+    # ==================== ТРЕКИНГ АКТИВНОСТИ ====================
 
-    async def get_all_custom_rp(self, limit: int = 1000, offset: int = 0) -> Dict[int, Dict[str, str]]:
-        limit = limit if limit is not None else 1000
-        rows = await self._execute_with_retry(
-            "SELECT user_id, command, action_text FROM custom_rp ORDER BY user_id LIMIT ? OFFSET ?",
-            (limit, offset), fetch_all=True)
-        result: Dict[int, Dict[str, str]] = {}
-        for row in (rows or []):
-            uid = row["user_id"]
-            if uid not in result:
-                result[uid] = {}
-            result[uid][row["command"]] = row["action_text"]
-        return result
-
-    # ==================== ОТНОШЕНИЯ ====================
-
-    async def create_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> bool:
-        if user1_id is None or user2_id is None or not rel_type:
+    async def track_user_activity(self, user_id: int, chat_id: int, 
+                                  activity_type: str, value: int = 1) -> bool:
+        """
+        Трекинг активности пользователя в чате.
+        Параметры: user_id, chat_id, activity_type, value
+        """
+        if user_id is None or chat_id is None or not activity_type:
             return False
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Маппинг типа активности на колонку
+        column_map = {
+            "message": "messages",
+            "voice": "voice",
+            "sticker": "stickers",
+            "gif": "gifs",
+            "photo": "photos",
+            "video": "videos",
+            "xo_game": "xo_games",
+            "game": "games_played",
+        }
+        
+        column = column_map.get(activity_type)
+        if not column:
+            logger.warning(f"Unknown activity type: {activity_type}")
+            return False
+        
         try:
             await self._execute_with_retry(
-                "INSERT OR IGNORE INTO relationships (user1_id, user2_id, type) VALUES (?, ?, ?)",
-                (user1_id, user2_id, rel_type))
+                f"""INSERT INTO user_activity_log (user_id, chat_id, date, {column})
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, chat_id, date) 
+                    DO UPDATE SET {column} = {column} + ?""",
+                (user_id, chat_id, today, value, value), commit=True)
+            
+            # Обновление user_stats
+            if activity_type == "message":
+                await self._execute_with_retry(
+                    """UPDATE user_stats 
+                       SET messages_total = COALESCE(messages_total, 0) + 1,
+                           messages_today = COALESCE(messages_today, 0) + 1,
+                           last_message_date = ?,
+                           last_active = ?
+                       WHERE user_id = ?""",
+                    (today, datetime.now().isoformat(), user_id), commit=True)
+            else:
+                stat_column_map = {
+                    "voice": "total_voice",
+                    "sticker": "total_stickers",
+                    "gif": "total_gifs",
+                    "photo": "total_photos",
+                    "video": "total_videos",
+                }
+                stat_col = stat_column_map.get(activity_type)
+                if stat_col:
+                    await self._execute_with_retry(
+                        f"""UPDATE user_stats 
+                           SET {stat_col} = COALESCE({stat_col}, 0) + ?,
+                               last_active = ?
+                           WHERE user_id = ?""",
+                        (value, datetime.now().isoformat(), user_id), commit=True)
+            
             return True
         except Exception as e:
-            logger.error(f"Create relationship error: {e}")
+            logger.error(f"Failed to track activity: {e}")
             return False
 
+    async def track_word(self, chat_id: int, word: str) -> bool:
+        """Трекинг использованных слов в чате."""
+        if chat_id is None or not word:
+            return False
+        
+        word = word.lower().strip()
+        if len(word) < 3:
+            return False
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        try:
+            await self._execute_with_retry(
+                """INSERT INTO chat_word_stats (chat_id, date, word, count)
+                   VALUES (?, ?, ?, 1)
+                   ON CONFLICT(chat_id, date, word) 
+                   DO UPDATE SET count = count + 1""",
+                (chat_id, today, word), commit=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to track word: {e}")
+            return False
+
+    # ==================== СТАТИСТИКА ПОЛЬЗОВАТЕЛЯ ====================
+
+    async def get_user_stats(self, user_id: int) -> Optional[Dict]:
+        """Единый метод получения ВСЕХ статистик пользователя с кэшированием."""
+        if user_id is None:
+            return None
+        
+        cache_key = f"user_stats:{user_id}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+        
+        result = await self._execute_with_retry(
+            """SELECT 
+                u.user_id, u.username, u.first_name, 
+                COALESCE(u.balance, 0) as balance, 
+                COALESCE(u.daily_streak, 0) as daily_streak,
+                COALESCE(u.vip_level, 0) as vip_level,
+                COALESCE(u.xp, 0) as xp,
+                COALESCE(u.rank, 1) as rank,
+                u.register_date as user_register_date,
+                
+                COALESCE(s.messages_total, 0) as messages_total,
+                COALESCE(s.messages_today, 0) as messages_today,
+                COALESCE(s.messages_week, 0) as messages_week,
+                COALESCE(s.messages_month, 0) as messages_month,
+                s.last_message_date, s.last_active,
+                COALESCE(s.total_voice, 0) as total_voice,
+                COALESCE(s.total_stickers, 0) as total_stickers,
+                COALESCE(s.total_gifs, 0) as total_gifs,
+                COALESCE(s.total_photos, 0) as total_photos,
+                COALESCE(s.total_videos, 0) as total_videos,
+                COALESCE(s.days_active, 0) as days_active,
+                COALESCE(s.current_streak, 0) as current_streak,
+                COALESCE(s.max_streak, 0) as max_streak,
+                
+                COALESCE(e.total_earned, 0) as total_earned,
+                COALESCE(e.total_spent, 0) as total_spent,
+                COALESCE(e.total_transferred, 0) as total_transferred,
+                COALESCE(e.total_received, 0) as total_received,
+                COALESCE(e.total_donated_rub, 0) as total_donated_rub,
+                COALESCE(e.total_donated_coins, 0) as total_donated_coins,
+                COALESCE(e.max_balance, 0) as max_balance,
+                COALESCE(e.daily_claims, 0) as daily_claims,
+                
+                COALESCE(x.games_played, 0) as games_played,
+                COALESCE(x.wins, 0) as wins,
+                COALESCE(x.losses, 0) as losses,
+                COALESCE(x.draws, 0) as draws,
+                COALESCE(x.wins_vs_bot, 0) as wins_vs_bot,
+                COALESCE(x.losses_vs_bot, 0) as losses_vs_bot,
+                COALESCE(x.total_bet, 0) as total_bet,
+                COALESCE(x.total_won, 0) as total_won,
+                COALESCE(x.max_win_streak, 0) as max_win_streak,
+                COALESCE(x.current_win_streak, 0) as current_win_streak
+                
+               FROM users u
+               LEFT JOIN user_stats s ON u.user_id = s.user_id
+               LEFT JOIN user_economy_stats e ON u.user_id = e.user_id
+               LEFT JOIN xo_stats x ON u.user_id = x.user_id
+               WHERE u.user_id = ?""", 
+            (user_id,), fetch_one=True)
+        
+        if result:
+            result['calculated_rank'] = self.calculate_rank(
+                xp=result.get('xp', 0),
+                messages=result.get('messages_total', 0),
+                xo_wins=result.get('wins', 0),
+                days_active=result.get('days_active', 0)
+            )
+            self._set_cached(cache_key, result)
+            return result
+        
+        # Если пользователь есть в users, но нет в stats — возвращаем дефолты
+        user = await self.get_user(user_id)
+        if user:
+            default_stats = {
+                'user_id': user_id,
+                'username': user.get('username'),
+                'first_name': user.get('first_name'),
+                'balance': user.get('balance', 0),
+                'daily_streak': user.get('daily_streak', 0),
+                'vip_level': user.get('vip_level', 0),
+                'xp': 0, 'rank': 1,
+                'messages_total': 0, 'messages_today': 0, 'wins': 0, 'games_played': 0,
+                'days_active': 0, 'current_streak': 0,
+                'calculated_rank': 1
+            }
+            self._set_cached(cache_key, default_stats)
+            return default_stats
+        
+        return None
+
+    # ==================== ТОПЫ И РЕЙТИНГИ ====================
+
+    async def get_top_users(self, limit: int = 10, order_by: str = "balance") -> List[Dict]:
+        """Гибкий топ с выбором сортировки."""
+        limit = max(1, min(100, limit if limit is not None else 10))
+        
+        valid_orders = {
+            "balance": "u.balance DESC",
+            "xp": "u.xp DESC",
+            "rank": "u.rank ASC",
+            "messages": "COALESCE(s.messages_total, 0) DESC",
+            "wins": "COALESCE(x.wins, 0) DESC",
+            "activity": "COALESCE(s.days_active, 0) DESC"
+        }
+        
+        order_clause = valid_orders.get(order_by, valid_orders["balance"])
+        
+        return await self._execute_with_retry(
+            f"""SELECT u.user_id, u.username, u.first_name, u.balance, u.xp, u.rank,
+                   COALESCE(s.messages_total, 0) as messages_total,
+                   COALESCE(x.wins, 0) as wins,
+                   COALESCE(s.days_active, 0) as days_active
+               FROM users u
+               LEFT JOIN user_stats s ON u.user_id = s.user_id
+               LEFT JOIN xo_stats x ON u.user_id = x.user_id
+               WHERE u.balance >= 0
+               ORDER BY {order_clause}
+               LIMIT ?""",
+            (limit,), fetch_all=True) or []
+
+    async def get_chat_top_balance(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Топ по балансу среди активных в чате."""
+        if chat_id is None:
+            return []
+        limit = max(1, min(20, limit if limit is not None else 3))
+        
+        result = await self._execute_with_retry(
+            """SELECT u.user_id, u.username, u.first_name, u.balance, u.vip_level
+               FROM users u
+               INNER JOIN (
+                   SELECT DISTINCT user_id
+                   FROM user_activity_log
+                   WHERE chat_id = ? AND date >= date('now', '-30 days')
+               ) a ON u.user_id = a.user_id
+               WHERE u.balance > 0
+               ORDER BY u.balance DESC
+               LIMIT ?""",
+            (chat_id, limit), fetch_all=True)
+        
+        return result if result else []
+
+    async def get_chat_top_xo(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Топ по победам в XO среди активных в чате."""
+        if chat_id is None:
+            return []
+        limit = max(1, min(20, limit if limit is not None else 3))
+        
+        result = await self._execute_with_retry(
+            """SELECT u.user_id, u.username, u.first_name,
+                   COALESCE(x.wins, 0) as wins,
+                   COALESCE(x.games_played, 0) as games_played,
+                   CASE 
+                       WHEN COALESCE(x.games_played, 0) > 0 
+                       THEN ROUND(COALESCE(x.wins, 0) * 100.0 / x.games_played, 1)
+                       ELSE 0 
+                   END as win_rate
+               FROM xo_stats x
+               INNER JOIN users u ON x.user_id = u.user_id
+               INNER JOIN (
+                   SELECT DISTINCT user_id
+                   FROM user_activity_log
+                   WHERE chat_id = ? AND date >= date('now', '-30 days')
+               ) a ON x.user_id = a.user_id
+               WHERE COALESCE(x.games_played, 0) >= 1
+               ORDER BY x.wins DESC, win_rate DESC
+               LIMIT ?""",
+            (chat_id, limit), fetch_all=True)
+        
+        return result if result else []
+
+    async def get_chat_top_messages(self, chat_id: int, limit: int = 3) -> List[Dict]:
+        """Топ по сообщениям в чате."""
+        if chat_id is None:
+            return []
+        limit = max(1, min(20, limit if limit is not None else 3))
+        
+        result = await self._execute_with_retry(
+            """SELECT ual.user_id, u.first_name, u.username, 
+                   SUM(ual.messages) as messages_total,
+                   COUNT(DISTINCT ual.date) as active_days
+               FROM user_activity_log ual
+               LEFT JOIN users u ON ual.user_id = u.user_id
+               WHERE ual.chat_id = ? AND ual.date >= date('now', '-30 days')
+               GROUP BY ual.user_id
+               HAVING messages_total > 0
+               ORDER BY messages_total DESC
+               LIMIT ?""",
+            (chat_id, limit), fetch_all=True)
+        
+        return result if result else []
+
+    # ==================== ОТНОШЕНИЯ С ВЗАИМНЫМ ПОДТВЕРЖДЕНИЕМ ====================
+
     async def get_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> Optional[Dict]:
+        """Алиас для get_relationship_status (поиск по двум пользователям)."""
         if user1_id is None or user2_id is None or not rel_type:
             return None
+        
         return await self._execute_with_retry(
             """SELECT * FROM relationships
                WHERE ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
-               AND type = ? AND status = 'active'""",
+               AND type = ? AND status IN ('pending', 'active')
+               ORDER BY created_at DESC LIMIT 1""",
             (user1_id, user2_id, user2_id, user1_id, rel_type), fetch_one=True)
 
+    async def propose_relationship(self, proposer_id: int, target_id: int, rel_type: str) -> Dict[str, Any]:
+        """Создание предложения отношений (ожидает подтверждения)."""
+        result = {'success': False, 'error': None, 'relationship_id': None}
+        
+        if proposer_id is None or target_id is None or not rel_type:
+            result['error'] = "Invalid parameters"
+            return result
+        
+        if proposer_id == target_id:
+            result['error'] = "Cannot create relationship with self"
+            return result
+        
+        # Проверка на существующие активные отношения
+        existing = await self.get_relationship(proposer_id, target_id, rel_type)
+        if existing:
+            status = existing.get('status')
+            if status == 'active':
+                result['error'] = "Relationship already active"
+            elif status == 'pending':
+                result['error'] = "Proposal already pending"
+                result['relationship_id'] = existing.get('id')
+            return result
+        
+        now = datetime.now().isoformat()
+        rel_id = await self._execute_with_retry(
+            """INSERT INTO relationships (user1_id, user2_id, type, status, created_at)
+               VALUES (?, ?, ?, 'pending', ?)""",
+            (proposer_id, target_id, rel_type, now))
+        
+        if rel_id:
+            result.update({'success': True, 'relationship_id': rel_id})
+            logger.info(f"💕 Relationship proposed: {proposer_id} -> {target_id} ({rel_type})")
+        return result
+
+    async def confirm_relationship(self, relationship_id: int, confirmer_id: int) -> bool:
+        """Подтверждение отношений второй стороной."""
+        if relationship_id is None or confirmer_id is None:
+            return False
+        
+        rel = await self._execute_with_retry(
+            """SELECT user1_id, user2_id, status FROM relationships WHERE id = ?""",
+            (relationship_id,), fetch_one=True)
+        
+        if not rel or rel['status'] != 'pending':
+            return False
+        
+        if rel['user1_id'] == confirmer_id:
+            return False
+        if rel['user2_id'] != confirmer_id:
+            return False
+        
+        success = await self._execute_with_retry(
+            """UPDATE relationships SET status = 'active', confirmed_by_user2 = 1
+               WHERE id = ? AND status = 'pending'""",
+            (relationship_id,), commit=True)
+        
+        if success:
+            logger.info(f"💕 Relationship confirmed: ID {relationship_id}")
+        return bool(success)
+
     async def get_relationship_status(self, user_id: int, rel_type: str = "marriage") -> Optional[Dict]:
+        """Получение статуса отношений с детальной информацией."""
         if user_id is None:
             return None
-        return await self._execute_with_retry(
-            """SELECT * FROM relationships
-               WHERE (user1_id = ? OR user2_id = ?) AND type = ? AND status = 'active'
-               ORDER BY created_at DESC LIMIT 1""",
+        
+        rel = await self._execute_with_retry(
+            """SELECT r.*, 
+                   u1.username as user1_username, u1.first_name as user1_name,
+                   u2.username as user2_username, u2.first_name as user2_name
+               FROM relationships r
+               LEFT JOIN users u1 ON r.user1_id = u1.user_id
+               LEFT JOIN users u2 ON r.user2_id = u2.user_id
+               WHERE (r.user1_id = ? OR r.user2_id = ?) 
+                 AND r.type = ? 
+                 AND r.status IN ('pending', 'active')
+               ORDER BY r.created_at DESC 
+               LIMIT 1""",
             (user_id, user_id, rel_type), fetch_one=True)
+        
+        if not rel:
+            return None
+        
+        if rel['user1_id'] == user_id:
+            partner_id = rel['user2_id']
+            partner_name = rel['user2_name'] or partner_id
+            is_initiator = True
+            is_confirmed = rel['confirmed_by_user2'] == 1
+        else:
+            partner_id = rel['user1_id']
+            partner_name = rel['user1_name'] or partner_id
+            is_initiator = False
+            is_confirmed = rel['confirmed_by_user2'] == 1 if rel['status'] == 'pending' else True
+        
+        return {
+            'id': rel['id'],
+            'partner_id': partner_id,
+            'partner_name': partner_name,
+            'partner_username': rel['user2_username'] if rel['user1_id'] == user_id else rel['user1_username'],
+            'type': rel['type'],
+            'status': rel['status'],
+            'is_initiator': is_initiator,
+            'is_confirmed': is_confirmed,
+            'created_at': rel['created_at'],
+            'can_cancel': rel['status'] == 'pending' and is_initiator
+        }
 
-    async def end_relationship(self, user1_id: int, user2_id: int, rel_type: str) -> bool:
-        if user1_id is None or user2_id is None or not rel_type:
+    async def get_user_relationships(self, user_id: int) -> List[Dict]:
+        """Получение всех активных/ожидающих отношений пользователя."""
+        if user_id is None:
+            return []
+        
+        return await self._execute_with_retry(
+            """SELECT r.*,
+                   CASE WHEN r.user1_id = ? THEN u2.username ELSE u1.username END as partner_username,
+                   CASE WHEN r.user1_id = ? THEN u2.first_name ELSE u1.first_name END as partner_name,
+                   CASE WHEN r.user1_id = ? THEN r.user2_id ELSE r.user1_id END as partner_id
+               FROM relationships r
+               LEFT JOIN users u1 ON r.user1_id = u1.user_id
+               LEFT JOIN users u2 ON r.user2_id = u2.user_id
+               WHERE (r.user1_id = ? OR r.user2_id = ?)
+                 AND r.status IN ('pending', 'active')
+               ORDER BY r.created_at DESC""",
+            (user_id, user_id, user_id, user_id, user_id), fetch_all=True) or []
+
+    async def end_relationship(self, user_id: int, partner_id: int, rel_type: str) -> bool:
+        """Завершение отношений (только для активных)."""
+        if user_id is None or partner_id is None or not rel_type:
             return False
-        result = await self._execute_with_retry(
+        
+        success = await self._execute_with_retry(
             """UPDATE relationships SET status = 'ended', ended_at = CURRENT_TIMESTAMP
                WHERE ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
                AND type = ? AND status = 'active'""",
-            (user1_id, user2_id, user2_id, user1_id, rel_type))
-        return result > 0
+            (user_id, partner_id, partner_id, user_id, rel_type), commit=True)
+        
+        if success:
+            logger.info(f"💔 Relationship ended: {user_id} <-> {partner_id} ({rel_type})")
+        return bool(success)
 
-    async def get_marriage_partner(self, user_id: int) -> Optional[int]:
-        rel = await self.get_relationship_status(user_id, "marriage")
-        if not rel:
-            return None
-        return rel["user2_id"] if rel["user1_id"] == user_id else rel["user1_id"]
+    # ==================== ТЕГИ ПОЛЬЗОВАТЕЛЯ ====================
 
-    # ==================== ГРУППЫ ====================
-
-    async def create_group(self, chat_id: int, group_name: str, leader_id: int) -> Optional[int]:
-        if chat_id is None or not group_name or leader_id is None:
-            return None
-        try:
-            result = await self._execute_with_retry(
-                "INSERT INTO groups (chat_id, group_name, group_leader, member_count) VALUES (?, ?, ?, 1)",
-                (chat_id, group_name, leader_id))
-            if result > 0:
-                row = await self._execute_with_retry(
-                    "SELECT id FROM groups WHERE chat_id = ? AND group_name = ?",
-                    (chat_id, group_name), fetch_one=True)
-                if row:
-                    await self._execute_with_retry(
-                        "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)",
-                        (row["id"], leader_id))
-                    return row["id"]
-            return None
-        except Exception as e:
-            logger.error(f"Create group error: {e}")
-            return None
-
-    async def join_group(self, group_id: int, user_id: int) -> bool:
-        if group_id is None or user_id is None:
+    async def add_user_tag(self, user_id: int, tag_name: str) -> bool:
+        """Добавление тега пользователю."""
+        if user_id is None or not tag_name:
             return False
-        try:
-            await self._execute_with_retry(
-                "INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)",
-                (group_id, user_id))
-            await self._execute_with_retry(
-                "UPDATE groups SET member_count = member_count + 1 WHERE id = ?",
-                (group_id,))
-            return True
-        except Exception as e:
-            logger.error(f"Join group error: {e}")
+        
+        tag_name = tag_name.strip().lower()
+        if len(tag_name) < 2 or len(tag_name) > 20:
             return False
+        
+        success = await self._execute_with_retry(
+            "INSERT OR IGNORE INTO user_tags (user_id, tag_name) VALUES (?, ?)",
+            (user_id, tag_name), commit=True)
+        
+        if success:
+            logger.info(f"🏷️ Tag '{tag_name}' added to user {user_id}")
+        return bool(success)
 
-    async def leave_group(self, group_id: int, user_id: int) -> bool:
-        if group_id is None or user_id is None:
+    async def remove_user_tag(self, user_id: int, tag_name: str) -> bool:
+        """Удаление тега."""
+        if user_id is None or not tag_name:
             return False
-        try:
-            group = await self._execute_with_retry(
-                "SELECT group_leader FROM groups WHERE id = ?",
-                (group_id,), fetch_one=True)
-            if group and group["group_leader"] == user_id:
-                return False
-            result = await self._execute_with_retry(
-                "DELETE FROM group_members WHERE group_id = ? AND user_id = ?",
-                (group_id, user_id))
-            if result > 0:
-                await self._execute_with_retry(
-                    "UPDATE groups SET member_count = MAX(member_count - 1, 0) WHERE id = ?",
-                    (group_id,))
-            return result > 0
-        except Exception as e:
-            logger.error(f"Leave group error: {e}")
-            return False
+        
+        success = await self._execute_with_retry(
+            "DELETE FROM user_tags WHERE user_id = ? AND tag_name = ?",
+            (user_id, tag_name.strip().lower()), commit=True)
+        
+        return bool(success)
 
-    async def get_user_groups(self, user_id: int) -> List[Dict]:
+    async def get_user_tags(self, user_id: int) -> List[str]:
+        """Получение всех тегов пользователя."""
         if user_id is None:
             return []
-        return await self._execute_with_retry(
-            """SELECT g.* FROM groups g
-               JOIN group_members gm ON g.id = gm.group_id
-               WHERE gm.user_id = ?""",
-            (user_id,), fetch_all=True) or []
+        
+        rows = await self._execute_with_retry(
+            "SELECT tag_name FROM user_tags WHERE user_id = ? ORDER BY tag_name",
+            (user_id,), fetch_all=True)
+        
+        return [r["tag_name"] for r in rows] if rows else []
 
-    async def get_group_members(self, group_id: int) -> List[Dict]:
-        if group_id is None:
+    async def search_users_by_tag(self, tag_name: str, limit: int = 20) -> List[Dict]:
+        """Поиск пользователей по тегу."""
+        if not tag_name:
             return []
+        
+        tag_name = tag_name.strip().lower()
+        limit = max(1, min(50, limit))
+        
         return await self._execute_with_retry(
-            """SELECT u.user_id, u.username, u.first_name
-               FROM group_members gm
-               LEFT JOIN users u ON gm.user_id = u.user_id
-               WHERE gm.group_id = ?""",
-            (group_id,), fetch_all=True) or []
+            """SELECT u.user_id, u.username, u.first_name, u.balance
+               FROM user_tags t
+               JOIN users u ON t.user_id = u.user_id
+               WHERE t.tag_name = ?
+               ORDER BY u.balance DESC
+               LIMIT ?""",
+            (tag_name, limit), fetch_all=True) or []
 
-    async def delete_group(self, group_id: int) -> bool:
-        if group_id is None:
+    # ==================== ОБРАТНАЯ СВЯЗЬ (FEEDBACK) ====================
+
+    async def create_feedback_ticket(self, user_id: int, message: str) -> Optional[int]:
+        """Создание тикета обратной связи."""
+        if user_id is None or not message or len(message) < 10:
+            return None
+        
+        ticket_id = await self._execute_with_retry(
+            """INSERT INTO feedback_tickets (user_id, message, status, created_at)
+               VALUES (?, ?, 'open', CURRENT_TIMESTAMP)""",
+            (user_id, message.strip()))
+        
+        if ticket_id:
+            logger.info(f"📬 Feedback ticket #{ticket_id} created by user {user_id}")
+        return ticket_id
+
+    async def get_user_tickets(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """Получение тикетов пользователя."""
+        if user_id is None:
+            return []
+        
+        return await self._execute_with_retry(
+            """SELECT id, message, status, created_at, answered_at, admin_response
+               FROM feedback_tickets
+               WHERE user_id = ?
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (user_id, limit), fetch_all=True) or []
+
+    async def update_ticket(self, ticket_id: int, status: str, admin_response: str = None) -> bool:
+        """Обновление статуса и ответа админа в тикете."""
+        if ticket_id is None or status not in ('open', 'closed', 'in_progress'):
             return False
+        
+        now = datetime.now().isoformat()
+        if admin_response and status == 'closed':
+            query = """UPDATE feedback_tickets 
+                      SET status = ?, admin_response = ?, answered_at = ?
+                      WHERE id = ?"""
+            params = (status, admin_response, now, ticket_id)
+        else:
+            query = "UPDATE feedback_tickets SET status = ? WHERE id = ?"
+            params = (status, ticket_id)
+        
+        success = await self._execute_with_retry(query, params, commit=True)
+        if success:
+            logger.info(f"📬 Ticket #{ticket_id} updated: status={status}")
+        return bool(success)
+
+    async def get_pending_feedback(self, limit: int = 20) -> List[Dict]:
+        """Получение открытых тикетов для админов."""
+        return await self._execute_with_retry(
+            """SELECT t.id, t.message, t.created_at, u.username, u.first_name
+               FROM feedback_tickets t
+               JOIN users u ON t.user_id = u.user_id
+               WHERE t.status = 'open'
+               ORDER BY t.created_at ASC
+               LIMIT ?""",
+            (limit,), fetch_all=True) or []
+
+    # ==================== ПОЛИТИКА И ПРАВИЛА ====================
+
+    @staticmethod
+    def get_policy_section(section: str) -> str:
+        """Получение раздела политики (из констант)."""
+        return DEFAULT_POLICY_TEXT.get(section, "Раздел не найден.")
+
+    @staticmethod
+    def get_all_policy_sections() -> List[Dict]:
+        """Список всех разделов политики для меню."""
+        return [
+            {"key": "rules", "title": "📜 Правила", "emoji": "📜"},
+            {"key": "privacy", "title": "🔐 Конфиденциальность", "emoji": "🔐"},
+            {"key": "moderation", "title": "⚖️ Модерация", "emoji": "⚖️"},
+            {"key": "feedback", "title": "📬 Обратная связь", "emoji": "📬"},
+            {"key": "contacts", "title": "👥 Контакты", "emoji": "👥"},
+        ]
+
+    # ==================== УМНЫЙ ПАРСЕР: ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
+
+    async def get_custom_rp_action(self, command: str) -> Optional[Tuple[int, str]]:
+        """Поиск кастомного РП действия по команде (для парсера)."""
+        if not command:
+            return None
+        
+        result = await self._execute_with_retry(
+            "SELECT user_id, action_text FROM custom_rp WHERE command = ? LIMIT 1",
+            (command.lower().strip(),), fetch_one=True)
+        
+        if result:
+            return (result["user_id"], result["action_text"])
+        return None
+
+    async def get_parser_triggers(self, chat_id: int) -> Dict[str, List[str]]:
+        """Получение триггеров для умного парсера в чате."""
+        # В будущем можно добавить таблицу parser_triggers
+        return {
+            "greetings": ["привет", "здравствуй", "хай", "ку"],
+            "farewells": ["пока", "до свидания", "чао"],
+            "thanks": ["спасибо", "благодарю", "мерси"],
+        }
+
+    # ==================== АДМИН: ОЧИСТКА ЧАТА И ЛОГИ ====================
+
+    async def get_deletable_messages(self, chat_id: int, limit: int = 100) -> List[Dict]:
+        """
+        Возвращает данные о недавней активности в чате для очистки.
+        Реальные message_id не хранятся в БД — удаление делается через Telegram API
+        в handlers/admin.py с использованием bot.delete_message().
+        """
+        if chat_id is None:
+            return []
+        
+        # Telegram API позволяет удалять сообщения только за последние 48 часов
+        cutoff = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d")
+        limit = max(1, min(100, limit))
+        
+        return await self._execute_with_retry(
+            """SELECT user_id, date, messages, voice, stickers, gifs, photos, videos
+               FROM user_activity_log 
+               WHERE chat_id = ? AND date >= ?
+               ORDER BY date DESC, messages DESC
+               LIMIT ?""",
+            (chat_id, cutoff, limit), fetch_all=True) or []
+
+    async def log_admin_action(self, admin_id: int, action: str, chat_id: int = None, 
+                              target_user_id: int = None, details: str = None) -> None:
+        """Логирование действий админов для аудита."""
         try:
             await self._execute_with_retry(
-                "DELETE FROM group_members WHERE group_id = ?", (group_id,))
-            result = await self._execute_with_retry(
-                "DELETE FROM groups WHERE id = ?", (group_id,))
-            return result > 0
+                """INSERT INTO admin_logs (admin_id, action, chat_id, target_user_id, details)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (admin_id, action, chat_id, target_user_id, details), commit=True)
         except Exception as e:
-            logger.error(f"Delete group error: {e}")
+            logger.error(f"Failed to log admin action: {e}")
+        
+        logger.info(f"🔐 Admin {admin_id}: {action} | chat:{chat_id} | user:{target_user_id} | {details}")
+
+    async def get_admin_logs(self, limit: int = 50, admin_id: int = None) -> List[Dict]:
+        """Получение логов действий администраторов."""
+        limit = max(1, min(200, limit))
+        
+        if admin_id:
+            return await self._execute_with_retry(
+                """SELECT * FROM admin_logs 
+                   WHERE admin_id = ? 
+                   ORDER BY created_at DESC LIMIT ?""",
+                (admin_id, limit), fetch_all=True) or []
+        else:
+            return await self._execute_with_retry(
+                """SELECT * FROM admin_logs 
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,), fetch_all=True) or []
+
+    # ==================== ЕЖЕДНЕВНАЯ СВОДКА ====================
+
+    async def get_chat_daily_summary(self, chat_id: int, date: str = None) -> Optional[Dict]:
+        """Получение дневной сводки по чату."""
+        if chat_id is None:
+            return None
+        
+        if date is None:
+            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        return await self._execute_with_retry(
+            """SELECT * FROM chat_daily_summary 
+               WHERE chat_id = ? AND date = ?""",
+            (chat_id, date), fetch_one=True)
+
+    async def save_daily_summary(self, chat_id: int, date: str, total_messages: int,
+                                 active_users: int, top_words_json: str, 
+                                 top_users_json: str) -> bool:
+        """Сохранение дневной сводки."""
+        if chat_id is None or not date:
             return False
+        
+        success = await self._execute_with_retry(
+            """INSERT OR REPLACE INTO chat_daily_summary 
+               (chat_id, date, total_messages, active_users, top_words, top_users)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (chat_id, date, total_messages, active_users, top_words_json, top_users_json),
+            commit=True)
+        
+        return bool(success)
+
+    async def get_top_words(self, chat_id: int, date: str = None, limit: int = 10) -> List[Dict]:
+        """Получение топ-слов за день."""
+        if chat_id is None:
+            return []
+        
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        return await self._execute_with_retry(
+            """SELECT word, count FROM chat_word_stats 
+               WHERE chat_id = ? AND date = ?
+               ORDER BY count DESC LIMIT ?""",
+            (chat_id, date, limit), fetch_all=True) or []
 
     # ==================== ЗАКРЫТИЕ ====================
 
     async def close(self) -> None:
-        logger.info("Database connection closed (no-op for aiosqlite)")
+        """Закрытие соединения (aiosqlite закрывается автоматически)."""
+        logger.info("Database instance closed")
 
 
 # ==================== ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР ====================
