@@ -1,846 +1,1243 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================
-# ФАЙЛ: handlers/admin.py
-# ВЕРСИЯ: 3.3.0-production
-# ОПИСАНИЕ: Админ-панель — ПОЛНОСТЬЮ СОВМЕСТИМА С database.py v3.3.1
-# ИЗМЕНЕНИЯ v3.3.0:
-#   ✅ Все запросы к БД через публичные методы (добавлены в database.py)
-#   ✅ Безопасный доступ к bot_messages из utils.auto_delete
-#   ✅ is_super_admin импортируется из bot.py (или utils/auth.py)
-#   ✅ datetime импортирован в начало модуля
-#   ✅ Явные проверки на None после run_with_timeout
-#   ✅ Добавлено логирование успешных операций
-#   ✅ Типизация улучшена, добавлены аннотации
+# ФАЙЛ: bot.py
+# ВЕРСИЯ: 7.4.3-production
+# ОПИСАНИЕ: NEXUS Chat Manager — Полная совместимость с database.py v3.3.1
+# ИЗМЕНЕНИЯ v7.4.3:
+#   ✅ Исправлена опечатка в get_back_keyboard (SyntaxError)
+#   ✅ Убран неиспользуемый импорт timedelta
+#   ✅ Улучшена производительность _message_save_cooldown (автоочистка)
+#   ✅ Добавлен лимит на размер кэша сообщений
 # ============================================
 
 import asyncio
-import html
 import logging
-from datetime import datetime, timedelta
-from functools import wraps
-from typing import Optional, Any, List, Dict, Callable, Awaitable, TypeVar
+import sys
+import time
+import html
+import os
+from datetime import datetime
+from typing import Dict, Set, Optional, Any, List, Tuple
 
-from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, Message, Update
+)
 
-from database import db, DatabaseError
-from config import SUPER_ADMIN_IDS, OWNER_ID, MAX_CONCURRENT_CHATS
+# ✅ Исправленные импорты для aiogram 3.x с fallback
+try:
+    from aiogram.exceptions import (
+        TelegramBadRequest, 
+        TelegramForbiddenError,
+        AiogramError as TelegramAPIError
+    )
+except ImportError:
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+    TelegramAPIError = Exception
 
-router = Router()
+from dotenv import load_dotenv
+
+# ✅ Опциональная очистка окружения перед загрузкой .env
+if os.getenv('CLEAR_ENV_ON_START', 'false').lower() == 'true':
+    for key in list(os.environ.keys()):
+        if key.startswith(('NEXUS_', 'BOT_', 'DB_')):
+            del os.environ[key]
+
+load_dotenv()
+
+# ==================== ЛОГИРОВАНИЕ ====================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True
+)
 logger = logging.getLogger(__name__)
 
-# ==================== КОНСТАНТЫ ====================
-TIMEOUT_STATS = 10.0
-TIMEOUT_CLEANUP = 30.0
-TIMEOUT_CHAT_INFO = 5.0
-MAX_CHATS_DISPLAY = 20
+# ==================== КОНФИГ ====================
 
-CB_ADMIN_STATS = "admin_stats"
-CB_ADMIN_CLEANUP = "admin_cleanup"
-CB_ADMIN_SUMMARY = "admin_summary"
-CB_ADMIN_CHATS = "admin_chats"
-CB_ADMIN_RELOAD = "admin_reload"
-CB_ADMIN_BACK = "admin_back"
-CB_ADMIN_CLOSE = "admin_close"
-CB_ADMIN_CLEANUP_ALL = "admin_cleanup_all"
+from config import (
+    BOT_TOKEN, START_BALANCE, ADMIN_IDS, SUPER_ADMIN_IDS,
+    BOT_USERNAME, GAME_COMMISSION, MORNING_CLEANUP_HOUR,
+    DONATE_URL, DONATE_BANK, DONATE_RECEIVER, DATABASE_PATH
+)
 
-_background_tasks: set[asyncio.Task] = set()
+if not BOT_TOKEN:
+    logger.critical("❌ BOT_TOKEN not set!")
+    sys.exit(1)
 
-# ✅ Глобальный bot (устанавливается из bot.py)
-_bot: Optional[Bot] = None
+ADMIN_IDS = ADMIN_IDS if ADMIN_IDS is not None else []
+SUPER_ADMIN_IDS = SUPER_ADMIN_IDS if SUPER_ADMIN_IDS is not None else []
+START_BALANCE = START_BALANCE if START_BALANCE is not None else 1000
+
+OWNER_ID = 895844198
+BOT_ID: Optional[int] = None
+
+logger.info(f"🔧 OWNER_ID: {OWNER_ID}")
+logger.info(f"🔧 ADMIN_IDS: {ADMIN_IDS}")
+logger.info(f"🔧 SUPER_ADMIN_IDS: {SUPER_ADMIN_IDS}")
+
+# ==================== БОТ ====================
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+_background_tasks: Set[asyncio.Task] = set()
+_cleanup_tasks: List[asyncio.Task] = []
+_startup_time = datetime.now()
+
+# ==================== FSM ДЛЯ ОБРАТНОЙ СВЯЗИ ====================
+
+class FeedbackState(StatesGroup):
+    waiting_for_message = State()
 
 
-def set_bot(bot_instance: Bot) -> None:
-    """Установка экземпляра бота (вызывается из bot.py)."""
-    global _bot
-    _bot = bot_instance
-    logger.info("✅ Bot instance set in admin module")
+# ==================== RATE LIMITER ====================
 
-
-# ==================== ПРОВЕРКА ПРАВ ====================
-
-# ✅ Импортируем из bot.py чтобы избежать дублирования
-# Если возникает циклический импорт — раскомментируйте локальную версию ниже
 try:
-    from bot import is_super_admin
+    from utils.rate_limiter import RateLimiter, start_cleanup_task, stop_cleanup_task
+    daily_limiter = RateLimiter(limit=1, period=10)
 except ImportError:
-    # Локальная версия как fallback
-    def is_super_admin(user_id: Optional[int]) -> bool:
-        """Проверка прав супер-админа."""
-        if user_id is None:
-            return False
-        return user_id == OWNER_ID or user_id in (SUPER_ADMIN_IDS or [])
+    logger.warning("⚠️ utils.rate_limiter not found, using fallback")
+    
+    class FallbackLimiter:
+        def __init__(self, *args, **kwargs): pass
+        def is_allowed(self, *args, **kwargs): return True
+    daily_limiter = FallbackLimiter()
+    
+    def start_cleanup_task(): pass
+    def stop_cleanup_task(): pass
 
 
-def require_super_admin(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    """Декоратор для проверки прав (для команд)."""
-    @wraps(func)
-    async def wrapper(message: Message, *args, **kwargs) -> Any:
-        if not message or not message.from_user:
-            return None
-        if not is_super_admin(message.from_user.id):
-            logger.warning(f"⚠️ Unauthorized admin command attempt by {message.from_user.id}")
-            await message.answer(
-                "❌ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\nЭта команда только для владельца бота.",
-                parse_mode=ParseMode.HTML
+# ==================== БАЗА ДАННЫХ ====================
+
+from database import db, DatabaseError
+
+# Кэш с синхронизацией инвалидации
+_user_cache: Dict[int, Tuple[Optional[dict], float]] = {}
+_CACHE_TTL = 30  # секунд
+MAX_CACHE_SIZE = 1000  # Максимальный размер кэша
+
+
+async def get_user_cached(user_id: Optional[int]) -> Optional[dict]:
+    """✅ Получение пользователя с кэшем и авто-созданием если нет"""
+    if user_id is None or db is None:
+        return None
+    
+    now = time.time()
+    if user_id in _user_cache:
+        data, timestamp = _user_cache[user_id]
+        if now - timestamp < _CACHE_TTL:
+            return data
+    
+    try:
+        user = await db.get_user(user_id)
+        
+        if not user:
+            await db.create_user(
+                user_id=user_id,
+                username=None,
+                first_name=None,
+                balance=START_BALANCE
             )
-            return None
-        return await func(message, *args, **kwargs)
-    return wrapper
+            user = await db.get_user(user_id)
+        
+        if user:
+            # ✅ Автоочистка кэша при превышении лимита
+            if len(_user_cache) >= MAX_CACHE_SIZE:
+                # Удаляем 10% самых старых записей
+                sorted_items = sorted(_user_cache.items(), key=lambda x: x[1][1])
+                for old_id, _ in sorted_items[:MAX_CACHE_SIZE // 10]:
+                    del _user_cache[old_id]
+                logger.debug(f"Cache cleanup: removed {MAX_CACHE_SIZE // 10} old entries")
+            
+            _user_cache[user_id] = (user, now)
+        return user
+        
+    except DatabaseError as e:
+        logger.error(f"❌ DB error getting user {user_id}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Unexpected error getting user {user_id}: {e}")
+        return None
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ БД (через публичный API) ====================
+def invalidate_user_cache(user_id: Optional[int]):
+    """✅ Инвалидация кэша при изменении данных пользователя"""
+    if user_id and user_id in _user_cache:
+        del _user_cache[user_id]
 
-async def _get_total_users() -> int:
-    """Безопасное получение общего количества пользователей."""
-    if not db:
+
+async def get_balance_safe(user_id: Optional[int]) -> int:
+    """✅ Безопасное получение баланса с кэшем"""
+    if user_id is None or db is None:
         return 0
     try:
-        # ✅ Используем публичный метод если есть, иначе прямой запрос
-        if hasattr(db, 'get_total_users_count') and callable(db.get_total_users_count):
-            return await db.get_total_users_count()
-        else:
-            row = await db._execute_with_retry(
-                "SELECT COUNT(*) as cnt FROM users", fetch_one=True)
-            return row.get("cnt", 0) if row else 0
+        return await db.get_balance(user_id) or 0
     except Exception as e:
-        logger.error(f"Error getting total users: {e}")
-        return 0
-
-
-async def _get_total_messages_count() -> int:
-    """Безопасное получение общего количества сообщений."""
-    if not db:
-        return 0
-    try:
-        if hasattr(db, 'get_total_messages_count') and callable(db.get_total_messages_count):
-            return await db.get_total_messages_count()
-        else:
-            row = await db._execute_with_retry(
-                "SELECT COALESCE(SUM(messages_total), 0) as cnt FROM user_stats",
-                fetch_one=True)
-            return row.get("cnt", 0) if row else 0
-    except Exception as e:
-        logger.error(f"Error getting total messages: {e}")
+        logger.error(f"❌ Error getting balance for {user_id}: {e}")
         return 0
 
 
-async def _get_all_chats_with_bot() -> List[int]:
-    """Безопасное получение списка всех чатов."""
-    if not db:
-        return []
+async def get_user_stats_safe(user_id: Optional[int]) -> dict:
+    """✅ Быстрый доступ к статистике с дефолтами"""
+    if user_id is None or db is None:
+        return {'wins': 0, 'games_played': 0, 'messages_total': 0, 'rank': 1}
     try:
-        if hasattr(db, 'get_all_active_chat_ids') and callable(db.get_all_active_chat_ids):
-            return await db.get_all_active_chat_ids(limit=100)
-        else:
-            rows = await db._execute_with_retry(
-                "SELECT DISTINCT chat_id FROM user_activity_log ORDER BY chat_id LIMIT 100",
-                fetch_all=True)
-            return [row["chat_id"] for row in rows] if rows else []
+        stats = await db.get_user_stats(user_id)
+        if stats:
+            return {
+                'wins': stats.get('wins', 0) or 0,
+                'games_played': stats.get('games_played', 0) or 0,
+                'messages_total': stats.get('messages_total', 0) or 0,
+                'rank': stats.get('rank', 1) or 1,
+                'xp': stats.get('xp', 0) or 0,
+                'balance': stats.get('balance', 0) or 0
+            }
     except Exception as e:
-        logger.error(f"Error getting all chats: {e}")
-        return []
+        logger.error(f"❌ Error getting stats for {user_id}: {e}")
+    return {'wins': 0, 'games_played': 0, 'messages_total': 0, 'rank': 1, 'xp': 0, 'balance': 0}
 
 
-async def _get_chat_daily_stats(chat_id: int) -> Dict[str, Any]:
-    """Безопасное получение дневной статистики чата."""
-    if not db:
-        return {}
+def safe_int(value: Any) -> int:
+    if value is None:
+        return 0
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        row = await db._execute_with_retry(
-            """SELECT 
-                COALESCE(SUM(messages), 0) as total_messages,
-                COUNT(DISTINCT user_id) as unique_users,
-                COALESCE(SUM(voice), 0) as total_voice,
-                COALESCE(SUM(stickers), 0) as total_stickers,
-                COALESCE(SUM(gifs), 0) as total_gifs,
-                COALESCE(SUM(photos), 0) as total_photos,
-                COALESCE(SUM(videos), 0) as total_videos,
-                COALESCE(SUM(xo_games), 0) as total_xo_games
-            FROM user_activity_log
-            WHERE chat_id = ? AND date = ?""",
-            (chat_id, today), fetch_one=True)
-        return dict(row) if row else {}
-    except Exception as e:
-        logger.error(f"Error getting daily stats for chat {chat_id}: {e}")
-        return {}
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
 
-
-async def _get_chat_active_users(chat_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-    """Безопасное получение активных пользователей чата."""
-    if not db:
-        return []
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        rows = await db._execute_with_retry(
-            """SELECT ual.user_id, u.first_name, u.username, SUM(ual.messages) as message_count
-            FROM user_activity_log ual
-            LEFT JOIN users u ON ual.user_id = u.user_id
-            WHERE ual.chat_id = ? AND ual.date = ?
-            GROUP BY ual.user_id
-            ORDER BY message_count DESC
-            LIMIT ?""",
-            (chat_id, today, limit), fetch_all=True)
-        return [dict(r) for r in rows] if rows else []
-    except Exception as e:
-        logger.error(f"Error getting active users for chat {chat_id}: {e}")
-        return []
-
-
-async def _get_chat_top_words(chat_id: int, limit: int = 15) -> List[tuple]:
-    """Безопасное получение топ-слов чата."""
-    if not db:
-        return []
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        rows = await db._execute_with_retry(
-            """SELECT word, count FROM chat_word_stats
-            WHERE chat_id = ? AND date = ?
-            ORDER BY count DESC
-            LIMIT ?""",
-            (chat_id, today, limit), fetch_all=True)
-        return [(r["word"], r["count"]) for r in rows] if rows else []
-    except Exception as e:
-        logger.error(f"Error getting top words for chat {chat_id}: {e}")
-        return []
-
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасное экранирование HTML."""
     if text is None:
         return ""
     try:
         return html.escape(str(text))
-    except Exception:
-        return str(text) if text else ""
+    except:
+        return str(text)
 
 
-async def safe_edit_or_reply(callback: CallbackQuery, text: str, markup: Optional[InlineKeyboardMarkup] = None) -> bool:
-    """Безопасное редактирование сообщения с фоллбэком на отправку нового."""
+# ==================== ПРОВЕРКА АДМИНА ====================
+
+def is_super_admin(user_id: Optional[int]) -> bool:
+    """✅ Проверка супер-админа: локальный список + владелец"""
+    if user_id is None:
+        return False
+    return user_id == OWNER_ID or user_id in (SUPER_ADMIN_IDS or [])
+
+
+async def is_admin_db(user_id: Optional[int]) -> bool:
+    """✅ Проверка админа (локальный список, БД-метода пока нет)"""
+    if user_id is None or db is None:
+        return False
+    
+    # Пробуем через БД если метод есть
+    try:
+        if hasattr(db, 'is_admin') and callable(db.is_admin):
+            return await db.is_admin(user_id) or is_super_admin(user_id)
+    except Exception as e:
+        logger.debug(f"db.is_admin() not available: {e}")
+    
+    # Fallback: локальная проверка
+    return is_super_admin(user_id) or user_id in (ADMIN_IDS or [])
+
+
+# ==================== ГЛАВНОЕ МЕНЮ ====================
+
+def get_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(text="⭐ VIP СТАТУС", callback_data="menu_vip"),
+         InlineKeyboardButton(text="👤 ПРОФИЛЬ", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="menu_balance"),
+         InlineKeyboardButton(text="🏆 РАНГ", callback_data="menu_rank")],
+        [InlineKeyboardButton(text="🎮 КРЕСТИКИ-НОЛИКИ", callback_data="menu_xo"),
+         InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="menu_stats")],
+        [InlineKeyboardButton(text="📢 ОБЩИЙ СБОР", callback_data="menu_all"),
+         InlineKeyboardButton(text="🔗 РЕФЕРАЛКА", callback_data="menu_ref")],
+        [InlineKeyboardButton(text="💕 ОТНОШЕНИЯ", callback_data="menu_relations"),
+         InlineKeyboardButton(text="👥 ГРУППЫ", callback_data="menu_groups")],
+        [InlineKeyboardButton(text="✨ РП КОМАНДЫ", callback_data="menu_rp"),
+         InlineKeyboardButton(text="🏷️ МОИ ТЕГИ", callback_data="menu_tags")],
+        [InlineKeyboardButton(text="📊 ТОП ЧАТОВ", callback_data="menu_topchats"),
+         InlineKeyboardButton(text="🔒 ПОЛИТИКА", callback_data="menu_privacy")],
+        [InlineKeyboardButton(text="❓ ПОМОЩЬ", callback_data="menu_help"),
+         InlineKeyboardButton(text="❤️ ПОДДЕРЖАТЬ", callback_data="menu_donate")],
+        [InlineKeyboardButton(text="💬 ОБРАТНАЯ СВЯЗЬ", callback_data="menu_feedback")]
+    ]
+    if is_admin:
+        keyboard.insert(3, [InlineKeyboardButton(text="👑 АДМИН-ПАНЕЛЬ", callback_data="menu_admin")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
+    """✅ Исправленная сигнатура (была опечатка)"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
+    ])
+
+
+async def safe_callback_edit(callback: CallbackQuery, text: str, markup: Optional[InlineKeyboardMarkup] = None) -> bool:
+    """✅ Безопасное редактирование сообщения с обработкой всех ошибок"""
     if not callback or not callback.message:
         return False
     try:
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return True
     except TelegramBadRequest as e:
-        err_str = str(e).lower()
-        if "message is not modified" in err_str:
-            await callback.answer("ℹ️ Данные актуальны", show_alert=False)
+        if "message is not modified" in str(e).lower():
             return True
-        elif "message can't be edited" in err_str or "message to edit not found" in err_str:
+        if "message can't be edited" in str(e).lower():
             try:
                 await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
                 return True
-            except Exception:
+            except:
                 return False
-        logger.warning(f"Edit error: {e}")
         return False
     except TelegramForbiddenError:
-        logger.warning(f"Forbidden to edit message in chat {callback.message.chat.id}")
+        logger.warning(f"⚠️ Forbidden to edit message for user {callback.from_user.id}")
+        return False
+    except TelegramAPIError as e:
+        logger.error(f"❌ Telegram API error in edit: {e}")
         return False
     except Exception as e:
-        logger.error(f"Edit/Reply failed: {e}", exc_info=True)
+        logger.error(f"❌ Unexpected error in edit: {e}")
         return False
 
 
-async def run_with_timeout(coro: Awaitable[Any], timeout: float, name: str) -> Optional[Any]:
-    """Выполнение корутины с таймаутом."""
-    try:
-        return await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout ({timeout}s) for {name}")
-        return None
-    except Exception as e:
-        logger.error(f"Error in {name}: {e}")
-        return None
-
-
-def get_admin_panel_text(user_id: int, first_name: Optional[str], chat_id: int) -> str:
-    """Генерация текста главной панели."""
-    is_owner = is_super_admin(user_id)
-    owner_status = "✅ ВЛАДЕЛЕЦ" if is_owner else "❌ НЕ владелец"
+async def render_main_menu(user_id: int, chat_id: int, first_name: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """✅ Формирование текста главного меню с актуальными данными"""
+    is_admin = await is_admin_db(user_id)
+    balance = await get_balance_safe(user_id)
+    stats = await get_user_stats_safe(user_id)
     
-    return (
-        "🔐 <b>АДМИН-ПАНЕЛЬ NEXUS BOT v3.3.0</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 Админ: <b>{safe_html_escape(first_name)}</b>\n"
-        f"🆔 Ваш ID: <code>{user_id}</code>\n"
-        f"🔑 Статус: <b>{owner_status}</b>\n"
-        f"💬 Чат: <code>{chat_id}</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Выберите действие:"
+    user = await get_user_cached(user_id)
+    vip_level = safe_int(user.get('vip_level')) if user else 0
+    daily_streak = safe_int(user.get('daily_streak')) if user else 0
+
+    text = (
+        f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
+        f"👋 Привет, <b>{safe_html_escape(first_name)}</b>!\n"
+        f"💰 Баланс: <b>{balance:,}</b> NCoin\n"
+        f"⭐ VIP: {'✅ Ур. ' + str(vip_level) if vip_level > 0 else '❌ Нет'}\n"
+        f"🔥 Daily стрик: <b>{daily_streak}</b> дней\n"
+        f"🏆 Ранг: <b>#{stats['rank']}</b> ({stats['xp']} XP)\n"
+        f"🎮 XO: <b>{stats['wins']}</b> побед ({stats['games_played']} игр)\n"
+        f"💬 Сообщений: <b>{stats['messages_total']:,}</b>\n\n"
+        f"👇 Выберите действие:"
+    )
+    return text, get_main_menu(is_admin)
+
+
+# ==================== КОМАНДЫ ====================
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message, command: CommandObject):
+    """✅ Обработка /start с авто-регистрацией и deep links"""
+    if not message or not message.from_user:
+        return
+    
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name or "Пользователь"
+    chat_id = message.chat.id if message.chat else user_id
+
+    logger.info(f"🚀 /start from {user_id} (chat: {chat_id})")
+
+    if db:
+        try:
+            await db.create_user(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                balance=START_BALANCE
+            )
+            invalidate_user_cache(user_id)
+        except DatabaseError as e:
+            logger.error(f"❌ DB error creating user {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error creating user {user_id}: {e}")
+
+    args = command.args
+    if args == "gifts":
+        try:
+            from handlers.economy import show_gifts_catalog
+            await show_gifts_catalog(message)
+        except ImportError:
+            await message.answer("⚠️ Каталог временно недоступен.")
+        except Exception as e:
+            logger.error(f"❌ Error showing gifts: {e}")
+            await message.answer("⚠️ Ошибка загрузки каталога.")
+        return
+    elif args == "help":
+        await cmd_help(message)
+        return
+
+    text, keyboard = await render_main_menu(user_id, chat_id, first_name)
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """✅ Справка с актуальными командами"""
+    if not message:
+        return
+    text = (
+        "🤖 <b>NEXUS CHAT MANAGER</b>\n\n"
+        "<b>📌 ОСНОВНЫЕ КОМАНДЫ:</b>\n"
+        "<code>/start</code> — главное меню\n"
+        "<code>/daily</code> — ежедневный бонус (+100 NCoin)\n"
+        "<code>/balance</code> — проверить баланс\n"
+        "<code>/xo</code> — игра «Крестики-нолики»\n"
+        "<code>/vip</code> — VIP статус и привилегии\n"
+        "<code>/profile</code> — моя анкета и настройки\n"
+        "<code>/stats</code> — моя статистика в чате\n"
+        "<code>/top</code> — топ игроков по балансу/активности\n"
+        "<code>/marry @user</code> — предложить брак 💍\n"
+        "<code>/divorce</code> — расторгнуть брак 💔\n"
+        "<code>/flirt @user</code> — флирт 💋\n"
+        "<code>/hug @user</code> — объятия 🤗\n"
+        "<code>/tag add #метка</code> — добавить тег себе 🏷️\n"
+        "<code>/feedback</code> — написать разработчику 💬\n"
+        "<code>/policy</code> — правила и конфиденциальность 🔒\n"
+        "<code>/cancel</code> — отменить текущее действие ❌\n"
+        "<code>/health</code> — проверка состояния бота 🟢\n\n"
+        f"💡 В группах: <code>/start@{BOT_USERNAME}</code>"
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """✅ Отмена любого FSM-состояния"""
+    if not message:
+        return
+    await state.clear()
+    await message.answer("❌ <b>Действие отменено</b>", parse_mode=ParseMode.HTML)
+    if message.from_user:
+        text, keyboard = await render_main_menu(
+            message.from_user.id,
+            message.chat.id if message.chat else message.from_user.id,
+            message.from_user.first_name or "Пользователь"
+        )
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@dp.message(Command("health"))
+async def cmd_health(message: Message):
+    """✅ Health-check эндпоинт для мониторинга"""
+    uptime = datetime.now() - _startup_time
+    uptime_str = str(uptime).split('.')[0]
+    
+    status = {
+        "bot": "ok",
+        "db": "ok" if db and db._initialized else "fail",
+        "cache_users": len(_user_cache),
+        "uptime": uptime_str,
+        "version": "7.4.3"
+    }
+    text = (
+        "🟢 <b>HEALTH CHECK</b>\n\n"
+        f"🤖 Бот: {status['bot']}\n"
+        f"🗄️ БД: {status['db']}\n"
+        f"💾 Кэш пользователей: {status['cache_users']}\n"
+        f"⏱️ Аптайм: {status['uptime']}\n"
+        f"🔖 Версия: {status['version']}"
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+# ==================== ПРЯМЫЕ ОБРАБОТЧИКИ КОМАНД ====================
+
+async def _safe_handler_import(module_path: str, func_name: str, message: Message, fallback_text: str = "❌ Ошибка"):
+    """✅ Универсальный безопасный импорт и вызов хендлера"""
+    try:
+        module = __import__(module_path, fromlist=[func_name])
+        func = getattr(module, func_name, None)
+        if func and callable(func):
+            await func(message)
+        else:
+            logger.warning(f"⚠️ Function {func_name} not found in {module_path}")
+            await message.answer(fallback_text)
+    except ImportError as e:
+        logger.error(f"❌ Import error {module_path}.{func_name}: {e}")
+        await message.answer("⚠️ Функция временно недоступна.")
+    except Exception as e:
+        logger.error(f"❌ Error in {module_path}.{func_name}: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+
+
+@dp.message(Command("daily"))
+async def cmd_daily_direct(message: Message):
+    if message: await _safe_handler_import("handlers.economy", "cmd_daily", message, "❌ Ошибка ежедневного бонуса")
+
+@dp.message(Command("balance"))
+async def cmd_balance_direct(message: Message):
+    if message: await _safe_handler_import("handlers.economy", "cmd_balance", message, "❌ Ошибка проверки баланса")
+
+@dp.message(Command("profile"))
+async def cmd_profile_direct(message: Message):
+    if message: await _safe_handler_import("handlers.profile", "cmd_profile", message, "❌ Ошибка профиля")
+
+@dp.message(Command("stats"))
+async def cmd_stats_direct(message: Message):
+    if message: await _safe_handler_import("handlers.stats", "cmd_stats", message, "❌ Ошибка статистики")
+
+@dp.message(Command("top"))
+async def cmd_top_direct(message: Message):
+    if message: await _safe_handler_import("handlers.stats", "cmd_top", message, "❌ Ошибка топа")
+
+@dp.message(Command("vip"))
+async def cmd_vip_direct(message: Message):
+    if message: await _safe_handler_import("handlers.vip", "cmd_vip", message, "❌ Ошибка VIP")
+
+@dp.message(Command("policy"))
+async def cmd_policy_direct(message: Message):
+    """✅ Показ политики из единого источника (БД/константы)"""
+    if not message:
+        return
+    if db:
+        try:
+            sections = db.get_all_policy_sections()
+            text = "🔒 <b>ПОЛИТИКА И ПРАВИЛА NEXUS</b>\n\n"
+            for sec in sections:
+                content = db.get_policy_section(sec['key'])
+                text += f"{sec['emoji']} <b>{sec['title']}</b>\n{content}\n\n"
+            text += "<i>Последнее обновление: " + datetime.now().strftime("%d.%m.%Y") + "</i>"
+            await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
+            return
+        except Exception as e:
+            logger.error(f"❌ Error loading policy: {e}")
+    
+    await cmd_help(message)
+
+
+# ==================== ОБРАТНАЯ СВЯЗЬ (через БД) ====================
+
+@dp.message(Command("feedback"))
+async def cmd_feedback(message: Message, state: FSMContext):
+    """✅ Начало обратной связи с сохранением в БД"""
+    if not message or not message.from_user:
+        return
+    
+    await state.set_state(FeedbackState.waiting_for_message)
+    await message.answer(
+        "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\n"
+        "Напишите ваше сообщение в ответном письме.\n\n"
+        "📌 <i>Что можно написать:</i>\n"
+        "• Предложение по улучшению бота 🚀\n"
+        "• Сообщение об ошибке или баге 🐛\n"
+        "• Вопрос по работе функций ❓\n"
+        "• Жалоба на пользователя/модератора ⚖️\n\n"
+        "❌ Для отмены: <code>/cancel</code>\n"
+        "⏱️ У вас есть 5 минут на ответ",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_back_keyboard()
     )
 
 
-def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура главного меню админ-панели."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data=CB_ADMIN_STATS)],
-        [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ЧАТ", callback_data=CB_ADMIN_CLEANUP)],
-        [InlineKeyboardButton(text="🌅 СВОДКА ДНЯ", callback_data=CB_ADMIN_SUMMARY)],
-        [InlineKeyboardButton(text="📋 ВСЕ ЧАТЫ", callback_data=CB_ADMIN_CHATS)],
-        [InlineKeyboardButton(text="🔄 ПЕРЕЗАГРУЗКА РП", callback_data=CB_ADMIN_RELOAD)],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK),
-         InlineKeyboardButton(text="❌ ЗАКРЫТЬ", callback_data=CB_ADMIN_CLOSE)],
-    ])
-
-
-# ==================== CALLBACK ДЛЯ КНОПКИ МЕНЮ ====================
-
-@router.callback_query(F.data == "menu_admin")
-async def admin_panel_callback(callback: CallbackQuery) -> None:
-    """Открытие админ-панели через кнопку меню."""
-    if not callback or not callback.message or not callback.from_user:
+@dp.message(FeedbackState.waiting_for_message)
+async def process_feedback(message: Message, state: FSMContext):
+    """✅ Обработка сообщения обратной связи с сохранением в БД"""
+    if not message or not message.from_user:
         return
     
-    user_id = callback.from_user.id
-    if not is_super_admin(user_id):
-        logger.warning(f"⚠️ Unauthorized admin panel access by {user_id}")
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+    text = (message.text or "").strip()
+    user_id = message.from_user.id
+    
+    if text.lower() in ('/cancel', 'отмена', 'отменить'):
+        await state.clear()
+        await message.answer("❌ Отправка обратной связи отменена.")
         return
     
-    text = get_admin_panel_text(user_id, callback.from_user.first_name, callback.message.chat.id)
-    success = await safe_edit_or_reply(callback, text, get_admin_menu_keyboard())
-    if success:
-        logger.info(f"✅ Admin panel opened for user {user_id}")
-    await callback.answer()
-
-
-# ==================== КОМАНДА /admin ====================
-
-@router.message(Command("admin"))
-@require_super_admin
-async def cmd_admin_panel(message: Message) -> None:
-    """Команда открытия админ-панели."""
-    if not message or not message.from_user or not message.chat:
+    if len(text) < 10:
+        await message.answer("❌ Слишком короткое сообщение! Минимум 10 символов.")
+        return
+    if len(text) > 2000:
+        await message.answer("❌ Слишком длинное сообщение! Максимум 2000 символов.")
         return
     
-    text = get_admin_panel_text(message.from_user.id, message.from_user.first_name, message.chat.id)
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
-    logger.info(f"✅ Admin panel opened via command for user {message.from_user.id}")
-
-
-# ==================== CALLBACK: СТАТИСТИКА ====================
-
-@router.callback_query(F.data == CB_ADMIN_STATS)
-async def admin_stats_callback(callback: CallbackQuery) -> None:
-    """Показать статистику чата."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    chat_id = callback.message.chat.id
-    await callback.answer("📊 Загружаю статистику...")
-    
-    try:
-        stats = await run_with_timeout(_get_chat_daily_stats(chat_id), TIMEOUT_STATS, "get_stats")
-        if stats is None:
-            stats = {}
-        
-        top_words = await run_with_timeout(_get_chat_top_words(chat_id, 15), TIMEOUT_STATS, "get_words")
-        if top_words is None:
-            top_words = []
-        
-        active_users = await run_with_timeout(_get_chat_active_users(chat_id, 10), TIMEOUT_STATS, "get_users")
-        if active_users is None:
-            active_users = []
-        
-        total_users = await run_with_timeout(_get_total_users(), TIMEOUT_STATS, "total_users")
-        if total_users is None:
-            total_users = 0
-        
-        total_messages = await run_with_timeout(_get_total_messages_count(), TIMEOUT_STATS, "total_msgs")
-        if total_messages is None:
-            total_messages = 0
-        
-        text = (
-            "📊 <b>РАСШИРЕННАЯ СТАТИСТИКА ЧАТА</b>\n\n"
-            f"📅 <b>ЗА СЕГОДНЯ:</b>\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Уникальных: <b>{stats.get('unique_users', 0)}</b>\n"
-            f"🎤 Войс: <b>{stats.get('total_voice', 0)}</b>\n"
-            f"🎮 XO игр: <b>{stats.get('total_xo_games', 0)}</b>\n\n"
-            f"📈 <b>ВСЕГО В БОТЕ:</b>\n"
-            f"👤 Пользователей: <b>{total_users}</b>\n"
-            f"💬 Сообщений: <b>{total_messages}</b>\n"
-        )
-        
-        if active_users:
-            text += "\n<b>🏆 ТОП-10 АКТИВНЫХ:</b>\n"
-            for i, u in enumerate(active_users[:10], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:20]
-                msgs = u.get('message_count', 0)
-                text += f"{i}. {name} — <b>{msgs}</b>\n"
-        
-        if top_words:
-            text += "\n<b>📝 ТОП-15 СЛОВ:</b>\n"
-            for word, count in top_words[:15]:
-                text += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_ADMIN_STATS)],
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Stats displayed for chat {chat_id}")
-        
-    except Exception as e:
-        logger.error(f"Stats error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка загрузки статистики", show_alert=True)
-
-
-# ==================== CALLBACK: ОЧИСТКА ====================
-
-@router.callback_query(F.data == CB_ADMIN_CLEANUP)
-async def admin_cleanup_callback(callback: CallbackQuery) -> None:
-    """Очистка сообщений бота в чате."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    chat_id = callback.message.chat.id
-    await callback.answer("🧹 Очищаю...")
-    
-    try:
-        if _bot is None:
-            await callback.answer("❌ Бот не инициализирован", show_alert=True)
-            return
-        
-        # Пытаемся использовать utils.auto_delete если доступен
+    ticket_id = None
+    if db:
         try:
-            from utils.auto_delete import delete_bot_messages, bot_messages
-            
-            deleted = await run_with_timeout(delete_bot_messages(_bot, chat_id), TIMEOUT_CLEANUP, "cleanup")
-            if deleted is None:
-                deleted = 0
-            
-            # ✅ Безопасный доступ к bot_messages
+            ticket_id = await db.create_feedback_ticket(user_id=user_id, message=text)
+            logger.info(f"✅ Feedback ticket #{ticket_id} created by user {user_id}")
+        except DatabaseError as e:
+            logger.error(f"❌ DB error creating feedback ticket: {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error creating feedback ticket: {e}")
+    
+    if ADMIN_IDS:
+        notify_text = (
+            f"📝 <b>НОВЫЙ ОТЗЫВ #{ticket_id or 'N/A'}</b>\n\n"
+            f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
+            f"🆔 ID: <code>{user_id}</code>\n"
+            f"{'🔖 Username: @' + safe_html_escape(message.from_user.username) + '\n' if message.from_user.username else ''}"
+            f"💬 Сообщение:\n{safe_html_escape(text)}"
+        )
+        for admin_id in ADMIN_IDS:
+            if admin_id is None:
+                continue
             try:
-                if isinstance(bot_messages, dict):
-                    remaining = len(bot_messages.get(chat_id, []))
-                else:
-                    remaining = "N/A"
-            except (AttributeError, TypeError):
-                remaining = "N/A"
-            
-            text = (
-                f"🧹 <b>ОЧИСТКА ЗАВЕРШЕНА</b>\n\n"
-                f"Удалено сообщений: <b>{deleted}</b>\n"
-                f"В очереди на удаление: <b>{remaining}</b>\n\n"
-                f"ℹ️ Удаляются только сообщения бота за последние 48 часов."
-            )
-        except (ImportError, AttributeError) as e:
-            logger.warning(f"auto_delete module not available: {e}")
-            text = (
-                "🧹 <b>ОЧИСТКА ЧАТА</b>\n\n"
-                "ℹ️ Модуль авто-очистки не загружен.\n"
-                "Базовое удаление сообщений недоступно.\n\n"
-                "<i>Установите utils/auto_delete.py для полной функциональности.</i>"
-            )
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Cleanup executed for chat {chat_id}")
-        
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка при очистке", show_alert=True)
-
-
-# ==================== CALLBACK: СВОДКА ====================
-
-@router.callback_query(F.data == CB_ADMIN_SUMMARY)
-async def admin_summary_callback(callback: CallbackQuery) -> None:
-    """Отправить сводку дня."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
+                await bot.send_message(admin_id, notify_text, parse_mode=ParseMode.HTML)
+            except TelegramForbiddenError:
+                logger.warning(f"⚠️ Cannot notify admin {admin_id}: Forbidden")
+            except TelegramAPIError as e:
+                logger.error(f"❌ Error notifying admin {admin_id}: {e}")
+            except Exception as e:
+                logger.error(f"❌ Unexpected error notifying admin {admin_id}: {e}")
     
-    chat_id = callback.message.chat.id
-    await callback.answer("🌅 Формирую сводку...")
+    await state.clear()
     
-    try:
-        if _bot is None:
-            await callback.answer("❌ Бот не инициализирован", show_alert=True)
-            return
-        
-        stats = await _get_chat_daily_stats(chat_id)
-        active_users = await _get_chat_active_users(chat_id, 5)
-        top_words = await _get_chat_top_words(chat_id, 10)
-        
-        today = datetime.now().strftime("%d.%m.%Y")
-        
-        summary_text = (
-            f"🌅 <b>СВОДКА ДНЯ — {today}</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>\n"
-            f"🎤 Войс: <b>{stats.get('total_voice', 0)}</b>\n"
-            f"🎮 Игр XO: <b>{stats.get('total_xo_games', 0)}</b>\n"
-        )
-        
-        if active_users:
-            summary_text += "\n<b>🏆 ТОП-5 АКТИВНЫХ:</b>\n"
-            medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-            for i, u in enumerate(active_users[:5]):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                msgs = u.get('message_count', 0)
-                summary_text += f"{medals[i] if i < len(medals) else '•'} {name} — <b>{msgs}</b> сообщ.\n"
-        
-        if top_words:
-            summary_text += "\n<b>📝 ТОП-10 СЛОВ:</b>\n"
-            for word, count in top_words[:10]:
-                summary_text += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        summary_text += "\n━━━━━━━━━━━━━━━━━━━━━\n<i>Авто-сводка NEXUS Bot</i>"
-        
-        await _bot.send_message(chat_id, summary_text, parse_mode=ParseMode.HTML)
-        
-        text = "✅ <b>СВОДКА УСПЕШНО ОТПРАВЛЕНА</b>"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Summary sent to chat {chat_id}")
-        
-    except TelegramForbiddenError:
-        logger.warning(f"Forbidden to send to chat {chat_id}")
-        await callback.answer("❌ Бот заблокирован в этом чате", show_alert=True)
-    except Exception as e:
-        logger.error(f"Summary error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка отправки сводки", show_alert=True)
-
-
-# ==================== CALLBACK: ВСЕ ЧАТЫ ====================
-
-@router.callback_query(F.data == CB_ADMIN_CHATS)
-async def admin_chats_callback(callback: CallbackQuery) -> None:
-    """Показать все чаты с ботом."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    await callback.answer("📋 Загружаю список чатов...")
-    
-    try:
-        chats = await _get_all_chats_with_bot()
-        total = len(chats)
-        display_chats = chats[:MAX_CHATS_DISPLAY]
-        
-        if _bot is None:
-            text = f"📋 <b>ЧАТЫ С БОТОМ</b>\n\nВсего: <b>{total}</b>\n\n"
-            for cid in display_chats:
-                text += f"• <code>{cid}</code>\n"
-        else:
-            sem = asyncio.Semaphore(MAX_CONCURRENT_CHATS)
-            
-            async def fetch_chat_info(cid: int) -> str:
-                async with sem:
-                    try:
-                        chat = await run_with_timeout(_bot.get_chat(cid), TIMEOUT_CHAT_INFO, f"chat_{cid}")
-                        if chat:
-                            name = safe_html_escape(chat.title[:30] if chat.title else "Чат")
-                            return f"• <code>{cid}</code> — {name}"
-                        return f"• <code>{cid}</code> — (нет данных)"
-                    except TelegramForbiddenError:
-                        return f"• <code>{cid}</code> — (бот заблокирован)"
-                    except Exception:
-                        return f"• <code>{cid}</code> — (нет доступа)"
-            
-            results = await asyncio.gather(*(fetch_chat_info(cid) for cid in display_chats))
-            text = f"📋 <b>ЧАТЫ С БОТОМ</b>\n\nВсего: <b>{total}</b>\n\n" + "\n".join(results)
-        
-        if total > MAX_CHATS_DISPLAY:
-            text += f"\n\n... и ещё <b>{total - MAX_CHATS_DISPLAY}</b> чатов"
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ВСЕ ЧАТЫ", callback_data=CB_ADMIN_CLEANUP_ALL)],
-            [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_ADMIN_CHATS)],
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Chats list displayed ({total} total)")
-        
-    except Exception as e:
-        logger.error(f"Chats error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка загрузки списка чатов", show_alert=True)
-
-
-# ==================== CALLBACK: ГЛОБАЛЬНАЯ ОЧИСТКА ====================
-
-@router.callback_query(F.data == CB_ADMIN_CLEANUP_ALL)
-async def admin_cleanup_all_callback(callback: CallbackQuery) -> None:
-    """Глобальная очистка всех чатов."""
-    if not callback or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    if _bot is None:
-        await callback.answer("❌ Бот не инициализирован", show_alert=True)
-        return
-    
-    await callback.answer("🧹 Глобальная очистка запущена...", show_alert=True)
-    
-    try:
-        try:
-            from utils.auto_delete import cleanup_all_chats
-            task = asyncio.create_task(cleanup_all_chats(_bot))
-            _background_tasks.add(task)
-            task.add_done_callback(lambda t: _background_tasks.discard(t))
-            
-            if callback.message:
-                await callback.message.edit_text(
-                    "🧹 <b>ГЛОБАЛЬНАЯ ОЧИСТКА ЗАПУЩЕНА</b>\n\n"
-                    "Процесс выполняется в фоне.\n"
-                    "Это может занять несколько минут.\n\n"
-                    "<i>Удаляются сообщения бота за последние 48 часов во всех чатах.</i>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                    ])
-                )
-            logger.info("✅ Global cleanup task started")
-        except ImportError:
-            if callback.message:
-                await callback.message.edit_text(
-                    "⚠️ <b>МОДУЛЬ АВТО-ОЧИСТКИ НЕ НАЙДЕН</b>\n\n"
-                    "Установите utils/auto_delete.py для работы этой функции.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                    ])
-                )
-    except Exception as e:
-        logger.error(f"Cleanup all error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка запуска очистки", show_alert=True)
-
-
-# ==================== CALLBACK: ПЕРЕЗАГРУЗКА РП ====================
-
-@router.callback_query(F.data == CB_ADMIN_RELOAD)
-async def admin_reload_callback(callback: CallbackQuery) -> None:
-    """Перезагрузка кастомных РП команд."""
-    if not callback or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    try:
-        from handlers.smart_commands import load_custom_rp_commands
-        await load_custom_rp_commands()
-        await callback.answer("✅ РП команды перезагружены!", show_alert=True)
-        
-        if callback.message:
-            await callback.message.edit_text(
-                "🔄 <b>РП КОМАНДЫ ПЕРЕЗАГРУЖЕНЫ</b>\n\n"
-                "Все кастомные РП-команды обновлены из базы данных.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                ])
-            )
-        logger.info("✅ Custom RP commands reloaded")
-    except ImportError:
-        await callback.answer("⚠️ Модуль РП не найден", show_alert=True)
-    except Exception as e:
-        logger.error(f"Reload error: {e}", exc_info=True)
-        await callback.answer(f"❌ Ошибка перезагрузки: {e}", show_alert=True)
+    confirmation = (
+        "✅ <b>Спасибо за обратную связь!</b>\n\n"
+        f"{'🎫 Ваш тикет: #' + str(ticket_id) + '\n' if ticket_id else ''}"
+        "Ваше сообщение сохранено и отправлено разработчику.\n"
+        "Мы ответим в личные сообщения в ближайшее время.\n\n"
+        "<i>Статус тикета можно проверить командой /tickets</i>"
+    )
+    await message.answer(confirmation, parse_mode=ParseMode.HTML)
 
 
 # ==================== CALLBACK: НАЗАД ====================
 
-@router.callback_query(F.data == CB_ADMIN_BACK)
-async def admin_back_callback(callback: CallbackQuery) -> None:
-    """Возврат в главное меню админ-панели."""
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    """✅ Возврат в главное меню из любого раздела"""
     if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
-    text = get_admin_panel_text(callback.from_user.id, callback.from_user.first_name, callback.message.chat.id)
-    await safe_edit_or_reply(callback, text, get_admin_menu_keyboard())
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message.chat else user_id
+    first_name = callback.from_user.first_name or "Пользователь"
+
+    try:
+        text, keyboard = await render_main_menu(user_id, chat_id, first_name)
+        if not await safe_callback_edit(callback, text, keyboard):
+            await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"❌ Error in back_to_menu: {e}")
+        await callback.message.answer("❌ Ошибка загрузки меню", reply_markup=get_back_keyboard())
+    
     await callback.answer()
 
 
-# ==================== CALLBACK: ЗАКРЫТЬ ====================
+# ==================== УСТАНОВКА БОТА ДЛЯ МОДУЛЕЙ ====================
 
-@router.callback_query(F.data == CB_ADMIN_CLOSE)
-async def admin_close_callback(callback: CallbackQuery) -> None:
-    """Закрыть админ-панель."""
+def setup_bot_for_modules():
+    """✅ Регистрация бота в модулях, которые хранят глобальную ссылку"""
+    modules_to_setup = [
+        ("handlers.tictactoe", "set_bot"),
+        ("handlers.smart_commands", "set_bot"),
+        ("handlers.referral", "set_bot"),
+        ("handlers.admin", "set_bot"),
+    ]
+    
+    for module_name, func_name in modules_to_setup:
+        try:
+            module = __import__(module_name, fromlist=[func_name])
+            func = getattr(module, func_name, None)
+            if func and callable(func):
+                func(bot)
+                logger.info(f"✅ Bot set for {module_name}")
+        except ImportError:
+            logger.warning(f"⚠️ Module {module_name} not found, skipping")
+        except AttributeError:
+            logger.warning(f"⚠️ Function {func_name} not found in {module_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ Error setting bot for {module_name}: {e}")
+
+
+# ==================== ЗАГРУЗКА РОУТЕРОВ ====================
+
+def load_all_routers():
+    """✅ Динамическая загрузка всех роутеров с обработкой ошибок"""
+    routers = [
+        ("handlers.vip", "router"),
+        ("handlers.profile", "router"),
+        ("handlers.economy", "router"),
+        ("handlers.tictactoe", "router"),
+        ("handlers.stats", "router"),
+        ("handlers.tag", "router"),
+        ("handlers.admin", "router"),
+        ("handlers.rating", "router"),
+        ("handlers.smart_commands", "router"),
+        ("handlers.referral", "router"),
+        ("handlers.relationships", "router"),
+        ("handlers.tag_user", "router"),
+        ("handlers.ranks", "router"),
+        ("handlers.tag_admin", "router"),
+        ("handlers.tag_trigger", "router"),
+    ]
+    
+    loaded = 0
+    for module_name, attr_name in routers:
+        try:
+            module = __import__(module_name, fromlist=[attr_name])
+            router = getattr(module, attr_name, None)
+            if router:
+                dp.include_router(router)
+                logger.info(f"✅ Loaded router: {module_name}")
+                loaded += 1
+            else:
+                logger.warning(f"⚠️ Router '{attr_name}' not found in {module_name}")
+        except ImportError as e:
+            logger.warning(f"⚠️ Cannot import {module_name}: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ Error loading {module_name}: {e}")
+    
+    logger.info(f"📦 Loaded {loaded}/{len(routers)} routers")
+
+
+# ==================== ОБРАБОТЧИКИ КНОПОК МЕНЮ ====================
+
+async def _handle_menu_callback(callback: CallbackQuery, module: str, func: str, error_msg: str):
+    """✅ Универсальный обработчик кнопок меню"""
+    if not callback or not callback.message:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    try:
+        module_obj = __import__(module, fromlist=[func])
+        handler = getattr(module_obj, func, None)
+        if handler and callable(handler):
+            await handler(callback.message)
+        else:
+            logger.warning(f"⚠️ Handler {func} not found in {module}")
+            await callback.message.answer("⚠️ Функция в разработке", reply_markup=get_back_keyboard())
+    except ImportError:
+        logger.error(f"❌ Cannot import {module}.{func}")
+        await callback.message.answer("⚠️ Раздел временно недоступен", reply_markup=get_back_keyboard())
+    except Exception as e:
+        logger.error(f"❌ Error in {module}.{func}: {e}")
+        await callback.message.answer(error_msg, reply_markup=get_back_keyboard())
+    finally:
+        await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_vip")
+async def menu_vip(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.vip", "cmd_vip", "❌ Ошибка загрузки VIP")
+
+@dp.callback_query(F.data == "menu_profile")
+async def menu_profile(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.profile", "cmd_profile", "❌ Ошибка профиля")
+
+@dp.callback_query(F.data == "menu_balance")
+async def menu_balance(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.economy", "cmd_balance", "❌ Ошибка баланса")
+
+@dp.callback_query(F.data == "menu_rank")
+async def menu_rank(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.ranks", "cmd_rank", "❌ Ошибка рангов")
+
+@dp.callback_query(F.data == "menu_xo")
+async def menu_xo(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.tictactoe", "cmd_xo", "❌ Ошибка игры")
+
+@dp.callback_query(F.data == "menu_stats")
+async def menu_stats(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.stats", "cmd_stats", "❌ Ошибка статистики")
+
+@dp.callback_query(F.data == "menu_all")
+async def menu_all(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.tag", "cmd_all", "❌ Ошибка тегов")
+
+@dp.callback_query(F.data == "menu_ref")
+async def menu_ref(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.referral", "ref_menu_callback", "❌ Ошибка рефералки")
+
+@dp.callback_query(F.data == "menu_relations")
+async def menu_relations(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.relationships", "relationships_menu", "❌ Ошибка отношений")
+
+@dp.callback_query(F.data == "menu_groups")
+async def menu_groups(callback: CallbackQuery):
     if not callback or not callback.message:
         return
+    await safe_callback_edit(
+        callback,
+        "👥 <b>ГРУППЫ</b>\n\nФункция в разработке.\nСкоро: создание кланов, войны, общий чат.",
+        get_back_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_rp")
+async def menu_rp(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.smart_commands", "cmd_my_custom_rp", "❌ Ошибка РП")
+
+@dp.callback_query(F.data == "menu_tags")
+async def menu_tags(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.tag_user", "my_tags_menu_callback", "❌ Ошибка тегов")
+
+@dp.callback_query(F.data == "menu_topchats")
+async def menu_topchats(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.rating", "cmd_top_chats", "❌ Ошибка рейтинга")
+
+@dp.callback_query(F.data == "menu_privacy")
+async def menu_privacy(callback: CallbackQuery):
+    """✅ Политика из единого источника (БД)"""
+    if not callback or not callback.message:
+        return
+    
     try:
-        await callback.message.delete()
-        logger.info(f"✅ Admin panel closed by user {callback.from_user.id}")
-    except Exception:
-        try:
-            await callback.message.edit_text("🔒 Админ-панель закрыта")
-        except Exception:
-            pass
+        if db:
+            sections = db.get_all_policy_sections()
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=sec['emoji'] + " " + sec['title'], callback_data=f"policy:{sec['key']}")]
+                for sec in sections
+            ] + [[InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]])
+            
+            intro = (
+                "🔒 <b>ПОЛИТИКА И ПРАВИЛА NEXUS</b>\n\n"
+                "Выберите раздел для просмотра:\n"
+                "• Правила чата и модерация 📜\n"
+                "• Конфиденциальность данных 🔐\n"
+                "• Система наказаний ⚖️\n"
+                "• Обратная связь и поддержка 📬\n"
+                "• Контакты разработчиков 👥"
+            )
+            await safe_callback_edit(callback, intro, keyboard)
+        else:
+            text = (
+                "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "<b>📌 ДАННЫЕ:</b> ID, имя, баланс, статистика игр, анкета.\n"
+                "<b>📌 ИСПОЛЬЗОВАНИЕ:</b> Работа бота, игры, экономика, топы.\n"
+                "<b>📌 ХРАНЕНИЕ:</b> Защищённая БД, не передаётся третьим лицам.\n"
+                "<b>📌 УДАЛЕНИЕ:</b> Команда <code>/delete_my_data</code>.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "✅ Все данные используются только для работы бота"
+            )
+            await safe_callback_edit(callback, text, get_back_keyboard())
+    except Exception as e:
+        logger.error(f"❌ Error loading policy: {e}")
+        await callback.message.answer("❌ Ошибка загрузки политики", reply_markup=get_back_keyboard())
+    
     await callback.answer()
 
 
-# ==================== БЫСТРЫЕ КОМАНДЫ ====================
-
-@router.message(Command("stats_today"))
-@require_super_admin
-async def cmd_stats_today(message: Message) -> None:
-    """Быстрая статистика за сегодня."""
-    if not message or not message.chat:
+@dp.callback_query(F.data.startswith("policy:"))
+async def policy_section_callback(callback: CallbackQuery):
+    """✅ Показ конкретного раздела политики"""
+    if not callback or not callback.message:
         return
+    
+    section_key = callback.data.split(":")[1] if ":" in callback.data else None
+    if not section_key or not db:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+    
     try:
-        stats = await _get_chat_daily_stats(message.chat.id)
-        active = await _get_chat_active_users(message.chat.id, 5)
+        content = db.get_policy_section(section_key)
+        sections = db.get_all_policy_sections()
+        current = next((s for s in sections if s['key'] == section_key), None)
         
-        text = (
-            f"📊 <b>СТАТИСТИКА ЗА СЕГОДНЯ</b>\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>"
-        )
-        if active:
-            text += "\n\n<b>ТОП-5:</b>\n"
-            for i, u in enumerate(active[:5], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                text += f"{i}. {name} — {u.get('message_count', 0)}\n"
-        await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Quick stats sent to chat {message.chat.id}")
+        if current and content:
+            text = f"{current['emoji']} <b>{current['title']}</b>\n\n{content}"
+            section_idx = next((i for i, s in enumerate(sections) if s['key'] == section_key), 0)
+            
+            prev_key = sections[section_idx - 1]['key'] if section_idx > 0 else None
+            next_key = sections[section_idx + 1]['key'] if section_idx < len(sections) - 1 else None
+            
+            nav_buttons = []
+            if prev_key:
+                nav_buttons.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"policy:{prev_key}"))
+            nav_buttons.append(InlineKeyboardButton(text="🏠 Меню", callback_data="back_to_menu"))
+            if next_key:
+                nav_buttons.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"policy:{next_key}"))
+            
+            nav_keyboard = InlineKeyboardMarkup(inline_keyboard=[nav_buttons])
+            await safe_callback_edit(callback, text, nav_keyboard)
+        else:
+            await callback.answer("❌ Содержимое не найдено", show_alert=True)
     except Exception as e:
-        logger.error(f"Quick stats error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка загрузки статистики")
+        logger.error(f"❌ Error showing policy section {section_key}: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
 
 
-@router.message(Command("cleanup"))
-@require_super_admin
-async def cmd_cleanup_chat(message: Message) -> None:
-    """Быстрая очистка чата."""
-    if not message or not message.chat:
+@dp.callback_query(F.data == "menu_help")
+async def menu_help(callback: CallbackQuery):
+    await cmd_help(callback.message)
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_donate")
+async def menu_donate(callback: CallbackQuery):
+    await _handle_menu_callback(callback, "handlers.economy", "cmd_donate", "❌ Ошибка доната")
+
+@dp.callback_query(F.data == "menu_feedback")
+async def menu_feedback(callback: CallbackQuery, state: FSMContext):
+    """✅ Обратная связь через кнопку меню"""
+    if not callback or not callback.message:
         return
+    
+    await state.set_state(FeedbackState.waiting_for_message)
+    await safe_callback_edit(
+        callback,
+        "💬 <b>ОБРАТНАЯ СВЯЗЬ</b>\n\n"
+        "Напишите ваше сообщение в ответном письме.\n\n"
+        "📌 <i>Что можно написать:</i>\n"
+        "• Предложение по улучшению 🚀\n"
+        "• Сообщение об ошибке 🐛\n"
+        "• Вопрос по работе бота ❓\n"
+        "• Жалоба на пользователя ⚖️\n\n"
+        "❌ Для отмены: <code>/cancel</code>",
+        get_back_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_admin")
+async def menu_admin(callback: CallbackQuery):
+    """✅ Админ-панель с проверкой прав"""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    user_id = callback.from_user.id
+    
+    if not await is_admin_db(user_id):
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        logger.warning(f"⚠️ Unauthorized admin panel access attempt by {user_id}")
+        return
+    
     try:
-        if _bot is None:
-            await message.answer("❌ Бот не инициализирован")
-            return
-        
-        msg = await message.answer("🧹 Очищаю...")
-        
+        from handlers.admin import admin_panel_callback
+        await admin_panel_callback(callback)
+    except ImportError:
+        await callback.message.answer("⚠️ Админ-панель в разработке", reply_markup=get_back_keyboard())
+    except Exception as e:
+        logger.error(f"❌ Error in admin panel: {e}")
+        await callback.message.answer("❌ Ошибка загрузки админ-панели", reply_markup=get_back_keyboard())
+    
+    await callback.answer()
+
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+
+async def start_all_background_tasks():
+    """✅ Запуск всех фоновых задач с обработкой ошибок"""
+    try:
+        start_cleanup_task()
+        logger.info("✅ Rate limiter cleanup started")
+    except Exception as e:
+        logger.warning(f"⚠️ Rate limiter cleanup error: {e}")
+    
+    try:
+        from utils.auto_delete import schedule_morning_cleanup
+        task = asyncio.create_task(schedule_morning_cleanup(bot))
+        _cleanup_tasks.append(task)
+        logger.info("✅ Morning cleanup scheduled")
+    except ImportError:
+        logger.warning("⚠️ utils.auto_delete not found, skipping morning cleanup")
+    except Exception as e:
+        logger.warning(f"⚠️ Morning cleanup error: {e}")
+
+    async def periodic_rank_update():
+        """✅ Обновление рангов активных пользователей раз в 10 минут."""
+        while True:
+            try:
+                await asyncio.sleep(600)
+                
+                if db:
+                    # Получаем топ-100 активных пользователей и проверяем их ранги
+                    try:
+                        active_users = await db._execute_with_retry(
+                            """SELECT DISTINCT user_id FROM user_activity_log 
+                               WHERE date >= date('now', '-1 days') 
+                               LIMIT 100""",
+                            fetch_all=True
+                        )
+                        if active_users:
+                            updated = 0
+                            for row in active_users:
+                                uid = row['user_id']
+                                # Проверяем, нужно ли пересчитывать ранг
+                                rank_info = await db.get_user_rank(uid)
+                                if rank_info and rank_info.get('needs_recalc'):
+                                    await db.recalculate_user_rank(uid)
+                                    updated += 1
+                            if updated > 0:
+                                logger.info(f"🔄 Updated ranks for {updated} users")
+                    except Exception as e:
+                        logger.debug(f"Rank update query error: {e}")
+                    
+            except asyncio.CancelledError:
+                logger.info("🔄 Periodic rank update task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in periodic_rank_update: {e}")
+                await asyncio.sleep(60)
+    
+    stats_task = asyncio.create_task(periodic_rank_update())
+    _background_tasks.add(stats_task)
+    stats_task.add_done_callback(_background_tasks.discard)
+    logger.info("✅ Periodic rank update task started")
+
+
+async def stop_all_background_tasks():
+    """✅ Корректная остановка всех фоновых задач"""
+    try:
+        stop_cleanup_task()
+    except:
+        pass
+    
+    for task in list(_background_tasks) + _cleanup_tasks:
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    
+    _background_tasks.clear()
+    _cleanup_tasks.clear()
+    logger.info("✅ Background tasks stopped")
+
+
+# ==================== ЖИЗНЕННЫЙ ЦИКЛ ====================
+
+async def on_startup():
+    """✅ Инициализация при запуске бота"""
+    global BOT_ID
+    
+    try:
+        me = await bot.get_me()
+        BOT_ID = me.id
+        logger.info(f"🤖 Bot: @{me.username} (ID: {BOT_ID})")
+    except Exception as e:
+        logger.critical(f"❌ Cannot get bot info: {e}")
+        sys.exit(1)
+    
+    logger.info("🚀 NEXUS Bot v7.4.3 starting...")
+
+    setup_bot_for_modules()
+    load_all_routers()
+    
+    if db:
         try:
-            from utils.auto_delete import delete_bot_messages
-            deleted = await delete_bot_messages(_bot, message.chat.id)
-            if deleted is None:
-                deleted = 0
-            await msg.edit_text(f"✅ Очищено сообщений: <b>{deleted}</b>", parse_mode=ParseMode.HTML)
-            logger.info(f"✅ Quick cleanup: {deleted} messages deleted in chat {message.chat.id}")
-        except ImportError:
-            await msg.edit_text("⚠️ Модуль авто-очистки не найден", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"Quick cleanup error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка очистки")
-
-
-@router.message(Command("summary"))
-@require_super_admin
-async def cmd_summary_now(message: Message) -> None:
-    """Быстрая отправка сводки."""
-    if not message or not message.chat:
-        return
+            await db.initialize()
+            logger.info("✅ Database initialized")
+        except DatabaseError as e:
+            logger.critical(f"❌ Database initialization failed: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logger.critical(f"❌ Unexpected DB error: {e}")
+            sys.exit(1)
+    
     try:
-        if _bot is None:
-            await message.answer("❌ Бот не инициализирован")
-            return
-        
-        stats = await _get_chat_daily_stats(message.chat.id)
-        active = await _get_chat_active_users(message.chat.id, 5)
-        top_words = await _get_chat_top_words(message.chat.id, 10)
-        
-        today = datetime.now().strftime("%d.%m.%Y")
-        
-        summary = (
-            f"🌅 <b>СВОДКА ДНЯ — {today}</b>\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>\n\n"
-        )
-        
-        if active:
-            summary += "<b>🏆 ТОП-5:</b>\n"
-            for i, u in enumerate(active[:5], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                summary += f"{i}. {name} — {u.get('message_count', 0)}\n"
-        
-        if top_words:
-            summary += "\n<b>📝 ТОП-10 СЛОВ:</b>\n"
-            for word, count in top_words[:10]:
-                summary += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        summary += "\n━━━━━━━━━━━━━━━━━━━━━\n<i>Авто-сводка NEXUS Bot</i>"
-        
-        await _bot.send_message(message.chat.id, summary, parse_mode=ParseMode.HTML)
-        await message.answer("✅ Сводка отправлена")
-        logger.info(f"✅ Quick summary sent to chat {message.chat.id}")
-    except TelegramForbiddenError:
-        logger.warning(f"Forbidden to send summary to chat {message.chat.id}")
-        await message.answer("❌ Бот заблокирован в этом чате")
+        from handlers.ranks import init_ranks_table
+        await init_ranks_table()
+        logger.info("✅ Ranks table initialized")
+    except ImportError:
+        logger.warning("⚠️ handlers.ranks not found, skipping ranks init")
     except Exception as e:
-        logger.error(f"Quick summary error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка отправки сводки")
+        logger.warning(f"⚠️ Ranks init error: {e}")
 
-
-@router.message(Command("chats"))
-@require_super_admin
-async def cmd_list_chats(message: Message) -> None:
-    """Быстрый список чатов."""
-    if not message:
-        return
-    try:
-        chats = await _get_all_chats_with_bot()
-        total = len(chats)
-        
-        text = f"📋 <b>ЧАТЫ С БОТОМ ({total})</b>\n\n"
-        for cid in chats[:20]:
-            text += f"• <code>{cid}</code>\n"
-        if total > 20:
-            text += f"\n... и ещё <b>{total - 20}</b> чатов"
-        await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Quick chats list sent ({total} total)")
-    except Exception as e:
-        logger.error(f"Quick chats error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка загрузки списка")
-
-
-@router.message(Command("reload_rp"))
-@require_super_admin
-async def cmd_reload_rp(message: Message) -> None:
-    """Быстрая перезагрузка РП команд."""
-    if not message:
-        return
     try:
         from handlers.smart_commands import load_custom_rp_commands
         await load_custom_rp_commands()
-        await message.answer("✅ РП команды перезагружены!")
-        logger.info("✅ Quick RP reload executed")
+        logger.info("✅ Custom RP commands loaded")
     except ImportError:
-        await message.answer("⚠️ Модуль РП не найден")
+        logger.warning("⚠️ handlers.smart_commands not found")
     except Exception as e:
-        logger.error(f"Quick reload error: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка перезагрузки: {e}")
+        logger.warning(f"⚠️ Custom RP load error: {e}")
 
+    try:
+        from handlers.smart_commands import set_bot as set_smart_bot
+        set_smart_bot(bot)
+        logger.info("✅ Bot ID updated in smart_commands")
+    except:
+        pass
+
+    await start_all_background_tasks()
+    
+    if SUPER_ADMIN_IDS:
+        for admin_id in SUPER_ADMIN_IDS:
+            if admin_id is None:
+                continue
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🚀 <b>NEXUS Bot v7.4.3 запущен!</b>\n\n"
+                    f"✅ БД: подключена\n"
+                    f"✅ Роутеры: загружены ({len(dp.sub_routers)})\n"
+                    f"✅ Фоновые задачи: активны\n"
+                    f"🕒 Время: {datetime.now().strftime('%H:%M:%S')}",
+                    parse_mode=ParseMode.HTML
+                )
+            except TelegramForbiddenError:
+                logger.warning(f"⚠️ Cannot notify super-admin {admin_id}: Forbidden")
+            except Exception as e:
+                logger.warning(f"⚠️ Error notifying admin {admin_id}: {e}")
+
+    logger.info("✅ ALL SYSTEMS GO! Bot is ready.")
+
+
+async def on_shutdown():
+    """✅ Корректное завершение работы"""
+    logger.info("🛑 Shutting down NEXUS Bot...")
+    
+    await stop_all_background_tasks()
+    
+    _user_cache.clear()
+    logger.info("✅ User cache cleared")
+    
+    if db and hasattr(db, 'close'):
+        try:
+            await db.close()
+            logger.info("✅ Database connection closed")
+        except Exception as e:
+            logger.error(f"❌ Error closing DB: {e}")
+    
+    try:
+        await bot.session.close()
+        logger.info("✅ Bot session closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Error closing bot session: {e}")
+    
+    logger.info("👋 NEXUS Bot stopped gracefully")
+
+
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ ====================
+
+_message_save_cooldown: Dict[int, float] = {}
+_SAVE_COOLDOWN = 2
+_MAX_COOLDOWN_ENTRIES = 5000
+
+@dp.message()
+async def save_all_messages(message: Message):
+    """
+    ✅ Сохраняет сообщения для статистики с rate limiting.
+    Использует db.track_word() вместо удалённого db.log_chat_message().
+    """
+    if not message or not db or not message.chat or not message.from_user:
+        return
+
+    if message.text and message.text.startswith('/'):
+        return
+    if message.from_user.is_bot:
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    text = message.text or ""
+    now = time.time()
+
+    last_save = _message_save_cooldown.get(user_id, 0)
+    if now - last_save < _SAVE_COOLDOWN:
+        return
+    _message_save_cooldown[user_id] = now
+    
+    # ✅ Автоочистка старых записей из cooldown-словаря
+    if len(_message_save_cooldown) > _MAX_COOLDOWN_ENTRIES:
+        cutoff = now - 300  # удаляем записи старше 5 минут
+        old_keys = [uid for uid, t in _message_save_cooldown.items() if t < cutoff]
+        for uid in old_keys:
+            del _message_save_cooldown[uid]
+
+    start_time = time.time()
+    
+    try:
+        # ✅ Сохранение слов через track_word
+        if text and len(text.strip()) >= 3:
+            words = text.lower().split()
+            saved_words = 0
+            for word in words:
+                clean_word = word.strip('.,!?;:()[]{}"\'-')
+                if len(clean_word) >= 3 and saved_words < 10:
+                    await db.track_word(chat_id, clean_word)
+                    saved_words += 1
+
+        activity_type = "message"
+        if message.sticker:
+            activity_type = "sticker"
+        elif message.voice:
+            activity_type = "voice"
+        elif message.video:
+            activity_type = "video"
+        elif message.photo:
+            activity_type = "photo"
+        elif message.animation:
+            activity_type = "gif"
+
+        await db.track_user_activity(user_id, chat_id, activity_type, 1)
+
+    except DatabaseError as e:
+        if "database is locked" not in str(e).lower():
+            logger.debug(f"⚠️ DB error saving message from {user_id}: {e}")
+    except Exception as e:
+        logger.debug(f"⚠️ Unexpected error saving message from {user_id}: {e}")
+    finally:
+        # ✅ Логирование медленных запросов
+        duration = time.time() - start_time
+        if duration > 1.0:
+            logger.warning(f"⚠️ Slow message save ({duration:.2f}s) for user {user_id}")
+
+
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ====================
+
+@dp.errors()
+async def errors_handler(update: Update, exception: Exception):
+    """✅ Глобальный обработчик необработанных исключений с безопасным доступом"""
+    user_id: Any = 'unknown'
+    try:
+        if hasattr(update, 'event') and update.event:
+            event = update.event
+            if hasattr(event, 'from_user') and event.from_user:
+                user_id = event.from_user.id
+            elif hasattr(event, 'chat') and hasattr(event.chat, 'id'):
+                user_id = f"chat:{event.chat.id}"
+    except Exception:
+        pass
+    
+    if isinstance(exception, TelegramForbiddenError):
+        logger.warning(f"⚠️ Forbidden: bot blocked by user {user_id}")
+        return True
+    elif isinstance(exception, TelegramBadRequest):
+        logger.warning(f"⚠️ BadRequest: {exception}")
+        return True
+    elif isinstance(exception, TelegramAPIError):
+        logger.error(f"❌ Telegram API error: {exception}")
+        return True
+    else:
+        logger.critical(f"💥 Unhandled exception: {type(exception).__name__}: {exception}", exc_info=True)
+        return True
+
+
+# ==================== ТОЧКА ВХОДА ====================
+
+async def main():
+    """✅ Главная функция запуска"""
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    dp.errors.register(errors_handler)
+    
+    logger.info("📡 Starting polling...")
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except KeyboardInterrupt:
+        logger.info("👋 Received keyboard interrupt")
+    except Exception as e:
+        logger.critical(f"💥 Polling error: {type(e).__name__}: {e}", exc_info=True)
+        raise
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Interrupted by user")
+    except Exception as e:
+        logger.critical(f"💥 Fatal error: {type(e).__name__}: {e}", exc_info=True)
+        sys.exit(1)
