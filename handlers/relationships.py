@@ -2,21 +2,26 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/relationships.py
-# ВЕРСИЯ: 2.3.0-final
+# ВЕРСИЯ: 2.4.0-production
 # ОПИСАНИЕ: Система отношений — ВСЕ ДЕЙСТВИЯ БЕСПЛАТНЫ + ВСЕ КОМАНДЫ
+# ИСПРАВЛЕНИЯ v2.4.0:
+#   ✅ db.create_relationship() → db.propose_relationship()
+#   ✅ get_relationship_status использует partner_id вместо user1_id/user2_id
+#   ✅ get_marriage_partner проверяет status == 'active'
+#   ✅ Убран неиспользуемый импорт TelegramAPIError
+#   ✅ Добавлены проверки callback.from_user во всех callback'ах
 # ============================================
 
 import html
 import logging
 import random
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramAPIError
 
 from database import db, DatabaseError
 
@@ -59,42 +64,66 @@ HUGS = [
 ]
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    if text is None: return ""
-    try: return html.escape(str(text))
-    except: return ""
+    """Безопасное экранирование HTML."""
+    if text is None:
+        return ""
+    try:
+        return html.escape(str(text))
+    except Exception:
+        return str(text) if text else ""
 
 
 def get_back_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с кнопкой НАЗАД."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
     ])
 
 
 async def get_user_name(user_id: int) -> str:
-    if db is None: return f"ID {user_id}"
+    """Получить имя пользователя по ID."""
+    if db is None:
+        return f"ID {user_id}"
     try:
         user = await db.get_user(user_id)
         if user:
-            return safe_html_escape(user.get('first_name') or f"@{user.get('username')}" or f"ID {user_id}")
-    except: pass
-    return f"ID {user_id}"
+            name = user.get('first_name')
+            if name:
+                return safe_html_escape(name)
+            username = user.get('username')
+            if username:
+                return f"@{safe_html_escape(username)}"
+        return f"ID {user_id}"
+    except Exception:
+        return f"ID {user_id}"
 
 
 async def get_marriage_partner(user_id: int) -> Optional[int]:
-    if db is None: return None
+    """
+    Получить ID партнёра по браку.
+    Использует db.get_relationship_status() из database.py v3.3.1.
+    """
+    if db is None:
+        return None
     try:
         rel = await db.get_relationship_status(user_id, "marriage")
-        if rel:
-            return rel["user2_id"] if rel["user1_id"] == user_id else rel["user1_id"]
-    except: pass
+        # ✅ Проверяем status и используем partner_id
+        if rel and rel.get("status") == "active":
+            return rel.get("partner_id")
+    except DatabaseError as e:
+        logger.error(f"❌ Error getting marriage partner for {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error getting marriage partner: {e}")
     return None
 
 
-async def get_family_members(user_id: int) -> list:
-    if db is None: return []
+async def get_family_members(user_id: int) -> List[Dict[str, Any]]:
+    """Получить всех членов семьи пользователя."""
+    if db is None:
+        return []
     try:
         rows = await db._execute_with_retry(
             """SELECT r.*, u.first_name, u.username 
@@ -105,16 +134,23 @@ async def get_family_members(user_id: int) -> list:
             (user_id, user_id, user_id), fetch_all=True
         )
         return [dict(r) for r in rows] if rows else []
-    except: return []
+    except DatabaseError as e:
+        logger.error(f"❌ Error getting family for {user_id}: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"❌ Unexpected error getting family: {e}")
+        return []
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ОТНОШЕНИЙ ====================
 
 @router.callback_query(F.data == "menu_relations")
 @router.callback_query(F.data == "relationships_menu")
-async def relationships_menu(callback: CallbackQuery):
+async def relationships_menu(callback: CallbackQuery) -> None:
     """Главное меню отношений."""
-    if not callback or not callback.message: return
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     user_id = callback.from_user.id
     partner_id = await get_marriage_partner(user_id)
@@ -123,7 +159,7 @@ async def relationships_menu(callback: CallbackQuery):
         partner_name = await get_user_name(partner_id)
         
         marriage = await db.get_relationship_status(user_id, "marriage") if db else None
-        created_at = marriage.get('created_at', '')[:10] if marriage else ''
+        created_at = (marriage.get('created_at', '')[:10] if marriage and marriage.get('created_at') else '')
         
         text = (
             "💕 <b>ОТНОШЕНИЯ</b>\n\n"
@@ -170,8 +206,10 @@ async def relationships_menu(callback: CallbackQuery):
 # ==================== КОМАНДА /marry ====================
 
 @router.message(Command("marry"))
-async def cmd_marry(message: Message):
-    if not message or not message.from_user or not message.text: return
+async def cmd_marry(message: Message) -> None:
+    """Предложить брак пользователю."""
+    if not message or not message.from_user or not message.text:
+        return
     
     args = message.text.split()
     if len(args) < 2 or not args[1].startswith('@'):
@@ -212,7 +250,23 @@ async def cmd_marry(message: Message):
         await message.answer(f"❌ @{safe_html_escape(username)} уже в браке!")
         return
     
-    # Предложение
+    # Создание предложения через БД
+    try:
+        if db:
+            result = await db.propose_relationship(user_id, partner_id, "marriage")
+            if not result or not result.get("success"):
+                error = result.get("error", "Ошибка создания предложения") if result else "Ошибка"
+                await message.answer(f"❌ {error}")
+                return
+        else:
+            await message.answer("❌ База данных недоступна.")
+            return
+    except DatabaseError as e:
+        logger.error(f"❌ Marriage proposal error: {e}")
+        await message.answer("❌ Ошибка базы данных.")
+        return
+    
+    # Отправка предложения
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💍 ПРИНЯТЬ", callback_data=f"marry_accept_{user_id}"),
          InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"marry_reject_{user_id}")]
@@ -226,13 +280,17 @@ async def cmd_marry(message: Message):
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
+    
+    logger.info(f"💍 Marriage proposal: {user_id} -> {partner_id}")
 
 
 # ==================== ПРИНЯТИЕ/ОТКЛОНЕНИЕ БРАКА ====================
 
 @router.callback_query(F.data.startswith("marry_accept_"))
-async def marry_accept(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def marry_accept(callback: CallbackQuery) -> None:
+    """Принятие предложения брака."""
+    if not callback or not callback.from_user:
+        return
     
     try:
         proposer_id = int(callback.data.split("_")[2])
@@ -247,17 +305,27 @@ async def marry_accept(callback: CallbackQuery):
     
     try:
         if db:
-            if await db.get_relationship_status(proposer_id, "marriage"):
-                await callback.answer("❌ Отправитель уже в браке!", show_alert=True); return
-            if await db.get_relationship_status(acceptor_id, "marriage"):
-                await callback.answer("❌ Вы уже в браке!", show_alert=True); return
+            # Проверка что оба не в браке
+            if await get_marriage_partner(proposer_id):
+                await callback.answer("❌ Отправитель уже в браке!", show_alert=True)
+                return
+            if await get_marriage_partner(acceptor_id):
+                await callback.answer("❌ Вы уже в браке!", show_alert=True)
+                return
             
-            success = await db.create_relationship(proposer_id, acceptor_id, "marriage")
+            # Находим предложение и подтверждаем
+            rel = await db.get_relationship(proposer_id, acceptor_id, "marriage")
+            if not rel or rel.get("status") != "pending":
+                await callback.answer("❌ Предложение не найдено или уже обработано!", show_alert=True)
+                return
+            
+            success = await db.confirm_relationship(rel["id"], acceptor_id)
         else:
             success = False
     except DatabaseError as e:
-        logger.error(f"Marriage error: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True); return
+        logger.error(f"❌ Marriage accept error: {e}")
+        await callback.answer("❌ Ошибка БД", show_alert=True)
+        return
     
     if success:
         p_name = await get_user_name(proposer_id)
@@ -267,14 +335,18 @@ async def marry_accept(callback: CallbackQuery):
             f"💍 <b>{p_name}</b> и <b>{a_name}</b> теперь в браке!\n\n💕 Совет да любовь!",
             parse_mode=ParseMode.HTML
         )
+        logger.info(f"💍 Marriage confirmed: {proposer_id} <-> {acceptor_id}")
     else:
-        await callback.message.edit_text("❌ Ошибка создания брака.")
+        await callback.message.edit_text("❌ Ошибка подтверждения брака.")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("marry_reject_"))
-async def marry_reject(callback: CallbackQuery):
-    if not callback: return
+async def marry_reject(callback: CallbackQuery) -> None:
+    """Отклонение предложения брака."""
+    if not callback or not callback.message:
+        return
+    
     await callback.message.edit_text("💔 Предложение отклонено.", parse_mode=ParseMode.HTML)
     await callback.answer("❌ Отклонено")
 
@@ -282,8 +354,11 @@ async def marry_reject(callback: CallbackQuery):
 # ==================== РАЗВОД ====================
 
 @router.callback_query(F.data == "rel_divorce_confirm")
-async def divorce_confirm(callback: CallbackQuery):
-    if not callback or not callback.message: return
+async def divorce_confirm(callback: CallbackQuery) -> None:
+    """Подтверждение развода."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💔 ДА, РАЗВЕСТИСЬ", callback_data="rel_divorce_do"),
@@ -298,14 +373,18 @@ async def divorce_confirm(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "rel_divorce_do")
-async def divorce_do(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def divorce_do(callback: CallbackQuery) -> None:
+    """Выполнение развода."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     user_id = callback.from_user.id
     partner_id = await get_marriage_partner(user_id)
     
     if not partner_id:
-        await callback.answer("❌ Вы не в браке!", show_alert=True); return
+        await callback.answer("❌ Вы не в браке!", show_alert=True)
+        return
     
     try:
         if db:
@@ -315,8 +394,12 @@ async def divorce_do(callback: CallbackQuery):
             f"💔 <b>РАЗВОД ОФОРМЛЕН</b>\n\nВы развелись с {partner_name}.\nВы снова свободны!",
             parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard()
         )
+        logger.info(f"💔 Divorce: {user_id} <-> {partner_id}")
+    except DatabaseError as e:
+        logger.error(f"❌ Divorce error: {e}")
+        await callback.answer("❌ Ошибка БД", show_alert=True)
     except Exception as e:
-        logger.error(f"Divorce error: {e}")
+        logger.error(f"❌ Unexpected divorce error: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
     await callback.answer()
 
@@ -324,8 +407,11 @@ async def divorce_do(callback: CallbackQuery):
 # ==================== СЕМЬЯ ====================
 
 @router.callback_query(F.data == "rel_family")
-async def show_family(callback: CallbackQuery):
-    if not callback or not callback.message: return
+async def show_family(callback: CallbackQuery) -> None:
+    """Показать семью пользователя."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     user_id = callback.from_user.id
     members = await get_family_members(user_id)
@@ -338,7 +424,7 @@ async def show_family(callback: CallbackQuery):
         for m in members:
             partner_id = m['user2_id'] if m['user1_id'] == user_id else m['user1_id']
             name = await get_user_name(partner_id)
-            rel_type = rel_names.get(m['type'], m['type'])
+            rel_type = rel_names.get(m.get('type', ''), m.get('type', 'Отношения'))
             text += f"• {rel_type}: <b>{name}</b>\n"
     
     await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_keyboard())
@@ -348,8 +434,10 @@ async def show_family(callback: CallbackQuery):
 # ==================== КОМАНДЫ РП ====================
 
 @router.message(Command("flirt"))
-async def cmd_flirt(message: Message):
-    if not message or not message.from_user or not message.text: return
+async def cmd_flirt(message: Message) -> None:
+    """Флирт с пользователем."""
+    if not message or not message.from_user or not message.text:
+        return
     
     args = message.text.split()
     if len(args) < 2 or not args[1].startswith('@'):
@@ -375,8 +463,10 @@ async def cmd_flirt(message: Message):
 
 
 @router.message(Command("hug"))
-async def cmd_hug(message: Message):
-    if not message or not message.from_user or not message.text: return
+async def cmd_hug(message: Message) -> None:
+    """Объятия с пользователем."""
+    if not message or not message.from_user or not message.text:
+        return
     
     args = message.text.split()
     if len(args) < 2 or not args[1].startswith('@'):
@@ -402,8 +492,10 @@ async def cmd_hug(message: Message):
 
 
 @router.message(Command("slap"))
-async def cmd_slap(message: Message):
-    if not message or not message.from_user or not message.text: return
+async def cmd_slap(message: Message) -> None:
+    """Дать леща пользователю."""
+    if not message or not message.from_user or not message.text:
+        return
     
     args = message.text.split()
     if len(args) < 2 or not args[1].startswith('@'):
@@ -429,8 +521,10 @@ async def cmd_slap(message: Message):
 
 
 @router.message(Command("compliment"))
-async def cmd_compliment(message: Message):
-    if not message or not message.from_user: return
+async def cmd_compliment(message: Message) -> None:
+    """Сделать комплимент."""
+    if not message or not message.from_user:
+        return
     
     compliment = random.choice(COMPLIMENTS)
     args = message.text.split() if message.text else []
@@ -455,12 +549,17 @@ async def cmd_compliment(message: Message):
 # ==================== КНОПКИ РП ДЛЯ ПАРТНЁРА ====================
 
 @router.callback_query(F.data.startswith("rel_hug_"))
-async def rel_hug(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def rel_hug(callback: CallbackQuery) -> None:
+    """Обнять партнёра (кнопка)."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
     try:
         partner_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка", show_alert=True); return
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     partner_name = await get_user_name(partner_id)
     await callback.message.answer(
@@ -471,12 +570,17 @@ async def rel_hug(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rel_kiss_"))
-async def rel_kiss(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def rel_kiss(callback: CallbackQuery) -> None:
+    """Поцеловать партнёра (кнопка)."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
     try:
         partner_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка", show_alert=True); return
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     partner_name = await get_user_name(partner_id)
     await callback.message.answer(
@@ -487,12 +591,17 @@ async def rel_kiss(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rel_compliment_"))
-async def rel_compliment(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def rel_compliment(callback: CallbackQuery) -> None:
+    """Сделать комплимент партнёру (кнопка)."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
     try:
         partner_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка", show_alert=True); return
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     partner_name = await get_user_name(partner_id)
     compliment = random.choice(COMPLIMENTS)
@@ -504,12 +613,17 @@ async def rel_compliment(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rel_flirt_"))
-async def rel_flirt(callback: CallbackQuery):
-    if not callback or not callback.from_user: return
+async def rel_flirt(callback: CallbackQuery) -> None:
+    """Флиртовать с партнёром (кнопка)."""
+    if not callback or not callback.message or not callback.from_user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
     try:
         partner_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка", show_alert=True); return
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
     
     partner_name = await get_user_name(partner_id)
     flirt = random.choice(FLIRTS).format(
