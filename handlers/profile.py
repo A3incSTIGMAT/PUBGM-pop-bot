@@ -2,15 +2,22 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/profile.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.1.1-production
 # ОПИСАНИЕ: Профиль и анкета пользователя
-# ИСПРАВЛЕНИЯ: Совместимость с aiosqlite, удалены несуществующие алиасы
+# ИСПРАВЛЕНИЯ v2.1.1:
+#   ✅ MAX_ABOUT_LENGTH определён локально (не из config)
+#   ✅ Добавлена проверка callback.from_user во всех callback'ах
+#   ✅ Совместимость с Python 3.9+ (Union вместо |)
+#   ✅ Блокировка повторного входа в анкету
+#   ✅ Обработка ошибок БД во всех точках сохранения
+#   ✅ Очистка _active_profile_states в finally
+#   ✅ Усиленная санитизация ввода (защита от XSS)
 # ============================================
 
 import html
 import logging
 import re
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Union
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -24,6 +31,25 @@ from config import START_BALANCE
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+# ==================== КОНСТАНТЫ ====================
+
+# Значения по умолчанию (можно переопределить в config.py)
+MAX_ABOUT_LENGTH = 300
+MIN_NAME_LENGTH = 2
+MAX_NAME_LENGTH = 30
+MIN_CITY_LENGTH = 2
+MAX_CITY_LENGTH = 30
+MIN_AGE = 12
+MAX_AGE = 100
+
+# Запрещенные слова (можно вынести в config)
+FORBIDDEN_WORDS = [
+    'хуй', 'пизда', 'ебать', 'блять', 'сука', 'нахер', 'похуй',
+    'залупа', 'жопа', 'говно', 'пидор', 'пидорас', 'гандон',
+    'fuck', 'shit', 'ass', 'bitch', 'dick', 'cunt', 'whore',
+]
 
 
 # ==================== FSM ДЛЯ АНКЕТЫ ====================
@@ -40,24 +66,6 @@ class ProfileStates(StatesGroup):
 _active_profile_states: Dict[int, bool] = {}
 
 
-# ==================== КОНСТАНТЫ ВАЛИДАЦИИ ====================
-
-MIN_NAME_LENGTH = 2
-MAX_NAME_LENGTH = 30
-MIN_CITY_LENGTH = 2
-MAX_CITY_LENGTH = 30
-MIN_AGE = 12
-MAX_AGE = 100
-MAX_ABOUT_LENGTH = 200
-
-# Запрещенные слова (можно вынести в config)
-FORBIDDEN_WORDS = [
-    'хуй', 'пизда', 'ебать', 'блять', 'сука', 'нахер', 'похуй',
-    'залупа', 'жопа', 'говно', 'пидор', 'пидорас', 'гандон',
-    'fuck', 'shit', 'ass', 'bitch', 'dick', 'cunt', 'whore',
-]
-
-
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
@@ -71,12 +79,23 @@ def safe_html_escape(text: Optional[str]) -> str:
 
 
 def sanitize_text(text: Optional[str]) -> str:
-    """Очистка текста от HTML и лишних пробелов."""
+    """
+    Очистка текста от HTML, JS и лишних пробелов.
+    Защита от XSS-инъекций.
+    """
     if not text:
         return ""
+    
+    # Удаление HTML-тегов
     text = re.sub(r'<[^>]+>', '', text)
+    # Удаление потенциальных JS-векторов
+    text = re.sub(r'(javascript|vbscript|on\w+\s*=)', '', text, flags=re.I)
+    # Нормализация пробелов
     text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    # Удаление невидимых символов
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+    
+    return text.strip()[:500]  # Жёсткий лимит длины
 
 
 def contains_forbidden_words(text: Optional[str]) -> bool:
@@ -85,7 +104,8 @@ def contains_forbidden_words(text: Optional[str]) -> bool:
         return False
     
     text_lower = text.lower()
-    cleaned_text = re.sub(r'[^а-яa-z]', '', text_lower)
+    # Удаляем спецсимволы для обхода фильтра
+    cleaned_text = re.sub(r'[^а-яa-z0-9]', '', text_lower)
     
     for word in FORBIDDEN_WORDS:
         if word in cleaned_text or word in text_lower:
@@ -110,7 +130,7 @@ def validate_name(name: Optional[str]) -> Tuple[bool, str]:
     return True, ""
 
 
-def validate_age(age_str: Optional[str]) -> Tuple[bool, int | str]:
+def validate_age(age_str: Optional[str]) -> Tuple[bool, Union[int, str]]:
     """Валидация возраста."""
     if not age_str:
         return False, "❌ Введите возраст"
@@ -156,6 +176,19 @@ def validate_timezone(tz: Optional[str]) -> Tuple[bool, str]:
     if not re.match(r'^(UTC|GMT)[+-]\d{1,2}(:\d{2})?$', tz_upper):
         return False, "❌ Формат: UTC+3, GMT-5, UTC+5:30"
     
+    # Дополнительная проверка диапазона
+    try:
+        offset = re.search(r'[+-](\d{1,2})(?::(\d{2}))?', tz_upper)
+        if offset:
+            hours = int(offset.group(1))
+            minutes = int(offset.group(2)) if offset.group(2) else 0
+            if hours > 14 or (hours == 14 and minutes > 0):
+                return False, "❌ Часовой пояс не может быть больше UTC+14"
+            if hours < -12:
+                return False, "❌ Часовой пояс не может быть меньше UTC-12"
+    except:
+        pass
+    
     return True, tz_upper
 
 
@@ -170,7 +203,24 @@ def validate_about(about: Optional[str]) -> Tuple[bool, str]:
     if contains_forbidden_words(about):
         return False, "❌ Текст содержит недопустимые слова"
     
+    # Проверка на потенциальный код/ссылки
+    if re.search(r'(https?://|www\.|\.ru|\.com|\.org)', about.lower()):
+        return False, "❌ Ссылки в разделе 'о себе' запрещены"
+    
     return True, ""
+
+
+def get_profile_keyboard(step: Optional[int] = None, can_skip: bool = False) -> InlineKeyboardMarkup:
+    """Генерация клавиатуры для анкеты."""
+    buttons = []
+    
+    if can_skip:
+        buttons.append([InlineKeyboardButton(text="⏭️ ПРОПУСТИТЬ", callback_data="skip_about")])
+    
+    cancel_text = f"❌ ОТМЕНА (шаг {step}/5)" if step is not None else "❌ ОТМЕНА"
+    buttons.append([InlineKeyboardButton(text=cancel_text, callback_data="cancel_profile")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def get_or_create_user(
@@ -181,11 +231,6 @@ async def get_or_create_user(
     """
     Получить или создать пользователя.
     
-    Args:
-        user_id: ID пользователя
-        username: Username
-        first_name: Имя
-        
     Returns:
         Словарь с данными пользователя или None при ошибке
     """
@@ -197,10 +242,14 @@ async def get_or_create_user(
         if not user:
             await db.create_user(user_id, username, first_name, START_BALANCE)
             user = await db.get_user(user_id)
-            logger.info(f"Created user {user_id} in profile module")
+            if user:
+                logger.info(f"✅ Created user {user_id} in profile module")
         return user
     except DatabaseError as e:
-        logger.error(f"Database error in get_or_create_user: {e}")
+        logger.error(f"❌ Database error in get_or_create_user: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in get_or_create_user: {e}")
         return None
 
 
@@ -211,7 +260,9 @@ async def get_user_xo_stats(user_id: int) -> Tuple[int, int]:
         if stats:
             return stats.get('wins', 0) or 0, stats.get('losses', 0) or 0
     except DatabaseError as e:
-        logger.error(f"Failed to get XO stats for {user_id}: {e}")
+        logger.error(f"❌ Failed to get XO stats for {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error getting XO stats: {e}")
     
     return 0, 0
 
@@ -275,17 +326,23 @@ async def cmd_profile(message: Message) -> None:
         ])
         
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        logger.info(f"✅ Profile viewed by user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in cmd_profile: {e}")
+        logger.error(f"❌ Database error in cmd_profile: {e}")
         await message.answer("❌ Ошибка загрузки профиля.")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in cmd_profile: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
 
 @router.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery) -> None:
     """Callback для профиля."""
-    if callback is None:
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
+    
     await cmd_profile(callback.message)
     await callback.answer()
 
@@ -295,221 +352,270 @@ async def profile_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "fill_profile")
 async def start_fill_profile(callback: CallbackQuery, state: FSMContext) -> None:
     """Начало заполнения анкеты."""
-    if callback is None or callback.message is None:
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
+    
+    # ✅ Блокировка повторного входа в анкету
+    if _active_profile_states.get(user_id):
+        await callback.answer("⏳ Анкета уже заполняется. Завершите текущую или отмените.", show_alert=True)
+        return
+    
     _active_profile_states[user_id] = True
     
-    await state.set_state(ProfileStates.waiting_for_name)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
-    ])
-    
-    await callback.message.edit_text(
-        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
-        "Шаг 1 из 5\n\n"
-        f"<b>Как вас зовут?</b>\n"
-        f"├ Мин. длина: {MIN_NAME_LENGTH} символов\n"
-        f"├ Макс. длина: {MAX_NAME_LENGTH} символов\n"
-        f"└ Только буквы\n\n"
-        "Введите ваше имя:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
-    await callback.answer()
+    try:
+        await state.set_state(ProfileStates.waiting_for_name)
+        
+        keyboard = get_profile_keyboard(step=1)
+        
+        await callback.message.edit_text(
+            "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+            "Шаг 1 из 5\n\n"
+            f"<b>Как вас зовут?</b>\n"
+            f"├ Мин. длина: {MIN_NAME_LENGTH} символов\n"
+            f"├ Макс. длина: {MAX_NAME_LENGTH} символов\n"
+            f"└ Только буквы, пробелы и дефис\n\n"
+            "Введите ваше имя:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"❌ Error starting profile fill: {e}")
+        _active_profile_states.pop(user_id, None)
+        await callback.answer("❌ Ошибка начала заполнения анкеты", show_alert=True)
 
 
 @router.message(ProfileStates.waiting_for_name)
 async def process_name(message: Message, state: FSMContext) -> None:
     """Обработка имени."""
-    if message is None or message.text is None:
+    if message is None or message.text is None or message.from_user is None:
         return
     
+    user_id = message.from_user.id
     name = sanitize_text(message.text)
     is_valid, error_msg = validate_name(name)
     
     if not is_valid:
-        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        await message.answer(
+            f"{safe_html_escape(error_msg)}\n\nПопробуйте ещё раз:",
+            parse_mode=ParseMode.HTML
+        )
         return
     
-    await state.update_data(full_name=name)
-    await state.set_state(ProfileStates.waiting_for_age)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
-    ])
-    
-    await message.answer(
-        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
-        "Шаг 2 из 5\n\n"
-        f"<b>Сколько вам лет?</b>\n"
-        f"├ От {MIN_AGE} до {MAX_AGE} лет\n"
-        f"└ Только число\n\n"
-        "Введите ваш возраст:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    try:
+        await state.update_data(full_name=name)
+        await state.set_state(ProfileStates.waiting_for_age)
+        
+        keyboard = get_profile_keyboard(step=2)
+        
+        await message.answer(
+            "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+            "Шаг 2 из 5\n\n"
+            f"<b>Сколько вам лет?</b>\n"
+            f"├ От {MIN_AGE} до {MAX_AGE} лет\n"
+            f"└ Только число\n\n"
+            "Введите ваш возраст:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"❌ Error processing name for {user_id}: {e}")
+        await message.answer("❌ Ошибка. Попробуйте ещё раз.")
 
 
 @router.message(ProfileStates.waiting_for_age)
 async def process_age(message: Message, state: FSMContext) -> None:
     """Обработка возраста."""
-    if message is None or message.text is None:
+    if message is None or message.text is None or message.from_user is None:
         return
     
+    user_id = message.from_user.id
     is_valid, result = validate_age(message.text)
     
     if not is_valid:
-        await message.answer(str(result) + "\n\nПопробуйте ещё раз:")
+        error_msg = str(result) if isinstance(result, str) else "❌ Ошибка валидации"
+        await message.answer(
+            f"{safe_html_escape(error_msg)}\n\nПопробуйте ещё раз:",
+            parse_mode=ParseMode.HTML
+        )
         return
     
-    await state.update_data(age=result)
-    await state.set_state(ProfileStates.waiting_for_city)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
-    ])
-    
-    await message.answer(
-        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
-        "Шаг 3 из 5\n\n"
-        f"<b>Из какого вы города?</b>\n"
-        f"├ Мин. длина: {MIN_CITY_LENGTH} символов\n"
-        f"└ Только буквы\n\n"
-        "Введите ваш город:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    try:
+        await state.update_data(age=result)
+        await state.set_state(ProfileStates.waiting_for_city)
+        
+        keyboard = get_profile_keyboard(step=3)
+        
+        await message.answer(
+            "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+            "Шаг 3 из 5\n\n"
+            f"<b>Из какого вы города?</b>\n"
+            f"├ Мин. длина: {MIN_CITY_LENGTH} символов\n"
+            f"└ Только буквы, пробелы, точка и дефис\n\n"
+            "Введите ваш город:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"❌ Error processing age for {user_id}: {e}")
+        await message.answer("❌ Ошибка. Попробуйте ещё раз.")
 
 
 @router.message(ProfileStates.waiting_for_city)
 async def process_city(message: Message, state: FSMContext) -> None:
     """Обработка города."""
-    if message is None or message.text is None:
+    if message is None or message.text is None or message.from_user is None:
         return
     
+    user_id = message.from_user.id
     city = sanitize_text(message.text)
     is_valid, error_msg = validate_city(city)
     
     if not is_valid:
-        await message.answer(error_msg + "\n\nПопробуйте ещё раз:")
+        await message.answer(
+            f"{safe_html_escape(error_msg)}\n\nПопробуйте ещё раз:",
+            parse_mode=ParseMode.HTML
+        )
         return
     
-    await state.update_data(city=city)
-    await state.set_state(ProfileStates.waiting_for_timezone)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
-    ])
-    
-    await message.answer(
-        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
-        "Шаг 4 из 5\n\n"
-        "<b>Ваш часовой пояс?</b>\n\n"
-        "Примеры:\n"
-        "• <code>UTC+3</code> (Москва)\n"
-        "• <code>UTC+5</code> (Екатеринбург)\n"
-        "• <code>UTC+7</code> (Новосибирск)\n"
-        "• <code>GMT-5</code> (Нью-Йорк)\n\n"
-        "Введите часовой пояс:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    try:
+        await state.update_data(city=city)
+        await state.set_state(ProfileStates.waiting_for_timezone)
+        
+        keyboard = get_profile_keyboard(step=4)
+        
+        await message.answer(
+            "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+            "Шаг 4 из 5\n\n"
+            "<b>Ваш часовой пояс?</b>\n\n"
+            "Примеры:\n"
+            "• <code>UTC+3</code> (Москва)\n"
+            "• <code>UTC+5</code> (Екатеринбург)\n"
+            "• <code>UTC+7</code> (Новосибирск)\n"
+            "• <code>GMT-5</code> (Нью-Йорк)\n\n"
+            "Введите часовой пояс:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"❌ Error processing city for {user_id}: {e}")
+        await message.answer("❌ Ошибка. Попробуйте ещё раз.")
 
 
 @router.message(ProfileStates.waiting_for_timezone)
 async def process_timezone(message: Message, state: FSMContext) -> None:
     """Обработка часового пояса."""
-    if message is None or message.text is None:
+    if message is None or message.text is None or message.from_user is None:
         return
     
+    user_id = message.from_user.id
     tz = message.text.strip()
     is_valid, result = validate_timezone(tz)
     
     if not is_valid:
-        await message.answer(str(result) + "\n\nПопробуйте ещё раз:")
+        error_msg = str(result) if isinstance(result, str) else "❌ Ошибка валидации"
+        await message.answer(
+            f"{safe_html_escape(error_msg)}\n\nПопробуйте ещё раз:",
+            parse_mode=ParseMode.HTML
+        )
         return
     
-    await state.update_data(timezone=result)
-    await state.set_state(ProfileStates.waiting_for_about)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏭️ ПРОПУСТИТЬ", callback_data="skip_about")],
-        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_profile")]
-    ])
-    
-    await message.answer(
-        "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
-        "Шаг 5 из 5\n\n"
-        f"<b>Расскажите немного о себе:</b>\n"
-        f"├ Мин. длина: 5 символов\n"
-        f"├ Макс. длина: {MAX_ABOUT_LENGTH} символов\n"
-        f"└ Без нецензурных слов\n\n"
-        "Пример: Люблю игры и программирование",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
+    try:
+        await state.update_data(timezone=result)
+        await state.set_state(ProfileStates.waiting_for_about)
+        
+        keyboard = get_profile_keyboard(step=5, can_skip=True)
+        
+        await message.answer(
+            "📝 <b>ЗАПОЛНЕНИЕ АНКЕТЫ</b>\n"
+            "Шаг 5 из 5 (последний!)\n\n"
+            f"<b>Расскажите немного о себе:</b>\n"
+            f"├ Мин. длина: 5 символов\n"
+            f"├ Макс. длина: {MAX_ABOUT_LENGTH} символов\n"
+            f"└ Без нецензурных слов и ссылок\n\n"
+            "Пример: Люблю игры, программирование и путешествовать",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"❌ Error processing timezone for {user_id}: {e}")
+        await message.answer("❌ Ошибка. Попробуйте ещё раз.")
 
 
 @router.message(ProfileStates.waiting_for_about)
 async def process_about(message: Message, state: FSMContext) -> None:
     """Обработка раздела 'о себе'."""
-    if message is None or message.text is None:
+    if message is None or message.text is None or message.from_user is None:
         return
     
+    user_id = message.from_user.id
     about = sanitize_text(message.text)
     is_valid, error_msg = validate_about(about)
     
     if not is_valid:
-        await message.answer(error_msg + "\n\nПопробуйте ещё раз или нажмите 'ПРОПУСТИТЬ':")
+        await message.answer(
+            f"{safe_html_escape(error_msg)}\n\nПопробуйте ещё раз или нажмите 'ПРОПУСТИТЬ':",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_profile_keyboard(step=5, can_skip=True)
+        )
         return
     
-    await save_profile(message, state, about)
+    try:
+        await _save_profile_safe(message, state, about, user_id)
+    except Exception as e:
+        logger.error(f"❌ Error saving profile for {user_id}: {e}")
+        await message.answer("❌ Ошибка сохранения. Попробуйте позже.")
 
 
 @router.callback_query(F.data == "skip_about")
 async def skip_about(callback: CallbackQuery, state: FSMContext) -> None:
     """Пропустить раздел 'о себе'."""
-    if callback is None:
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
-    await save_profile(callback.message, state, "")
-    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    try:
+        await _save_profile_safe(callback.message, state, "", user_id)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Error skipping about for {user_id}: {e}")
+        await callback.answer("❌ Ошибка. Попробуйте позже.", show_alert=True)
 
 
-async def save_profile(
-    event: Message | CallbackQuery,
+async def _save_profile_safe(
+    event: Union[Message, CallbackQuery],
     state: FSMContext,
-    about: str
+    about: str,
+    user_id: int
 ) -> None:
-    """Сохранение профиля."""
-    if isinstance(event, CallbackQuery):
-        message = event.message
-        user_id = event.from_user.id
-    else:
-        message = event
-        user_id = event.from_user.id
+    """Внутренняя функция сохранения профиля с гарантированной очисткой состояния."""
+    message = event if isinstance(event, Message) else event.message
     
     if message is None:
         return
     
-    data = await state.get_data()
-    
-    full_name = sanitize_text(data.get('full_name', ''))
-    age = data.get('age', 0)
-    city = sanitize_text(data.get('city', ''))
-    timezone = data.get('timezone', 'UTC+3')
-    about_text = sanitize_text(about) if about else sanitize_text(data.get('about', ''))
-    
     try:
+        data = await state.get_data()
+        
+        full_name = sanitize_text(data.get('full_name', ''))
+        age = data.get('age', 0)
+        city = sanitize_text(data.get('city', ''))
+        timezone = data.get('timezone', 'UTC+3')
+        about_text = sanitize_text(about) if about else sanitize_text(data.get('about', ''))
+        
+        # Сохранение в БД
         await db.save_profile(user_id, full_name, age, city, timezone, about_text)
         
-        _active_profile_states.pop(user_id, None)
-        await state.clear()
-        
+        # Получение актуального баланса
         balance = await db.get_balance(user_id)
         
+        # Формирование ответа
         text = (
             f"✅ <b>АНКЕТА СОХРАНЕНА!</b>\n\n"
             f"📛 Имя: <b>{safe_html_escape(full_name)}</b>\n"
@@ -526,30 +632,45 @@ async def save_profile(
         ])
         
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        logger.info(f"Profile saved for user {user_id}")
+        logger.info(f"✅ Profile saved for user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Failed to save profile for {user_id}: {e}")
-        await message.answer("❌ Ошибка сохранения анкеты. Попробуйте позже.")
+        logger.error(f"❌ Database error saving profile for {user_id}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Unexpected error saving profile for {user_id}: {e}")
+        raise
+    finally:
+        # ✅ Гарантированная очистка состояния в любом случае
+        _active_profile_states.pop(user_id, None)
+        await state.clear()
 
 
 @router.callback_query(F.data == "cancel_profile")
 async def cancel_profile(callback: CallbackQuery, state: FSMContext) -> None:
     """Отмена заполнения анкеты."""
-    if callback is None or callback.message is None:
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
-    _active_profile_states.pop(user_id, None)
-    await state.clear()
     
-    await callback.message.edit_text(
-        "❌ Заполнение анкеты отменено.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-        ])
-    )
-    await callback.answer()
+    try:
+        _active_profile_states.pop(user_id, None)
+        await state.clear()
+        
+        await callback.message.edit_text(
+            "❌ Заполнение анкеты отменено.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+            ])
+        )
+        logger.info(f"✅ Profile fill cancelled by user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error cancelling profile for {user_id}: {e}")
+    finally:
+        await callback.answer()
 
 
 @router.message(Command("cancel_profile"))
@@ -559,9 +680,14 @@ async def cmd_cancel_profile(message: Message, state: FSMContext) -> None:
         return
     
     user_id = message.from_user.id
-    _active_profile_states.pop(user_id, None)
-    await state.clear()
-    await message.answer("❌ Заполнение анкеты отменено.")
+    
+    try:
+        _active_profile_states.pop(user_id, None)
+        await state.clear()
+        await message.answer("❌ Заполнение анкеты отменено.")
+        logger.info(f"✅ Profile fill cancelled via command by user {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Error cancelling profile via command: {e}")
 
 
 # ==================== СТАТИСТИКА ====================
@@ -569,7 +695,8 @@ async def cmd_cancel_profile(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "my_stats")
 async def my_stats_callback(callback: CallbackQuery) -> None:
     """Показать статистику пользователя."""
-    if callback is None or callback.message is None:
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
@@ -588,7 +715,6 @@ async def my_stats_callback(callback: CallbackQuery) -> None:
         balance = await db.get_balance(user_id)
         wins, losses = await get_user_xo_stats(user_id)
         
-        # Получаем статистику игр через общую функцию
         stats = await db.get_user_stats(user_id)
         
         games_played = stats.get('games_played', 0) if stats else 0
@@ -619,7 +745,11 @@ async def my_stats_callback(callback: CallbackQuery) -> None:
         
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         await callback.answer()
+        logger.info(f"✅ Stats viewed by user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in my_stats: {e}")
+        logger.error(f"❌ Database error in my_stats: {e}")
         await callback.answer("❌ Ошибка загрузки статистики", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in my_stats: {e}")
+        await callback.answer("❌ Произошла ошибка. Попробуйте позже.", show_alert=True)
