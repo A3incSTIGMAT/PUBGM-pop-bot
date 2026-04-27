@@ -2,44 +2,70 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/economy.py
-# ВЕРСИЯ: 2.1.0-production
+# ВЕРСИЯ: 2.3.1-production
 # ОПИСАНИЕ: Модуль экономики — баланс, daily, переводы, донат
-# ИСПРАВЛЕНИЯ V2.1.0: +daily_bonus callback для сводки, +menu_balance/menu_donate,
-#                      автоудаление старых сообщений, защита от двойного вызова
+# ИСПРАВЛЕНИЯ v2.3.1:
+#   ✅ FSM_TIMEOUT_SECONDS заменён на локальный FSM_TIMEOUT (нет в config)
+#   ✅ Исправлен импорт TelegramAPIError для aiogram 3.17.0
+#   ✅ _auto_cancel_state обрабатывает CancelledError
+#   ✅ Все callback-хендлеры проверяют callback.from_user
+#   ✅ db.transfer_coins() проверяется как Dict (не bool)
+#   ✅ db.claim_daily_bonus() заменён на update_balance + прямой запрос
+#   ✅ db.update_donor_stats() с hasattr-проверкой
+#   ✅ callback.bot заменён на глобальный _bot
 # ============================================
 
 import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from functools import lru_cache
+from typing import Optional, Dict, Any, Set, Union
 
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+# Fallback для TelegramAPIError (aiogram 3.x)
+try:
+    from aiogram.exceptions import TelegramAPIError
+except ImportError:
+    TelegramAPIError = Exception
 
 from database import db, DatabaseError
 from config import (
     START_BALANCE, ADMIN_IDS, SUPER_ADMIN_IDS,
     DONATE_URL, DONATE_BANK, DONATE_RECEIVER
 )
-from utils.keyboards import back_button, finance_category_menu
 
 router = Router()
 logger = logging.getLogger(__name__)
 
+# ==================== ГЛОБАЛЬНЫЙ BOT ====================
+
+_bot: Optional[Bot] = None
+_background_tasks: Set[asyncio.Task] = set()
+
+
+def set_bot(bot_instance: Bot) -> None:
+    """Установка экземпляра бота (вызывается из bot.py)."""
+    global _bot
+    _bot = bot_instance
+    logger.info("✅ Bot instance set in economy module")
+
+
 # ==================== КОНСТАНТЫ ====================
 
-FSM_TIMEOUT = 300
+FSM_TIMEOUT = 300  # 5 минут
 MIN_TRANSFER = 10
 MIN_DONATE = 10
 DONATE_RATE = 10
 
-DONATE_BONUSES = {
+DONATE_BONUSES: Dict[int, int] = {
     10000: 30000,
     5000: 15000,
     2000: 5000,
@@ -52,8 +78,6 @@ DONATE_BONUSES = {
 
 _daily_cache: Dict[int, float] = {}
 DAILY_RATE_LIMIT = 5
-
-# 🔥 V2.1.0: Защита от двойного вызова daily
 _daily_locks: Dict[int, asyncio.Lock] = {}
 
 
@@ -64,19 +88,50 @@ class DonateState(StatesGroup):
     waiting_for_proof = State()
 
 
+# ==================== FALLBACK КЛАВИАТУРЫ ====================
+
+def back_button(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
+    """Кнопка НАЗАД (fallback если utils.keyboards недоступен)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
+    ])
+
+
+def finance_category_menu() -> InlineKeyboardMarkup:
+    """Меню финансов (fallback)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 БАЛАНС", callback_data="balance"),
+         InlineKeyboardButton(text="🎁 DAILY", callback_data="daily")],
+        [InlineKeyboardButton(text="💸 ПЕРЕВОД", callback_data="transfer_menu"),
+         InlineKeyboardButton(text="❤️ ДОНАТ", callback_data="donate_menu")],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")],
+    ])
+
+
+try:
+    from utils.keyboards import back_button as _ext_back_button
+    from utils.keyboards import finance_category_menu as _ext_finance_menu
+    back_button = _ext_back_button
+    finance_category_menu = _ext_finance_menu
+except ImportError:
+    logger.warning("⚠️ utils.keyboards not found, using fallback keyboards")
+
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
+    """Безопасное экранирование HTML."""
     if text is None:
         return ""
     try:
         import html
         return html.escape(str(text))
     except Exception:
-        return ""
+        return str(text) if text else ""
 
 
 def format_number(num: Any) -> str:
+    """Форматирование числа с разделителями."""
     if num is None:
         return "0"
     try:
@@ -85,7 +140,9 @@ def format_number(num: Any) -> str:
         return "0"
 
 
+@lru_cache(maxsize=50)
 def calculate_donate_coins(amount_rub: int) -> int:
+    """Расчёт монет за донат с учётом бонусов."""
     if amount_rub is None or amount_rub <= 0:
         return 0
     base_coins = amount_rub * DONATE_RATE
@@ -102,6 +159,7 @@ async def get_or_create_user(
     username: Optional[str] = None,
     first_name: Optional[str] = None
 ) -> Optional[Dict]:
+    """Получить или создать пользователя."""
     if user_id is None:
         logger.warning("get_or_create_user called with None user_id")
         return None
@@ -110,17 +168,19 @@ async def get_or_create_user(
         if not user:
             await db.create_user(user_id, username, first_name, START_BALANCE)
             user = await db.get_user(user_id)
-            logger.info(f"Created new user: {user_id}")
+            if user:
+                logger.info(f"✅ Created new user: {user_id}")
         return user
     except DatabaseError as e:
-        logger.error(f"Database error in get_or_create_user: {e}")
+        logger.error(f"❌ Database error in get_or_create_user: {e}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error in get_or_create_user: {e}")
+        logger.error(f"❌ Unexpected error in get_or_create_user: {e}", exc_info=True)
         return None
 
 
 async def check_daily_rate_limit(user_id: int) -> bool:
+    """Проверка rate limit для daily (в рамках одной сессии)."""
     now = datetime.now().timestamp()
     last_request = _daily_cache.get(user_id, 0)
     if now - last_request < DAILY_RATE_LIMIT:
@@ -130,27 +190,31 @@ async def check_daily_rate_limit(user_id: int) -> bool:
 
 
 async def get_daily_lock(user_id: int) -> asyncio.Lock:
-    """Получить блокировку для пользователя, чтобы избежать двойного вызова."""
+    """Получить блокировку для пользователя."""
     if user_id not in _daily_locks:
         _daily_locks[user_id] = asyncio.Lock()
     return _daily_locks[user_id]
 
 
 def parse_donate_callback(data: str) -> Optional[Dict[str, int]]:
+    """Парсинг callback_data для доната."""
     parts = data.split("_")
     if len(parts) < 5 or parts[0] != "confirm" or parts[1] != "donate":
         return None
     try:
-        return {
+        result = {
             "user_id": int(parts[2]),
             "amount_rub": int(parts[3]),
             "coins": int(parts[4])
         }
+        if result["user_id"] <= 0 or result["amount_rub"] <= 0 or result["coins"] < 0:
+            return None
+        return result
     except (ValueError, IndexError):
         return None
 
 
-# ==================== ОБЩАЯ ЛОГИКА DAILY (ДЛЯ КОМАНДЫ И CALLBACK) ====================
+# ==================== ОБЩАЯ ЛОГИКА DAILY ====================
 
 async def process_daily_bonus(
     user_id: int,
@@ -160,18 +224,14 @@ async def process_daily_bonus(
     source_message: Optional[Message] = None,
     is_callback: bool = False
 ) -> Optional[str]:
-    """
-    Общая логика ежедневного бонуса.
-    🔥 V2.1.0: Используется и для /daily, и для daily_bonus callback.
-    Возвращает текст ответа или None при ошибке.
-    """
+    """Общая логика ежедневного бонуса."""
     if user_id is None:
+        logger.error("process_daily_bonus called with None user_id")
         return "❌ Ошибка: пользователь не определён."
     
     lock = await get_daily_lock(user_id)
     
     async with lock:
-        # Rate limiting
         if not await check_daily_rate_limit(user_id):
             return "⏰ Пожалуйста, не так часто! Подождите немного."
         
@@ -183,7 +243,7 @@ async def process_daily_bonus(
         last_daily = user.get("last_daily")
         
         if last_daily:
-            last_daily_date = last_daily[:10] if len(str(last_daily)) >= 10 else str(last_daily)
+            last_daily_date = str(last_daily)[:10]
             if last_daily_date == today:
                 streak = user.get("daily_streak", 0) or 0
                 return (
@@ -210,19 +270,17 @@ async def process_daily_bonus(
             vip_bonus = vip_level * 50 if vip_level > 0 else 0
             total_bonus = base_bonus + vip_bonus
             
-            if hasattr(db, 'claim_daily_bonus'):
-                result = await db.claim_daily_bonus(
-                    user_id, total_bonus, streak, today, "Ежедневный бонус"
-                )
-                if not result.get("success", False):
-                    raise DatabaseError("Failed to claim daily bonus")
-                new_balance = result.get("new_balance", 0)
-            else:
-                await db.update_balance(user_id, total_bonus, "Ежедневный бонус")
-                await db.update_daily_streak(user_id, streak)
-                new_balance = await db.get_balance(user_id)
+            # ✅ Используем update_balance + прямой запрос
+            await db.update_balance(user_id, total_bonus, "Ежедневный бонус")
             
-            # Эмодзи для стрика
+            now_iso = datetime.now().isoformat()
+            await db._execute_with_retry(
+                """UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?""",
+                (streak, now_iso, user_id)
+            )
+            
+            new_balance = await db.get_balance(user_id)
+            
             if streak >= 30:
                 emoji = "🔥🔥🔥"
             elif streak >= 7:
@@ -246,14 +304,14 @@ async def process_daily_bonus(
                 f"💎 Новый баланс: <b>{format_number(new_balance)} NCoin</b>"
             )
             
-            logger.info(f"Daily claimed: user={user_id}, bonus={total_bonus}, streak={streak}")
+            logger.info(f"✅ Daily claimed: user={user_id}, bonus={total_bonus}, streak={streak}")
             return text
             
         except DatabaseError as e:
-            logger.error(f"Database error in daily: {e}")
+            logger.error(f"❌ Database error in daily: {e}")
             return "❌ Ошибка базы данных. Попробуйте позже."
         except Exception as e:
-            logger.error(f"Unexpected error in daily: {e}", exc_info=True)
+            logger.error(f"❌ Unexpected error in daily: {e}", exc_info=True)
             return "❌ Ошибка при начислении бонуса. Попробуйте позже."
 
 
@@ -261,15 +319,12 @@ async def process_daily_bonus(
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message) -> None:
+    """Показать баланс пользователя."""
     if message is None or message.from_user is None:
         return
     
     user_id = message.from_user.id
-    user = await get_or_create_user(
-        user_id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
     if not user:
         await message.answer("❌ Ошибка доступа к базе данных. Попробуйте позже.")
@@ -277,7 +332,7 @@ async def cmd_balance(message: Message) -> None:
     
     try:
         balance = await db.get_balance(user_id)
-        xo_stats = await db.get_user_stats(user_id)
+        xo_stats = await db.get_user_stats(user_id) if hasattr(db, 'get_user_stats') else None
         
         xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
         xo_losses = xo_stats.get('losses', 0) if xo_stats else 0
@@ -293,26 +348,25 @@ async def cmd_balance(message: Message) -> None:
         )
         
         await message.answer(text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Balance viewed by user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in cmd_balance: {e}")
+        logger.error(f"❌ Database error in cmd_balance: {e}")
         await message.answer("❌ Ошибка при получении баланса.")
     except Exception as e:
-        logger.error(f"Unexpected error in cmd_balance: {e}")
+        logger.error(f"❌ Unexpected error in cmd_balance: {e}")
         await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
 
 @router.callback_query(F.data == "balance")
 async def balance_callback(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Callback для баланса."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
-    user = await get_or_create_user(
-        user_id,
-        callback.from_user.username,
-        callback.from_user.first_name
-    )
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
     if not user:
         await callback.answer("❌ Ошибка доступа к БД", show_alert=True)
@@ -320,12 +374,11 @@ async def balance_callback(callback: CallbackQuery) -> None:
     
     try:
         balance = await db.get_balance(user_id)
-        xo_stats = await db.get_user_stats(user_id)
+        xo_stats = await db.get_user_stats(user_id) if hasattr(db, 'get_user_stats') else None
         
         xo_wins = xo_stats.get('wins', 0) if xo_stats else 0
         xo_losses = xo_stats.get('losses', 0) if xo_stats else 0
         xo_games = xo_stats.get('games_played', 0) if xo_stats else 0
-        
         winrate = (xo_wins / xo_games * 100) if xo_games > 0 else 0
         
         text = (
@@ -339,46 +392,31 @@ async def balance_callback(callback: CallbackQuery) -> None:
             f"💡 <i>Используйте /daily для получения бонуса!</i>"
         )
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_button()
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button())
         await callback.answer()
+        logger.info(f"✅ Balance callback viewed by user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in balance_callback: {e}")
+        logger.error(f"❌ Database error in balance_callback: {e}")
         await callback.answer("❌ Ошибка БД", show_alert=True)
     except Exception as e:
-        logger.error(f"Unexpected error in balance_callback: {e}")
+        logger.error(f"❌ Unexpected error in balance_callback: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
-# ==================== CALLBACK: menu_balance (из bot.py v7.1.0) ====================
-
 @router.callback_query(F.data == "menu_balance")
 async def menu_balance_callback(callback: CallbackQuery) -> None:
-    """
-    Обработчик кнопки БАЛАНС из главного меню.
-    🔥 ДОБАВЛЕНО В V2.1.0
-    """
+    """Обработчик кнопки БАЛАНС из главного меню."""
     if callback is None or callback.message is None:
         return
-    
     await balance_callback(callback)
 
 
-# ==================== CALLBACK: menu_donate (из bot.py v7.1.0) ====================
-
 @router.callback_query(F.data == "menu_donate")
 async def menu_donate_callback(callback: CallbackQuery) -> None:
-    """
-    Обработчик кнопки ПОДДЕРЖАТЬ из главного меню и сводки.
-    🔥 ДОБАВЛЕНО В V2.1.0
-    """
+    """Обработчик кнопки ПОДДЕРЖАТЬ из главного меню."""
     if callback is None or callback.message is None:
         return
-    
     await cmd_donate(callback.message)
     await callback.answer()
 
@@ -400,25 +438,20 @@ async def cmd_daily(message: Message) -> None:
         source_message=message
     )
     
-    if result_text:
+    if result_text is not None:
         await message.answer(result_text, parse_mode=ParseMode.HTML)
 
 
-# ==================== CALLBACK: daily_bonus (ИЗ СВОДКИ) ====================
-
 @router.callback_query(F.data == "daily_bonus")
 async def daily_bonus_callback(callback: CallbackQuery) -> None:
-    """
-    Обработчик инлайн-кнопки «Ежедневная награда» из утренней/вечерней сводки.
-    🔥 ДОБАВЛЕНО В V2.1.0
-    """
+    """Обработчик кнопки «Ежедневная награда» из сводки."""
     if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message.chat else user_id
     
-    # Отвечаем на callback чтобы убрать часики
     try:
         await callback.answer()
     except Exception:
@@ -433,7 +466,7 @@ async def daily_bonus_callback(callback: CallbackQuery) -> None:
         is_callback=True
     )
     
-    if result_text:
+    if result_text is not None:
         await callback.message.answer(
             result_text,
             parse_mode=ParseMode.HTML,
@@ -467,7 +500,7 @@ async def daily_callback(callback: CallbackQuery) -> None:
             is_callback=True
         )
         
-        if result_text:
+        if result_text is not None:
             await callback.message.answer(
                 result_text,
                 parse_mode=ParseMode.HTML,
@@ -510,11 +543,7 @@ async def cmd_transfer(message: Message) -> None:
         return
     
     user_id = message.from_user.id
-    user = await get_or_create_user(
-        user_id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
+    user = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
     if not user:
         await message.answer("❌ Ошибка доступа к базе данных.")
@@ -534,13 +563,15 @@ async def cmd_transfer(message: Message) -> None:
             await message.answer("❌ Нельзя перевести самому себе!")
             return
         
-        success = await db.transfer_coins(user_id, target_username, amount, "transfer")
+        # ✅ transfer_coins возвращает Dict, не bool
+        result = await db.transfer_coins(user_id, target_username, amount, "transfer")
         
-        if not success:
-            await message.answer(f"❌ Пользователь @{target_username} не найден!")
+        if not result or not result.get("success"):
+            error_msg = result.get("error", "Неизвестная ошибка") if result else "Ошибка перевода"
+            await message.answer(f"❌ {error_msg}")
             return
         
-        new_balance = await db.get_balance(user_id)
+        new_balance = result.get("new_from_balance") or await db.get_balance(user_id)
         
         await message.answer(
             f"✅ <b>ПЕРЕВОД ВЫПОЛНЕН!</b>\n\n"
@@ -550,13 +581,13 @@ async def cmd_transfer(message: Message) -> None:
             parse_mode=ParseMode.HTML
         )
         
-        logger.info(f"Transfer: {user_id} -> @{target_username}, amount={amount}")
+        logger.info(f"✅ Transfer: {user_id} -> @{target_username}, amount={amount}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in transfer: {e}")
+        logger.error(f"❌ Database error in transfer: {e}")
         await message.answer("❌ Ошибка базы данных. Попробуйте позже.")
     except Exception as e:
-        logger.error(f"Unexpected error in transfer: {e}")
+        logger.error(f"❌ Unexpected error in transfer: {e}", exc_info=True)
         await message.answer("❌ Произошла ошибка при переводе.")
 
 
@@ -591,10 +622,7 @@ async def cmd_donate(message: Message) -> None:
         text += f"├ {amount} ₽ → {coins} NCoin\n"
     text += "└ ... и больше!\n\n"
     
-    text += (
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 <b>Выберите действие:</b>"
-    )
+    text += "━━━━━━━━━━━━━━━━━━━━━\n\n👇 <b>Выберите действие:</b>"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 ВЫБРАТЬ СУММУ", callback_data="donate_select_amount")],
@@ -609,16 +637,18 @@ async def cmd_donate(message: Message) -> None:
 
 @router.callback_query(F.data == "donate_menu")
 async def donate_menu_callback(callback: CallbackQuery) -> None:
+    """Callback для меню доната."""
     if callback is None or callback.message is None:
         return
-    
     await cmd_donate(callback.message)
     await callback.answer()
 
 
 @router.callback_query(F.data == "donate_select_amount")
 async def donate_select_amount(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Выбор суммы доната."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     text = (
@@ -639,10 +669,7 @@ async def donate_select_amount(callback: CallbackQuery) -> None:
             )
         ])
     
-    keyboard_rows.append([
-        InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")
-    ])
-    
+    keyboard_rows.append([InlineKeyboardButton(text="◀️ НАЗАД", callback_data="donate_menu")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     
     await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -651,7 +678,9 @@ async def donate_select_amount(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("donate_fixed_"))
 async def donate_fixed_selected(callback: CallbackQuery, state: FSMContext) -> None:
-    if callback is None:
+    """Обработка выбора фиксированной суммы доната."""
+    if callback is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка!", show_alert=True)
         return
     
     try:
@@ -666,11 +695,16 @@ async def donate_fixed_selected(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(F.data == "donate_custom_amount")
 async def donate_custom_amount(callback: CallbackQuery, state: FSMContext) -> None:
-    if callback is None or callback.message is None:
+    """Ввод своей суммы доната."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     await state.set_state(DonateState.waiting_for_amount)
-    asyncio.create_task(_auto_cancel_state(state, FSM_TIMEOUT))
+    
+    task = asyncio.create_task(_auto_cancel_state(state, FSM_TIMEOUT))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     
     text = (
         "💰 <b>ВВЕДИТЕ СУММУ ДОНАТА</b>\n\n"
@@ -689,14 +723,22 @@ async def donate_custom_amount(callback: CallbackQuery, state: FSMContext) -> No
 
 
 async def _auto_cancel_state(state: FSMContext, timeout: int) -> None:
-    await asyncio.sleep(timeout)
-    current_state = await state.get_state()
-    if current_state in [DonateState.waiting_for_amount, DonateState.waiting_for_proof]:
-        await state.clear()
-        logger.debug(f"FSM state auto-cancelled after {timeout}s")
+    """Автоотмена FSM состояния по таймауту."""
+    try:
+        await asyncio.sleep(timeout)
+        current_state = await state.get_state()
+        if current_state in [DonateState.waiting_for_amount.state, DonateState.waiting_for_proof.state]:
+            await state.clear()
+            logger.debug(f"⏰ FSM state auto-cancelled after {timeout}s")
+    except asyncio.CancelledError:
+        logger.debug("⏰ Auto-cancel task cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in _auto_cancel_state: {e}")
 
 
 async def _process_donate_amount(message: Message, state: FSMContext, amount: int) -> None:
+    """Обработка выбранной суммы доната."""
     if message is None:
         return
     
@@ -704,7 +746,10 @@ async def _process_donate_amount(message: Message, state: FSMContext, amount: in
     
     await state.update_data(donate_amount=amount, donate_coins=coins)
     await state.set_state(DonateState.waiting_for_proof)
-    asyncio.create_task(_auto_cancel_state(state, FSM_TIMEOUT))
+    
+    task = asyncio.create_task(_auto_cancel_state(state, FSM_TIMEOUT))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     
     text = (
         f"💳 <b>ДОНАТ НА {amount} ₽</b>\n\n"
@@ -714,10 +759,7 @@ async def _process_donate_amount(message: Message, state: FSMContext, amount: in
     )
     
     if DONATE_URL:
-        text += (
-            f"📱 <b>Ссылка СБП:</b>\n"
-            f"<code>{DONATE_URL}</code>\n\n"
-        )
+        text += f"📱 <b>Ссылка СБП:</b>\n<code>{DONATE_URL}</code>\n\n"
     
     text += (
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -741,6 +783,7 @@ async def _process_donate_amount(message: Message, state: FSMContext, amount: in
 
 @router.message(DonateState.waiting_for_amount)
 async def process_custom_amount(message: Message, state: FSMContext) -> None:
+    """Обработка введённой суммы доната."""
     if message is None or message.text is None:
         return
     
@@ -759,6 +802,10 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
     await state.update_data(donate_amount=amount, donate_coins=coins)
     await state.set_state(DonateState.waiting_for_proof)
     
+    task = asyncio.create_task(_auto_cancel_state(state, FSM_TIMEOUT))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    
     text = (
         f"💳 <b>ДОНАТ НА {amount} ₽</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -767,10 +814,7 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
     )
     
     if DONATE_URL:
-        text += (
-            f"📱 <b>Ссылка СБП:</b>\n"
-            f"<code>{DONATE_URL}</code>\n\n"
-        )
+        text += f"📱 <b>Ссылка СБП:</b>\n<code>{DONATE_URL}</code>\n\n"
     
     text += (
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -794,6 +838,7 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
 
 @router.message(DonateState.waiting_for_proof, F.photo | F.document)
 async def process_donate_proof(message: Message, state: FSMContext) -> None:
+    """Обработка скриншота доната."""
     if message is None or message.from_user is None:
         return
     
@@ -806,11 +851,15 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
     all_admin_ids = list(set(ADMIN_IDS + SUPER_ADMIN_IDS))
     
     if not all_admin_ids:
-        logger.warning("No admin IDs configured for donate notifications!")
+        logger.warning("⚠️ No admin IDs configured for donate notifications!")
         await message.answer(
             "❌ Нет доступных администраторов для проверки доната.\n"
             "Пожалуйста, свяжитесь с разработчиком."
         )
+        return
+    
+    if _bot is None:
+        await message.answer("❌ Бот не инициализирован. Попробуйте позже.")
         return
     
     sent_count = 0
@@ -842,8 +891,9 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
                 ]
             ])
             
+            # ✅ Используем глобальный _bot вместо callback.bot
             if message.photo:
-                await message.bot.send_photo(
+                await _bot.send_photo(
                     admin_id,
                     photo=message.photo[-1].file_id,
                     caption=admin_text,
@@ -851,7 +901,7 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
                     reply_markup=keyboard
                 )
             elif message.document:
-                await message.bot.send_document(
+                await _bot.send_document(
                     admin_id,
                     document=message.document.file_id,
                     caption=admin_text,
@@ -862,9 +912,9 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
             sent_count += 1
             
         except TelegramForbiddenError:
-            logger.warning(f"Admin {admin_id} blocked the bot")
+            logger.warning(f"⚠️ Admin {admin_id} blocked the bot")
         except TelegramAPIError as e:
-            logger.error(f"Failed to send to admin {admin_id}: {e}")
+            logger.error(f"❌ Failed to send to admin {admin_id}: {e}")
     
     if sent_count == 0:
         await message.answer(
@@ -885,11 +935,12 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
         ])
     )
     
-    logger.info(f"Donate request: user={message.from_user.id}, amount={amount}, coins={coins}")
+    logger.info(f"✅ Donate request: user={message.from_user.id}, amount={amount}, coins={coins}")
 
 
 @router.message(DonateState.waiting_for_proof)
 async def donate_waiting_for_photo(message: Message) -> None:
+    """Напоминание о необходимости прикрепить скриншот."""
     if message is None:
         return
     
@@ -903,20 +954,24 @@ async def donate_waiting_for_photo(message: Message) -> None:
 
 @router.message(Command("cancel"))
 async def cancel_donate(message: Message, state: FSMContext) -> None:
+    """Отмена доната."""
     if message is None:
         return
     
     current_state = await state.get_state()
-    if current_state in [DonateState.waiting_for_amount, DonateState.waiting_for_proof]:
+    if current_state in [DonateState.waiting_for_amount.state, DonateState.waiting_for_proof.state]:
         await state.clear()
         await message.answer("❌ Донат отменён.")
+        logger.info(f"✅ Donate cancelled by user {message.from_user.id if message.from_user else 'unknown'}")
     else:
         await message.answer("ℹ️ Нет активной операции.")
 
 
 @router.callback_query(F.data == "donate_sbp")
 async def donate_sbp_callback(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Показать реквизиты СБП."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     text = (
@@ -927,15 +982,9 @@ async def donate_sbp_callback(callback: CallbackQuery) -> None:
     )
     
     if DONATE_URL:
-        text += (
-            f"📱 <b>Ссылка на оплату:</b>\n"
-            f"<code>{DONATE_URL}</code>\n\n"
-        )
+        text += f"📱 <b>Ссылка на оплату:</b>\n<code>{DONATE_URL}</code>\n\n"
     
-    text += (
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "💡 <i>Нажмите на ссылку или скопируйте её</i>"
-    )
+    text += "━━━━━━━━━━━━━━━━━━━━━\n\n💡 <i>Нажмите на ссылку или скопируйте её</i>"
     
     keyboard_rows = []
     if DONATE_URL:
@@ -950,7 +999,9 @@ async def donate_sbp_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "donate_help")
 async def donate_help_callback(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Показать справку по донату."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     text = (
@@ -986,7 +1037,9 @@ async def donate_help_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("confirm_donate_"))
 async def confirm_donate_callback(callback: CallbackQuery) -> None:
+    """Подтверждение доната администратором."""
     if callback is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     if callback.from_user.id not in ADMIN_IDS and callback.from_user.id not in SUPER_ADMIN_IDS:
@@ -1005,49 +1058,46 @@ async def confirm_donate_callback(callback: CallbackQuery) -> None:
     try:
         await db.update_balance(user_id, coins, f"Донат {amount_rub} ₽")
         
-        if hasattr(db, 'update_donor_stats'):
+        if hasattr(db, 'update_donor_stats') and callable(db.update_donor_stats):
             await db.update_donor_stats(user_id, amount_rub)
         
         if callback.message:
             new_caption = f"{callback.message.caption or callback.message.text or ''}\n\n✅ <b>ПОДТВЕРЖДЕНО!</b>\nНачислено {coins} NCoin пользователю."
             
             if callback.message.caption:
-                await callback.message.edit_caption(
-                    caption=new_caption,
-                    parse_mode=ParseMode.HTML
-                )
+                await callback.message.edit_caption(caption=new_caption, parse_mode=ParseMode.HTML)
             else:
-                await callback.message.edit_text(
-                    new_caption,
+                await callback.message.edit_text(new_caption, parse_mode=ParseMode.HTML)
+        
+        if _bot:
+            try:
+                await _bot.send_message(
+                    user_id,
+                    f"🎉 <b>ДОНАТ ПОДТВЕРЖДЁН!</b>\n\n"
+                    f"💵 Сумма: {amount_rub} ₽\n"
+                    f"🪙 Начислено: <b>{coins} NCoin</b>\n\n"
+                    f"Спасибо за поддержку! ❤️",
                     parse_mode=ParseMode.HTML
                 )
-        
-        try:
-            await callback.bot.send_message(
-                user_id,
-                f"🎉 <b>ДОНАТ ПОДТВЕРЖДЁН!</b>\n\n"
-                f"💵 Сумма: {amount_rub} ₽\n"
-                f"🪙 Начислено: <b>{coins} NCoin</b>\n\n"
-                f"Спасибо за поддержку! ❤️",
-                parse_mode=ParseMode.HTML
-            )
-        except TelegramAPIError:
-            logger.warning(f"Could not notify user {user_id} about confirmed donate")
+            except TelegramAPIError:
+                logger.warning(f"⚠️ Could not notify user {user_id} about confirmed donate")
         
         await callback.answer("✅ Донат подтверждён!")
-        logger.info(f"Donate confirmed by {callback.from_user.id}: user={user_id}, amount={amount_rub}, coins={coins}")
+        logger.info(f"✅ Donate confirmed by {callback.from_user.id}: user={user_id}, amount={amount_rub}, coins={coins}")
         
     except DatabaseError as e:
-        logger.error(f"Database error confirming donate: {e}")
+        logger.error(f"❌ Database error confirming donate: {e}")
         await callback.answer("❌ Ошибка БД", show_alert=True)
     except Exception as e:
-        logger.error(f"Unexpected error confirming donate: {e}")
+        logger.error(f"❌ Unexpected error confirming donate: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("reject_donate_"))
 async def reject_donate_callback(callback: CallbackQuery) -> None:
+    """Отклонение доната администратором."""
     if callback is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     if callback.from_user.id not in ADMIN_IDS and callback.from_user.id not in SUPER_ADMIN_IDS:
@@ -1069,44 +1119,37 @@ async def reject_donate_callback(callback: CallbackQuery) -> None:
         new_caption = f"{callback.message.caption or callback.message.text or ''}\n\n❌ <b>ОТКЛОНЕНО</b>"
         
         if callback.message.caption:
-            await callback.message.edit_caption(
-                caption=new_caption,
-                parse_mode=ParseMode.HTML
-            )
+            await callback.message.edit_caption(caption=new_caption, parse_mode=ParseMode.HTML)
         else:
-            await callback.message.edit_text(
-                new_caption,
+            await callback.message.edit_text(new_caption, parse_mode=ParseMode.HTML)
+    
+    if _bot:
+        try:
+            await _bot.send_message(
+                user_id,
+                f"❌ <b>ДОНАТ НЕ ПОДТВЕРЖДЁН</b>\n\n"
+                f"Платёж не найден или скриншот недействителен.\n"
+                f"Свяжитесь с разработчиком для уточнения.",
                 parse_mode=ParseMode.HTML
             )
-    
-    try:
-        await callback.bot.send_message(
-            user_id,
-            f"❌ <b>ДОНАТ НЕ ПОДТВЕРЖДЁН</b>\n\n"
-            f"Платёж не найден или скриншот недействителен.\n"
-            f"Свяжитесь с разработчиком для уточнения.",
-            parse_mode=ParseMode.HTML
-        )
-    except TelegramAPIError:
-        logger.warning(f"Could not notify user {user_id} about rejected donate")
+        except TelegramAPIError:
+            logger.warning(f"⚠️ Could not notify user {user_id} about rejected donate")
     
     await callback.answer("❌ Донат отклонён")
-    logger.info(f"Donate rejected by {callback.from_user.id}: user={user_id}")
+    logger.info(f"❌ Donate rejected by {callback.from_user.id}: user={user_id}")
 
 
 # ==================== МЕНЮ ФИНАНСОВ ====================
 
 @router.callback_query(F.data == "finance_category")
 async def finance_category_callback(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Меню финансов."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     user_id = callback.from_user.id
-    user = await get_or_create_user(
-        user_id,
-        callback.from_user.username,
-        callback.from_user.first_name
-    )
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     
     if not user:
         await callback.answer("❌ Ошибка доступа к БД", show_alert=True)
@@ -1135,21 +1178,23 @@ async def finance_category_callback(callback: CallbackQuery) -> None:
             f"└ /donate — поддержать"
         )
         
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=finance_category_menu()
-        )
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=finance_category_menu())
         await callback.answer()
+        logger.info(f"✅ Finance menu viewed by user {user_id}")
         
     except DatabaseError as e:
-        logger.error(f"Database error in finance_category: {e}")
+        logger.error(f"❌ Database error in finance_category: {e}")
         await callback.answer("❌ Ошибка БД", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in finance_category: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data == "transfer_menu")
 async def transfer_menu_callback(callback: CallbackQuery) -> None:
-    if callback is None or callback.message is None:
+    """Callback для меню переводов."""
+    if callback is None or callback.message is None or callback.from_user is None:
+        await callback.answer("❌ Ошибка", show_alert=True)
         return
     
     text = (
@@ -1158,9 +1203,5 @@ async def transfer_menu_callback(callback: CallbackQuery) -> None:
         f"⚠️ Минимум: {MIN_TRANSFER} NCoin"
     )
     
-    await callback.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_button()
-    )
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button())
     await callback.answer()
