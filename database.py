@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ФАЙЛ: database.py
-ВЕРСИЯ: 3.6.3-final
-ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — продакшен-версия без f-строк с \n
+ВЕРСИЯ: 3.6.4-final
+ОПИСАНИЕ: Асинхронная база данных NEXUS Bot — добавлен update_xo_stats
 СОВМЕСТИМОСТЬ: Python 3.9+ / aiogram 3.x
 """
 
@@ -543,6 +543,47 @@ class SQL_QUERIES:
     BATCH_UPDATE_STREAKS = (
         "UPDATE user_stats SET current_streak = 0 "
         "WHERE last_active < ? AND current_streak > 0"
+    )
+    
+    # XO Stats update queries
+    UPDATE_XO_WIN = (
+        "UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1, "
+        "wins = COALESCE(wins, 0) + 1, "
+        "total_bet = COALESCE(total_bet, 0) + ?, "
+        "total_won = COALESCE(total_won, 0) + ?, "
+        "current_win_streak = COALESCE(current_win_streak, 0) + 1, "
+        "max_win_streak = MAX(COALESCE(max_win_streak, 0), "
+        "COALESCE(current_win_streak, 0) + 1) "
+        "WHERE user_id = ?"
+    )
+    UPDATE_XO_LOSS = (
+        "UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1, "
+        "losses = COALESCE(losses, 0) + 1, "
+        "total_bet = COALESCE(total_bet, 0) + ?, "
+        "current_win_streak = 0 "
+        "WHERE user_id = ?"
+    )
+    UPDATE_XO_DRAW = (
+        "UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1, "
+        "draws = COALESCE(draws, 0) + 1, "
+        "total_bet = COALESCE(total_bet, 0) + ?, "
+        "current_win_streak = 0 "
+        "WHERE user_id = ?"
+    )
+    UPDATE_XO_WIN_VS_BOT = (
+        "UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1, "
+        "wins_vs_bot = COALESCE(wins_vs_bot, 0) + 1, "
+        "wins = COALESCE(wins, 0) + 1, "
+        "total_bet = COALESCE(total_bet, 0) + ?, "
+        "total_won = COALESCE(total_won, 0) + ? "
+        "WHERE user_id = ?"
+    )
+    UPDATE_XO_LOSS_VS_BOT = (
+        "UPDATE xo_stats SET games_played = COALESCE(games_played, 0) + 1, "
+        "losses_vs_bot = COALESCE(losses_vs_bot, 0) + 1, "
+        "losses = COALESCE(losses, 0) + 1, "
+        "total_bet = COALESCE(total_bet, 0) + ? "
+        "WHERE user_id = ?"
     )
 
 
@@ -1738,6 +1779,57 @@ class Database:
         if success:
             await self.recalculate_user_rank(user_id)
         return bool(success)
+
+    # ==================== XO STATS ====================
+
+    async def update_xo_stats(
+        self, user_id: int, result: str, bet: int, won: int
+    ) -> bool:
+        """
+        Обновление статистики крестиков-ноликов.
+        
+        Args:
+            user_id: ID игрока
+            result: Тип результата (win, loss, draw, win_vs_bot, loss_vs_bot)
+            bet: Сумма ставки
+            won: Сумма выигрыша
+        
+        Returns:
+            True если обновление успешно
+        """
+        if user_id is None:
+            return False
+        
+        result_map = {
+            "win": SQL_QUERIES.UPDATE_XO_WIN,
+            "loss": SQL_QUERIES.UPDATE_XO_LOSS,
+            "draw": SQL_QUERIES.UPDATE_XO_DRAW,
+            "win_vs_bot": SQL_QUERIES.UPDATE_XO_WIN_VS_BOT,
+            "loss_vs_bot": SQL_QUERIES.UPDATE_XO_LOSS_VS_BOT,
+        }
+        
+        query = result_map.get(result)
+        if not query:
+            logger.warning("Unknown XO result type: %s", result)
+            return False
+        
+        try:
+            if result in ("win", "win_vs_bot"):
+                await self._execute_with_retry(
+                    query, (bet, won, user_id), commit=True
+                )
+            elif result in ("loss", "draw", "loss_vs_bot"):
+                await self._execute_with_retry(
+                    query, (bet, user_id), commit=True
+                )
+            
+            await self._invalidate_stats_cache(user_id)
+            return True
+        except DatabaseError as e:
+            logger.error(
+                "XO stats update failed for user %s: %s", user_id, e
+            )
+            return False
 
     # ==================== ТРЕКИНГ ====================
 
