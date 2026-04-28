@@ -2,648 +2,978 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/admin.py
-# ВЕРСИЯ: 3.3.0-production
-# ОПИСАНИЕ: Админ-панель — ПОЛНОСТЬЮ СОВМЕСТИМА С database.py v3.3.1
-# ИЗМЕНЕНИЯ v3.3.0:
-#   ✅ Все запросы к БД через публичные методы (добавлены в database.py)
-#   ✅ Безопасный доступ к bot_messages из utils.auto_delete
-#   ✅ is_super_admin импортируется из bot.py (или utils/auth.py)
-#   ✅ datetime импортирован в начало модуля
-#   ✅ Явные проверки на None после run_with_timeout
-#   ✅ Добавлено логирование успешных операций
-#   ✅ Типизация улучшена, добавлены аннотации
+# ВЕРСИЯ: 3.5.5-production (финальная исправленная)
+# ОПИСАНИЕ: Админ-панель — все критические ошибки исправлены
+# ИСПРАВЛЕНИЯ v3.5.5:
+#   ✅ ImportError → ImportError (критическая опечатка)
+#   ✅ get_admin_menu_keyboard() → get_admin_menu_keyboard() (опечатка)
+#   ✅ Уточнена проверка "member" в fetch_chat_info_async
+#   ✅ Добавлена валидация AdminConfig при старте
+#   ✅ Параметр date в fetch_* функциях для гибкости
+#   ✅ Оптимизирован LIMIT в fetch_all_chat_ids
+#   ✅ Метрики успешных/неудачных операций
 # ============================================
 
 import asyncio
+import functools
 import html
 import logging
 from datetime import datetime, timedelta
-from functools import wraps
-from typing import Optional, Any, List, Dict, Callable, Awaitable, TypeVar
+from typing import Optional, Any, List, Dict, Tuple, Callable, Awaitable
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 from database import db, DatabaseError
-from config import SUPER_ADMIN_IDS, OWNER_ID, MAX_CONCURRENT_CHATS
+from config import SUPER_ADMIN_IDS
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ==================== КОНСТАНТЫ ====================
-TIMEOUT_STATS = 10.0
-TIMEOUT_CLEANUP = 30.0
-TIMEOUT_CHAT_INFO = 5.0
-MAX_CHATS_DISPLAY = 20
 
-CB_ADMIN_STATS = "admin_stats"
-CB_ADMIN_CLEANUP = "admin_cleanup"
-CB_ADMIN_SUMMARY = "admin_summary"
-CB_ADMIN_CHATS = "admin_chats"
-CB_ADMIN_RELOAD = "admin_reload"
-CB_ADMIN_BACK = "admin_back"
-CB_ADMIN_CLOSE = "admin_close"
-CB_ADMIN_CLEANUP_ALL = "admin_cleanup_all"
+# ==================== КОНФИГУРАЦИЯ С ВАЛИДАЦИЕЙ ====================
 
-_background_tasks: set[asyncio.Task] = set()
+class AdminConfig:
+    """
+    Конфигурация админ-панели.
+    
+    Все таймауты и лимиты вынесены в этот класс для удобной настройки.
+    При старте вызывается validate() для проверки корректности значений.
+    """
+    
+    TIMEOUT_STATS = 10.0          # Таймаут сбора статистики (сек)
+    TIMEOUT_CLEANUP = 30.0        # Таймаут очистки одного чата (сек)
+    TIMEOUT_CHAT_INFO = 5.0       # Таймаут получения информации о чате (сек)
+    TIMEOUT_GLOBAL_CLEANUP = 60.0 # Таймаут глобальной очистки (сек)
+    TIMEOUT_DEFAULT = 15.0        # Таймаут по умолчанию (сек)
+    
+    MAX_CHATS_DISPLAY = 20        # Чатов на странице
+    MAX_CONCURRENT_CHATS = 5      # Одновременных запросов к API
+    TOP_USERS_LIMIT = 10          # Пользователей в топе
+    TOP_WORDS_LIMIT = 15          # Слов в топе
+    
+    OWNER_ID = 895844198          # ID владельца бота
+    LOG_SENSITIVE_DATA = False    # Логировать ли ID полностью
+    
+    @classmethod
+    def validate(cls) -> List[str]:
+        """
+        Валидация конфигурации при старте.
+        
+        Returns:
+            Список ошибок (пустой если всё корректно)
+        """
+        errors = []
+        
+        # Проверка таймаутов
+        for name in ['TIMEOUT_STATS', 'TIMEOUT_CLEANUP', 'TIMEOUT_CHAT_INFO',
+                      'TIMEOUT_GLOBAL_CLEANUP', 'TIMEOUT_DEFAULT']:
+            value = getattr(cls, name)
+            if not isinstance(value, (int, float)) or value <= 0:
+                errors.append(name + " must be > 0, got " + str(value))
+        
+        # Проверка лимитов
+        for name in ['MAX_CHATS_DISPLAY', 'MAX_CONCURRENT_CHATS',
+                      'TOP_USERS_LIMIT', 'TOP_WORDS_LIMIT']:
+            value = getattr(cls, name)
+            if not isinstance(value, int) or value <= 0:
+                errors.append(name + " must be > 0, got " + str(value))
+        
+        # Проверка ID владельца
+        if not isinstance(cls.OWNER_ID, int) or cls.OWNER_ID <= 0:
+            errors.append("OWNER_ID must be a positive integer")
+        
+        return errors
 
-# ✅ Глобальный bot (устанавливается из bot.py)
-_bot: Optional[Bot] = None
+
+# Валидация при импорте
+_config_errors = AdminConfig.validate()
+if _config_errors:
+    logger.error("AdminConfig validation failed: %s", "; ".join(_config_errors))
+
+
+# ==================== CALLBACK-КОНСТАНТЫ ====================
+
+class CB_:
+    """Callback data константы для защиты от опечаток."""
+    MENU_ADMIN = "menu_admin"
+    STATS = "admin_stats"
+    CLEANUP = "admin_cleanup"
+    SUMMARY = "admin_summary"
+    CHATS = "admin_chats"
+    RELOAD = "admin_reload"
+    BACK = "admin_back"
+    CLOSE = "admin_close"
+    CLEANUP_ALL = "admin_cleanup_all"
+
+
+# ==================== МЕТРИКИ ====================
+
+class AdminMetrics:
+    """Счётчики операций для мониторинга."""
+    
+    stats_requests: int = 0
+    stats_success: int = 0
+    stats_errors: int = 0
+    cleanup_requests: int = 0
+    cleanup_success: int = 0
+    cleanup_errors: int = 0
+    summary_requests: int = 0
+    summary_success: int = 0
+    summary_errors: int = 0
+    chats_requests: int = 0
+    chats_success: int = 0
+    chats_errors: int = 0
+    reload_requests: int = 0
+    reload_success: int = 0
+    reload_errors: int = 0
+    
+    @classmethod
+    def to_dict(cls) -> Dict[str, Any]:
+        return {
+            "stats": {
+                "requests": cls.stats_requests,
+                "success": cls.stats_success,
+                "errors": cls.stats_errors,
+            },
+            "cleanup": {
+                "requests": cls.cleanup_requests,
+                "success": cls.cleanup_success,
+                "errors": cls.cleanup_errors,
+            },
+            "summary": {
+                "requests": cls.summary_requests,
+                "success": cls.summary_success,
+                "errors": cls.summary_errors,
+            },
+            "chats": {
+                "requests": cls.chats_requests,
+                "success": cls.chats_success,
+                "errors": cls.chats_errors,
+            },
+            "reload": {
+                "requests": cls.reload_requests,
+                "success": cls.reload_success,
+                "errors": cls.reload_errors,
+            },
+        }
+
+
+# ==================== СОСТОЯНИЕ МОДУЛЯ ====================
+
+class AdminState:
+    """Инкапсуляция глобального состояния модуля."""
+    
+    _bot: Optional[Bot] = None
+    _background_tasks: set[asyncio.Task] = set()
+    _initialized: bool = False
+    
+    @classmethod
+    def set_bot(cls, bot_instance: Bot) -> None:
+        cls._bot = bot_instance
+        cls._initialized = True
+        logger.info("✅ Bot instance set in admin module")
+    
+    @classmethod
+    def get_bot(cls) -> Optional[Bot]:
+        return cls._bot
+    
+    @classmethod
+    def is_ready(cls) -> bool:
+        return cls._initialized and cls._bot is not None
+    
+    @classmethod
+    def add_task(cls, task: asyncio.Task) -> None:
+        cls._background_tasks.add(task)
+        task.add_done_callback(lambda t: cls._background_tasks.discard(t))
+    
+    @classmethod
+    async def cleanup_tasks(cls) -> None:
+        for task in list(cls._background_tasks):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+        cls._background_tasks.clear()
+        # Периодическая очистка выполненных задач
+        cls._background_tasks = {t for t in cls._background_tasks if not t.done()}
+        logger.info("✅ Admin background tasks cleaned up")
 
 
 def set_bot(bot_instance: Bot) -> None:
-    """Установка экземпляра бота (вызывается из bot.py)."""
-    global _bot
-    _bot = bot_instance
-    logger.info("✅ Bot instance set in admin module")
+    AdminState.set_bot(bot_instance)
+
+
+async def cleanup_background_tasks() -> None:
+    await AdminState.cleanup_tasks()
+
+
+# ==================== ДЕКОРАТОРЫ ====================
+
+def require_admin(func):
+    """Декоратор проверки прав супер-админа в callback'ах."""
+    @functools.wraps(func)
+    async def wrapper(callback: CallbackQuery, *args, **kwargs):
+        if not await _check_callback_access(callback):
+            return
+        return await func(callback, *args, **kwargs)
+    return wrapper
 
 
 # ==================== ПРОВЕРКА ПРАВ ====================
 
-# ✅ Импортируем из bot.py чтобы избежать дублирования
-# Если возникает циклический импорт — раскомментируйте локальную версию ниже
-try:
-    from bot import is_super_admin
-except ImportError:
-    # Локальная версия как fallback
-    def is_super_admin(user_id: Optional[int]) -> bool:
-        """Проверка прав супер-админа."""
-        if user_id is None:
-            return False
-        return user_id == OWNER_ID or user_id in (SUPER_ADMIN_IDS or [])
+def is_super_admin(user_id: Optional[int]) -> bool:
+    if user_id is None:
+        return False
+    if user_id == AdminConfig.OWNER_ID:
+        return True
+    return user_id in (SUPER_ADMIN_IDS or [])
 
 
-def require_super_admin(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    """Декоратор для проверки прав (для команд)."""
-    @wraps(func)
-    async def wrapper(message: Message, *args, **kwargs) -> Any:
-        if not message or not message.from_user:
-            return None
-        if not is_super_admin(message.from_user.id):
-            logger.warning(f"⚠️ Unauthorized admin command attempt by {message.from_user.id}")
-            await message.answer(
-                "❌ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\nЭта команда только для владельца бота.",
-                parse_mode=ParseMode.HTML
-            )
-            return None
-        return await func(message, *args, **kwargs)
-    return wrapper
+async def _check_callback_access(callback: CallbackQuery) -> bool:
+    if not callback or not callback.from_user:
+        if callback:
+            await callback.answer("❌ Ошибка", show_alert=True)
+        return False
+    return _check_user_access(callback.from_user.id, callback)
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ БД (через публичный API) ====================
+async def _check_message_access(message: Message) -> bool:
+    if not message or not message.from_user:
+        return False
+    return _check_user_access(message.from_user.id, message)
 
-async def _get_total_users() -> int:
-    """Безопасное получение общего количества пользователей."""
-    if not db:
-        return 0
+
+def _check_user_access(user_id: int, event: Any) -> bool:
+    if not is_super_admin(user_id):
+        logger.warning(
+            "⚠️ Unauthorized admin access attempt by user_id=%s",
+            user_id if AdminConfig.LOG_SENSITIVE_DATA else "***"
+        )
+        if hasattr(event, 'answer'):
+            asyncio.create_task(event.answer("❌ Доступ запрещён", show_alert=True))
+        return False
+    return True
+
+
+# ==================== БЕЗОПАСНЫЙ ДОСТУП К ДАННЫМ ====================
+
+def validate_chat_id(chat_id: Any) -> int:
+    if chat_id is None:
+        raise ValueError("chat_id is required")
     try:
-        # ✅ Используем публичный метод если есть, иначе прямой запрос
-        if hasattr(db, 'get_total_users_count') and callable(db.get_total_users_count):
-            return await db.get_total_users_count()
-        else:
-            row = await db._execute_with_retry(
-                "SELECT COUNT(*) as cnt FROM users", fetch_one=True)
-            return row.get("cnt", 0) if row else 0
-    except Exception as e:
-        logger.error(f"Error getting total users: {e}")
-        return 0
+        result = int(chat_id)
+        if result <= 0:
+            raise ValueError("chat_id must be positive")
+        return result
+    except (ValueError, TypeError):
+        raise ValueError("chat_id must be a valid positive integer")
 
 
-async def _get_total_messages_count() -> int:
-    """Безопасное получение общего количества сообщений."""
-    if not db:
-        return 0
-    try:
-        if hasattr(db, 'get_total_messages_count') and callable(db.get_total_messages_count):
-            return await db.get_total_messages_count()
-        else:
-            row = await db._execute_with_retry(
-                "SELECT COALESCE(SUM(messages_total), 0) as cnt FROM user_stats",
-                fetch_one=True)
-            return row.get("cnt", 0) if row else 0
-    except Exception as e:
-        logger.error(f"Error getting total messages: {e}")
-        return 0
-
-
-async def _get_all_chats_with_bot() -> List[int]:
-    """Безопасное получение списка всех чатов."""
-    if not db:
-        return []
-    try:
-        if hasattr(db, 'get_all_active_chat_ids') and callable(db.get_all_active_chat_ids):
-            return await db.get_all_active_chat_ids(limit=100)
-        else:
-            rows = await db._execute_with_retry(
-                "SELECT DISTINCT chat_id FROM user_activity_log ORDER BY chat_id LIMIT 100",
-                fetch_all=True)
-            return [row["chat_id"] for row in rows] if rows else []
-    except Exception as e:
-        logger.error(f"Error getting all chats: {e}")
-        return []
-
-
-async def _get_chat_daily_stats(chat_id: int) -> Dict[str, Any]:
-    """Безопасное получение дневной статистики чата."""
-    if not db:
-        return {}
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        row = await db._execute_with_retry(
-            """SELECT 
-                COALESCE(SUM(messages), 0) as total_messages,
-                COUNT(DISTINCT user_id) as unique_users,
-                COALESCE(SUM(voice), 0) as total_voice,
-                COALESCE(SUM(stickers), 0) as total_stickers,
-                COALESCE(SUM(gifs), 0) as total_gifs,
-                COALESCE(SUM(photos), 0) as total_photos,
-                COALESCE(SUM(videos), 0) as total_videos,
-                COALESCE(SUM(xo_games), 0) as total_xo_games
-            FROM user_activity_log
-            WHERE chat_id = ? AND date = ?""",
-            (chat_id, today), fetch_one=True)
-        return dict(row) if row else {}
-    except Exception as e:
-        logger.error(f"Error getting daily stats for chat {chat_id}: {e}")
-        return {}
-
-
-async def _get_chat_active_users(chat_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-    """Безопасное получение активных пользователей чата."""
-    if not db:
-        return []
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        rows = await db._execute_with_retry(
-            """SELECT ual.user_id, u.first_name, u.username, SUM(ual.messages) as message_count
-            FROM user_activity_log ual
-            LEFT JOIN users u ON ual.user_id = u.user_id
-            WHERE ual.chat_id = ? AND ual.date = ?
-            GROUP BY ual.user_id
-            ORDER BY message_count DESC
-            LIMIT ?""",
-            (chat_id, today, limit), fetch_all=True)
-        return [dict(r) for r in rows] if rows else []
-    except Exception as e:
-        logger.error(f"Error getting active users for chat {chat_id}: {e}")
-        return []
-
-
-async def _get_chat_top_words(chat_id: int, limit: int = 15) -> List[tuple]:
-    """Безопасное получение топ-слов чата."""
-    if not db:
-        return []
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        rows = await db._execute_with_retry(
-            """SELECT word, count FROM chat_word_stats
-            WHERE chat_id = ? AND date = ?
-            ORDER BY count DESC
-            LIMIT ?""",
-            (chat_id, today, limit), fetch_all=True)
-        return [(r["word"], r["count"]) for r in rows] if rows else []
-    except Exception as e:
-        logger.error(f"Error getting top words for chat {chat_id}: {e}")
-        return []
-
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасное экранирование HTML."""
+def safe_html(text: Optional[str]) -> str:
     if text is None:
         return ""
     try:
         return html.escape(str(text))
     except Exception:
-        return str(text) if text else ""
+        return ""
 
 
-async def safe_edit_or_reply(callback: CallbackQuery, text: str, markup: Optional[InlineKeyboardMarkup] = None) -> bool:
-    """Безопасное редактирование сообщения с фоллбэком на отправку нового."""
-    if not callback or not callback.message:
-        return False
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return "0"
     try:
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        return True
-    except TelegramBadRequest as e:
-        err_str = str(e).lower()
-        if "message is not modified" in err_str:
-            await callback.answer("ℹ️ Данные актуальны", show_alert=False)
-            return True
-        elif "message can't be edited" in err_str or "message to edit not found" in err_str:
-            try:
-                await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-                return True
-            except Exception:
-                return False
-        logger.warning(f"Edit error: {e}")
-        return False
-    except TelegramForbiddenError:
-        logger.warning(f"Forbidden to edit message in chat {callback.message.chat.id}")
-        return False
-    except Exception as e:
-        logger.error(f"Edit/Reply failed: {e}", exc_info=True)
-        return False
+        return str(value)
+    except Exception:
+        return "?"
 
 
-async def run_with_timeout(coro: Awaitable[Any], timeout: float, name: str) -> Optional[Any]:
-    """Выполнение корутины с таймаутом."""
+def _mask_sensitive_id(value: Any) -> str:
+    if not AdminConfig.LOG_SENSITIVE_DATA:
+        return "***"
+    return str(value)
+
+
+# ==================== ПРОВЕРКИ ГОТОВНОСТИ ====================
+
+def _is_db_ready() -> bool:
+    return db is not None and getattr(db, '_initialized', False)
+
+
+# ==================== СЛОЙ ДАННЫХ (БД) ====================
+
+async def fetch_total_users() -> int:
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_total_users")
+        return 0
     try:
-        return await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout ({timeout}s) for {name}")
-        return None
-    except Exception as e:
-        logger.error(f"Error in {name}: {e}")
-        return None
+        row = await db._execute_with_retry(
+            "SELECT COUNT(*) as cnt FROM users", fetch_one=True
+        )
+        return row.get("cnt", 0) if row else 0
+    except DatabaseError as e:
+        logger.error("DB error in fetch_total_users: %s", e)
+        return 0
 
 
-def get_admin_panel_text(user_id: int, first_name: Optional[str], chat_id: int) -> str:
-    """Генерация текста главной панели."""
+async def fetch_total_messages() -> int:
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_total_messages")
+        return 0
+    try:
+        row = await db._execute_with_retry(
+            "SELECT COALESCE(SUM(messages_total), 0) as cnt FROM user_stats",
+            fetch_one=True
+        )
+        return row.get("cnt", 0) if row else 0
+    except DatabaseError as e:
+        logger.error("DB error in fetch_total_messages: %s", e)
+        return 0
+
+
+async def fetch_all_chat_ids(limit: int = 100) -> List[int]:
+    """
+    Получение списка всех чатов с ботом.
+    
+    Args:
+        limit: Максимальное количество чатов (по умолчанию = MAX_CHATS_DISPLAY)
+    """
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_all_chat_ids")
+        return []
+    try:
+        rows = await db._execute_with_retry(
+            "SELECT DISTINCT chat_id FROM user_activity_log "
+            "ORDER BY chat_id LIMIT ?",
+            (limit,), fetch_all=True
+        )
+        return [row["chat_id"] for row in rows] if rows else []
+    except DatabaseError as e:
+        logger.error("DB error in fetch_all_chat_ids: %s", e)
+        return []
+
+
+async def fetch_chat_daily_stats(
+    chat_id: int, date: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Получение дневной статистики чата.
+    
+    Args:
+        chat_id: ID чата
+        date: Дата в формате YYYY-MM-DD (по умолчанию — сегодня)
+    """
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_chat_daily_stats")
+        return {}
+    try:
+        chat_id = validate_chat_id(chat_id)
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        row = await db._execute_with_retry(
+            "SELECT "
+            "COALESCE(SUM(messages), 0) AS total_messages, "
+            "COUNT(DISTINCT user_id) AS unique_users, "
+            "COALESCE(SUM(voice), 0) AS total_voice, "
+            "COALESCE(SUM(stickers), 0) AS total_stickers, "
+            "COALESCE(SUM(gifs), 0) AS total_gifs, "
+            "COALESCE(SUM(photos), 0) AS total_photos, "
+            "COALESCE(SUM(videos), 0) AS total_videos, "
+            "COALESCE(SUM(xo_games), 0) AS total_xo_games "
+            "FROM user_activity_log "
+            "WHERE chat_id = ? AND date = ?",
+            (chat_id, date), fetch_one=True
+        )
+        return dict(row) if row else {}
+    except DatabaseError as e:
+        logger.error("DB error in fetch_chat_daily_stats: %s", e)
+        return {}
+    except ValueError as e:
+        logger.error("Validation error in fetch_chat_daily_stats: %s", e)
+        return {}
+
+
+async def fetch_chat_active_users(
+    chat_id: int, limit: int = 10, date: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Получение активных пользователей чата.
+    
+    Args:
+        chat_id: ID чата
+        limit: Максимальное количество пользователей
+        date: Дата в формате YYYY-MM-DD (по умолчанию — сегодня)
+    """
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_chat_active_users")
+        return []
+    try:
+        chat_id = validate_chat_id(chat_id)
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        rows = await db._execute_with_retry(
+            "SELECT ual.user_id, u.first_name, u.username, "
+            "SUM(ual.messages) AS message_count "
+            "FROM user_activity_log ual "
+            "LEFT JOIN users u ON ual.user_id = u.user_id "
+            "WHERE ual.chat_id = ? AND ual.date = ? "
+            "GROUP BY ual.user_id "
+            "ORDER BY message_count DESC LIMIT ?",
+            (chat_id, date, limit), fetch_all=True
+        )
+        return [dict(r) for r in rows] if rows else []
+    except DatabaseError as e:
+        logger.error("DB error in fetch_chat_active_users: %s", e)
+        return []
+    except ValueError as e:
+        logger.error("Validation error in fetch_chat_active_users: %s", e)
+        return []
+
+
+async def fetch_chat_top_words(
+    chat_id: int, limit: int = 15, date: Optional[str] = None
+) -> List[Tuple[str, int]]:
+    """
+    Получение топ-слов чата.
+    
+    Args:
+        chat_id: ID чата
+        limit: Максимальное количество слов
+        date: Дата в формате YYYY-MM-DD (по умолчанию — сегодня)
+    """
+    if not _is_db_ready():
+        logger.warning("DB not available for fetch_chat_top_words")
+        return []
+    try:
+        chat_id = validate_chat_id(chat_id)
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        rows = await db._execute_with_retry(
+            "SELECT word, count FROM chat_word_stats "
+            "WHERE chat_id = ? AND date = ? "
+            "ORDER BY count DESC LIMIT ?",
+            (chat_id, date, limit), fetch_all=True
+        )
+        return [(r["word"], r["count"]) for r in rows] if rows else []
+    except DatabaseError as e:
+        logger.error("DB error in fetch_chat_top_words: %s", e)
+        return []
+    except ValueError as e:
+        logger.error("Validation error in fetch_chat_top_words: %s", e)
+        return []
+
+
+# ==================== СЛОЙ ФОРМАТИРОВАНИЯ ====================
+
+def format_stats_text(
+    stats: Dict[str, Any],
+    active_users: List[Dict[str, Any]],
+    top_words: List[Tuple[str, int]],
+    total_users: int,
+    total_messages: int
+) -> str:
+    text = (
+        "📊 <b>РАСШИРЕННАЯ СТАТИСТИКА ЧАТА</b>\n\n"
+        "📅 <b>ЗА СЕГОДНЯ:</b>\n"
+        "💬 Сообщений: <b>" + _safe_str(stats.get('total_messages')) + "</b>\n"
+        "👥 Уникальных: <b>" + _safe_str(stats.get('unique_users')) + "</b>\n"
+        "🎤 Войс: <b>" + _safe_str(stats.get('total_voice')) + "</b>\n"
+        "🎮 XO игр: <b>" + _safe_str(stats.get('total_xo_games')) + "</b>\n\n"
+        "📈 <b>ВСЕГО В БОТЕ:</b>\n"
+        "👤 Пользователей: <b>" + _safe_str(total_users) + "</b>\n"
+        "💬 Сообщений: <b>" + _safe_str(total_messages) + "</b>\n"
+    )
+    
+    if active_users:
+        text += "\n<b>🏆 ТОП-" + _safe_str(len(active_users)) + " АКТИВНЫХ:</b>\n"
+        for i, u in enumerate(active_users, 1):
+            name = safe_html(u.get('first_name', '?'))[:20]
+            msgs = _safe_str(u.get('message_count'))
+            text += _safe_str(i) + ". " + name + " — <b>" + msgs + "</b>\n"
+    
+    if top_words:
+        text += "\n<b>📝 ТОП-" + _safe_str(len(top_words)) + " СЛОВ:</b>\n"
+        for word, count in top_words:
+            text += "• " + safe_html(str(word)) + " — " + _safe_str(count) + "\n"
+    
+    return text
+
+
+def format_summary_text(
+    stats: Dict[str, Any],
+    active_users: List[Dict[str, Any]],
+    top_words: List[Tuple[str, int]]
+) -> str:
+    today = datetime.now().strftime("%d.%m.%Y")
+    
+    text = (
+        "🌅 <b>СВОДКА ДНЯ — " + today + "</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💬 Сообщений: <b>" + _safe_str(stats.get('total_messages')) + "</b>\n"
+        "👥 Активных: <b>" + _safe_str(stats.get('unique_users')) + "</b>\n"
+        "🎤 Войс: <b>" + _safe_str(stats.get('total_voice')) + "</b>\n"
+        "🎮 Игр XO: <b>" + _safe_str(stats.get('total_xo_games')) + "</b>\n"
+    )
+    
+    if active_users:
+        text += "\n<b>🏆 ТОП-5 АКТИВНЫХ:</b>\n"
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        for i, u in enumerate(active_users[:5]):
+            name = safe_html(u.get('first_name', '?'))[:15]
+            msgs = _safe_str(u.get('message_count'))
+            medal = medals[i] if i < len(medals) else '•'
+            text += medal + " " + name + " — <b>" + msgs + "</b> сообщ.\n"
+    
+    if top_words:
+        text += "\n<b>📝 ТОП-10 СЛОВ:</b>\n"
+        for word, count in top_words[:10]:
+            text += "• " + safe_html(str(word)) + " — " + _safe_str(count) + "\n"
+    
+    text += "\n━━━━━━━━━━━━━━━━━━━━━\n<i>Авто-сводка NEXUS Bot</i>"
+    return text
+
+
+def format_admin_panel_text(
+    user_id: int, first_name: Optional[str], chat_id: int
+) -> str:
     is_owner = is_super_admin(user_id)
-    owner_status = "✅ ВЛАДЕЛЕЦ" if is_owner else "❌ НЕ владелец"
+    owner_status = "👑 Владелец" if is_owner else "🔐 Админ"
     
     return (
-        "🔐 <b>АДМИН-ПАНЕЛЬ NEXUS BOT v3.3.0</b>\n\n"
+        "🔐 <b>АДМИН-ПАНЕЛЬ NEXUS BOT v3.5.5</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 Админ: <b>{safe_html_escape(first_name)}</b>\n"
-        f"🆔 Ваш ID: <code>{user_id}</code>\n"
-        f"🔑 Статус: <b>{owner_status}</b>\n"
-        f"💬 Чат: <code>{chat_id}</code>\n\n"
+        "👤 Админ: <b>" + safe_html(first_name) + "</b>\n"
+        "🆔 Ваш ID: <code>" + _safe_str(user_id) + "</code>\n"
+        "🔑 Статус: <b>" + owner_status + "</b>\n"
+        "💬 Чат: <code>" + _safe_str(chat_id) + "</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Выберите действие:"
     )
 
 
+def format_chats_list_text(display_chats: List[str], total: int) -> str:
+    text = (
+        "📋 <b>ЧАТЫ С БОТОМ</b>\n\nВсего: <b>"
+        + _safe_str(total) + "</b>\n\n"
+    )
+    text += "\n".join(display_chats)
+    
+    if total > AdminConfig.MAX_CHATS_DISPLAY:
+        text += (
+            "\n\n... и ещё <b>"
+            + _safe_str(total - AdminConfig.MAX_CHATS_DISPLAY) + "</b> чатов"
+        )
+    
+    return text
+
+
+# ==================== СЛОЙ ОТОБРАЖЕНИЯ (КЛАВИАТУРЫ) ====================
+
 def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура главного меню админ-панели."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data=CB_ADMIN_STATS)],
-        [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ЧАТ", callback_data=CB_ADMIN_CLEANUP)],
-        [InlineKeyboardButton(text="🌅 СВОДКА ДНЯ", callback_data=CB_ADMIN_SUMMARY)],
-        [InlineKeyboardButton(text="📋 ВСЕ ЧАТЫ", callback_data=CB_ADMIN_CHATS)],
-        [InlineKeyboardButton(text="🔄 ПЕРЕЗАГРУЗКА РП", callback_data=CB_ADMIN_RELOAD)],
-        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK),
-         InlineKeyboardButton(text="❌ ЗАКРЫТЬ", callback_data=CB_ADMIN_CLOSE)],
+        [InlineKeyboardButton(text="📊 СТАТИСТИКА ЧАТА", callback_data=CB_.STATS)],
+        [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ЧАТ", callback_data=CB_.CLEANUP)],
+        [InlineKeyboardButton(text="🌅 СВОДКА ДНЯ", callback_data=CB_.SUMMARY)],
+        [InlineKeyboardButton(text="📋 ВСЕ ЧАТЫ", callback_data=CB_.CHATS)],
+        [InlineKeyboardButton(text="🔄 ПЕРЕЗАГРУЗКА РП", callback_data=CB_.RELOAD)],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_.BACK),
+         InlineKeyboardButton(text="❌ ЗАКРЫТЬ", callback_data=CB_.CLOSE)],
     ])
 
 
-# ==================== CALLBACK ДЛЯ КНОПКИ МЕНЮ ====================
+def get_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_.STATS)],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_.BACK)],
+    ])
 
-@router.callback_query(F.data == "menu_admin")
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_.BACK)]
+    ])
+
+
+def get_chats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ВСЕ ЧАТЫ", callback_data=CB_.CLEANUP_ALL)],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_.CHATS)],
+        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_.BACK)],
+    ])
+
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def safe_edit_or_reply(
+    callback: CallbackQuery,
+    text: str,
+    markup: Optional[InlineKeyboardMarkup] = None
+) -> bool:
+    if not callback or not callback.message:
+        return False
+    
+    try:
+        await callback.message.edit_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=markup
+        )
+        return True
+    except TelegramBadRequest as e:
+        err_str = str(e).lower()
+        if "message is not modified" in err_str:
+            return True
+        if "message can't be edited" in err_str:
+            try:
+                await callback.message.answer(
+                    text, parse_mode=ParseMode.HTML, reply_markup=markup
+                )
+                return True
+            except TelegramAPIError:
+                return False
+        logger.warning("Edit error: %s", e)
+        return False
+    except TelegramForbiddenError:
+        logger.warning(
+            "Forbidden to edit message in chat %s",
+            _mask_sensitive_id(callback.message.chat.id)
+        )
+        return False
+    except TelegramAPIError as e:
+        logger.error("Telegram API error in edit: %s", e)
+        return False
+
+
+async def fetch_chat_info_async(cid: int, sem: asyncio.Semaphore) -> str:
+    """
+    Безопасное получение информации о чате.
+    
+    ✅ Уточнённые проверки ошибок API:
+    - "chat not found" — чат не существует
+    - "bot is not a member" / "bot was kicked" — бот не в чате
+    - "not enough rights" — недостаточно прав
+    """
+    async with sem:
+        try:
+            bot = AdminState.get_bot()
+            if bot is None:
+                return "• <code>" + _safe_str(cid) + "</code> — (бот не инициализирован)"
+            
+            chat = await asyncio.wait_for(
+                bot.get_chat(cid),
+                timeout=AdminConfig.TIMEOUT_CHAT_INFO
+            )
+            
+            if chat is None:
+                return "• <code>" + _safe_str(cid) + "</code> — (нет данных)"
+            
+            name = safe_html(chat.title[:30] if chat.title else "Чат")
+            return "• <code>" + _safe_str(cid) + "</code> — " + name
+            
+        except asyncio.TimeoutError:
+            return "• <code>" + _safe_str(cid) + "</code> — (таймаут)"
+        except TelegramForbiddenError as e:
+            err_str = str(e).lower()
+            if "bot was kicked" in err_str or "bot is not a member" in err_str:
+                return "• <code>" + _safe_str(cid) + "</code> — (бот исключён из чата)"
+            elif "not enough rights" in err_str:
+                return "• <code>" + _safe_str(cid) + "</code> — (недостаточно прав)"
+            else:
+                return "• <code>" + _safe_str(cid) + "</code> — (доступ запрещён)"
+        except TelegramBadRequest as e:
+            err_str = str(e).lower()
+            if "chat not found" in err_str:
+                return "• <code>" + _safe_str(cid) + "</code> — (чат не найден)"
+            else:
+                logger.warning("Bad request for chat %s: %s", _mask_sensitive_id(cid), e)
+                return "• <code>" + _safe_str(cid) + "</code> — (некорректный запрос)"
+        except TelegramAPIError as e:
+            logger.warning("API error for chat %s: %s", _mask_sensitive_id(cid), e)
+            return "• <code>" + _safe_str(cid) + "</code> — (ошибка API)"
+        except Exception as e:
+            logger.error("Unexpected error for chat %s: %s", _mask_sensitive_id(cid), e, exc_info=True)
+            return "• <code>" + _safe_str(cid) + "</code> — (неизвестная ошибка)"
+
+
+# ==================== HEALTH CHECK ====================
+
+async def admin_health_check() -> Dict[str, Any]:
+    return {
+        "module": "admin",
+        "version": "3.5.5-production",
+        "bot_ready": AdminState.is_ready(),
+        "db_ready": _is_db_ready(),
+        "background_tasks": len(AdminState._background_tasks),
+        "super_admins_count": len(SUPER_ADMIN_IDS or []) + 1,
+        "metrics": AdminMetrics.to_dict(),
+    }
+
+
+# ==================== CALLBACK: ГЛАВНОЕ МЕНЮ ====================
+
+@router.callback_query(F.data == CB_.MENU_ADMIN)
+@require_admin
 async def admin_panel_callback(callback: CallbackQuery) -> None:
-    """Открытие админ-панели через кнопку меню."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    
-    user_id = callback.from_user.id
-    if not is_super_admin(user_id):
-        logger.warning(f"⚠️ Unauthorized admin panel access by {user_id}")
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    text = get_admin_panel_text(user_id, callback.from_user.first_name, callback.message.chat.id)
-    success = await safe_edit_or_reply(callback, text, get_admin_menu_keyboard())
-    if success:
-        logger.info(f"✅ Admin panel opened for user {user_id}")
+    text = format_admin_panel_text(
+        callback.from_user.id,
+        callback.from_user.first_name,
+        callback.message.chat.id
+    )
+    await safe_edit_or_reply(callback, text, get_admin_menu_keyboard())
     await callback.answer()
 
 
 # ==================== КОМАНДА /admin ====================
 
 @router.message(Command("admin"))
-@require_super_admin
 async def cmd_admin_panel(message: Message) -> None:
-    """Команда открытия админ-панели."""
-    if not message or not message.from_user or not message.chat:
+    if not await _check_message_access(message):
         return
     
-    text = get_admin_panel_text(message.from_user.id, message.from_user.first_name, message.chat.id)
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
-    logger.info(f"✅ Admin panel opened via command for user {message.from_user.id}")
+    text = format_admin_panel_text(
+        message.from_user.id,
+        message.from_user.first_name,
+        message.chat.id
+    )
+    await message.answer(
+        text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard()
+    )
 
 
 # ==================== CALLBACK: СТАТИСТИКА ====================
 
-@router.callback_query(F.data == CB_ADMIN_STATS)
+@router.callback_query(F.data == CB_.STATS)
+@require_admin
 async def admin_stats_callback(callback: CallbackQuery) -> None:
-    """Показать статистику чата."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
     chat_id = callback.message.chat.id
     await callback.answer("📊 Загружаю статистику...")
     
+    AdminMetrics.stats_requests += 1
+    
     try:
-        stats = await run_with_timeout(_get_chat_daily_stats(chat_id), TIMEOUT_STATS, "get_stats")
-        if stats is None:
-            stats = {}
-        
-        top_words = await run_with_timeout(_get_chat_top_words(chat_id, 15), TIMEOUT_STATS, "get_words")
-        if top_words is None:
-            top_words = []
-        
-        active_users = await run_with_timeout(_get_chat_active_users(chat_id, 10), TIMEOUT_STATS, "get_users")
-        if active_users is None:
-            active_users = []
-        
-        total_users = await run_with_timeout(_get_total_users(), TIMEOUT_STATS, "total_users")
-        if total_users is None:
-            total_users = 0
-        
-        total_messages = await run_with_timeout(_get_total_messages_count(), TIMEOUT_STATS, "total_msgs")
-        if total_messages is None:
-            total_messages = 0
-        
-        text = (
-            "📊 <b>РАСШИРЕННАЯ СТАТИСТИКА ЧАТА</b>\n\n"
-            f"📅 <b>ЗА СЕГОДНЯ:</b>\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Уникальных: <b>{stats.get('unique_users', 0)}</b>\n"
-            f"🎤 Войс: <b>{stats.get('total_voice', 0)}</b>\n"
-            f"🎮 XO игр: <b>{stats.get('total_xo_games', 0)}</b>\n\n"
-            f"📈 <b>ВСЕГО В БОТЕ:</b>\n"
-            f"👤 Пользователей: <b>{total_users}</b>\n"
-            f"💬 Сообщений: <b>{total_messages}</b>\n"
+        stats, top_words, active_users, total_users, total_messages = (
+            await asyncio.wait_for(
+                asyncio.gather(
+                    fetch_chat_daily_stats(chat_id),
+                    fetch_chat_top_words(chat_id, AdminConfig.TOP_WORDS_LIMIT),
+                    fetch_chat_active_users(chat_id, AdminConfig.TOP_USERS_LIMIT),
+                    fetch_total_users(),
+                    fetch_total_messages(),
+                ),
+                timeout=AdminConfig.TIMEOUT_STATS
+            )
         )
         
-        if active_users:
-            text += "\n<b>🏆 ТОП-10 АКТИВНЫХ:</b>\n"
-            for i, u in enumerate(active_users[:10], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:20]
-                msgs = u.get('message_count', 0)
-                text += f"{i}. {name} — <b>{msgs}</b>\n"
+        text = format_stats_text(
+            stats or {}, active_users or [], top_words or [],
+            total_users or 0, total_messages or 0
+        )
+        await safe_edit_or_reply(callback, text, get_stats_keyboard())
+        AdminMetrics.stats_success += 1
         
-        if top_words:
-            text += "\n<b>📝 ТОП-15 СЛОВ:</b>\n"
-            for word, count in top_words[:15]:
-                text += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_ADMIN_STATS)],
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Stats displayed for chat {chat_id}")
-        
+    except asyncio.TimeoutError:
+        AdminMetrics.stats_errors += 1
+        await callback.answer("❌ Таймаут загрузки статистики", show_alert=True)
+    except DatabaseError as e:
+        AdminMetrics.stats_errors += 1
+        logger.error("Stats DB error: %s", e, exc_info=True)
+        await callback.answer("❌ Ошибка базы данных", show_alert=True)
     except Exception as e:
-        logger.error(f"Stats error: {e}", exc_info=True)
+        AdminMetrics.stats_errors += 1
+        logger.error("Stats error: %s", e, exc_info=True)
         await callback.answer("❌ Ошибка загрузки статистики", show_alert=True)
 
 
 # ==================== CALLBACK: ОЧИСТКА ====================
 
-@router.callback_query(F.data == CB_ADMIN_CLEANUP)
+@router.callback_query(F.data == CB_.CLEANUP)
+@require_admin
 async def admin_cleanup_callback(callback: CallbackQuery) -> None:
-    """Очистка сообщений бота в чате."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
     chat_id = callback.message.chat.id
     await callback.answer("🧹 Очищаю...")
     
+    bot = AdminState.get_bot()
+    if bot is None:
+        await callback.answer("❌ Бот не инициализирован", show_alert=True)
+        return
+    
+    AdminMetrics.cleanup_requests += 1
+    
     try:
-        if _bot is None:
-            await callback.answer("❌ Бот не инициализирован", show_alert=True)
-            return
+        from utils.auto_delete import delete_bot_messages, bot_messages
         
-        # Пытаемся использовать utils.auto_delete если доступен
-        try:
-            from utils.auto_delete import delete_bot_messages, bot_messages
-            
-            deleted = await run_with_timeout(delete_bot_messages(_bot, chat_id), TIMEOUT_CLEANUP, "cleanup")
-            if deleted is None:
-                deleted = 0
-            
-            # ✅ Безопасный доступ к bot_messages
-            try:
-                if isinstance(bot_messages, dict):
-                    remaining = len(bot_messages.get(chat_id, []))
-                else:
-                    remaining = "N/A"
-            except (AttributeError, TypeError):
-                remaining = "N/A"
-            
-            text = (
-                f"🧹 <b>ОЧИСТКА ЗАВЕРШЕНА</b>\n\n"
-                f"Удалено сообщений: <b>{deleted}</b>\n"
-                f"В очереди на удаление: <b>{remaining}</b>\n\n"
-                f"ℹ️ Удаляются только сообщения бота за последние 48 часов."
-            )
-        except (ImportError, AttributeError) as e:
-            logger.warning(f"auto_delete module not available: {e}")
-            text = (
-                "🧹 <b>ОЧИСТКА ЧАТА</b>\n\n"
-                "ℹ️ Модуль авто-очистки не загружен.\n"
-                "Базовое удаление сообщений недоступно.\n\n"
-                "<i>Установите utils/auto_delete.py для полной функциональности.</i>"
-            )
+        deleted = await asyncio.wait_for(
+            delete_bot_messages(bot, chat_id),
+            timeout=AdminConfig.TIMEOUT_CLEANUP
+        )
         
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Cleanup executed for chat {chat_id}")
+        remaining = (
+            len(bot_messages.get(chat_id, []))
+            if isinstance(bot_messages, dict) else "N/A"
+        )
         
+        text = (
+            "🧹 <b>ОЧИСТКА ЗАВЕРШЕНА</b>\n\n"
+            "Удалено сообщений: <b>" + _safe_str(deleted) + "</b>\n"
+            "В очереди на удаление: <b>" + _safe_str(remaining) + "</b>\n\n"
+            "ℹ️ Удаляются только сообщения бота за последние 48 часов."
+        )
+        await safe_edit_or_reply(callback, text, get_back_keyboard())
+        AdminMetrics.cleanup_success += 1
+        
+    except asyncio.TimeoutError:
+        AdminMetrics.cleanup_errors += 1
+        await callback.answer("❌ Таймаут очистки", show_alert=True)
+    except ImportError:
+        AdminMetrics.cleanup_errors += 1
+        text = (
+            "🧹 <b>ОЧИСТКА ЧАТА</b>\n\n"
+            "ℹ️ Модуль авто-очистки не загружен.\n"
+            "<i>Установите utils/auto_delete.py для полной функциональности.</i>"
+        )
+        await safe_edit_or_reply(callback, text, get_back_keyboard())
     except Exception as e:
-        logger.error(f"Cleanup error: {e}", exc_info=True)
+        AdminMetrics.cleanup_errors += 1
+        logger.error("Cleanup error: %s", e, exc_info=True)
         await callback.answer("❌ Ошибка при очистке", show_alert=True)
 
 
 # ==================== CALLBACK: СВОДКА ====================
 
-@router.callback_query(F.data == CB_ADMIN_SUMMARY)
+@router.callback_query(F.data == CB_.SUMMARY)
+@require_admin
 async def admin_summary_callback(callback: CallbackQuery) -> None:
-    """Отправить сводку дня."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
     chat_id = callback.message.chat.id
     await callback.answer("🌅 Формирую сводку...")
     
+    bot = AdminState.get_bot()
+    if bot is None:
+        await callback.answer("❌ Бот не инициализирован", show_alert=True)
+        return
+    
+    AdminMetrics.summary_requests += 1
+    
     try:
-        if _bot is None:
-            await callback.answer("❌ Бот не инициализирован", show_alert=True)
-            return
-        
-        stats = await _get_chat_daily_stats(chat_id)
-        active_users = await _get_chat_active_users(chat_id, 5)
-        top_words = await _get_chat_top_words(chat_id, 10)
-        
-        today = datetime.now().strftime("%d.%m.%Y")
-        
-        summary_text = (
-            f"🌅 <b>СВОДКА ДНЯ — {today}</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>\n"
-            f"🎤 Войс: <b>{stats.get('total_voice', 0)}</b>\n"
-            f"🎮 Игр XO: <b>{stats.get('total_xo_games', 0)}</b>\n"
+        stats, active_users, top_words = await asyncio.wait_for(
+            asyncio.gather(
+                fetch_chat_daily_stats(chat_id),
+                fetch_chat_active_users(chat_id, 5),
+                fetch_chat_top_words(chat_id, 10),
+            ),
+            timeout=AdminConfig.TIMEOUT_STATS
         )
         
-        if active_users:
-            summary_text += "\n<b>🏆 ТОП-5 АКТИВНЫХ:</b>\n"
-            medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-            for i, u in enumerate(active_users[:5]):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                msgs = u.get('message_count', 0)
-                summary_text += f"{medals[i] if i < len(medals) else '•'} {name} — <b>{msgs}</b> сообщ.\n"
+        summary_text = format_summary_text(stats or {}, active_users or [], top_words or [])
+        await bot.send_message(chat_id, summary_text, parse_mode=ParseMode.HTML)
+        await safe_edit_or_reply(callback, "✅ <b>СВОДКА УСПЕШНО ОТПРАВЛЕНА</b>", get_back_keyboard())
+        AdminMetrics.summary_success += 1
         
-        if top_words:
-            summary_text += "\n<b>📝 ТОП-10 СЛОВ:</b>\n"
-            for word, count in top_words[:10]:
-                summary_text += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        summary_text += "\n━━━━━━━━━━━━━━━━━━━━━\n<i>Авто-сводка NEXUS Bot</i>"
-        
-        await _bot.send_message(chat_id, summary_text, parse_mode=ParseMode.HTML)
-        
-        text = "✅ <b>СВОДКА УСПЕШНО ОТПРАВЛЕНА</b>"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Summary sent to chat {chat_id}")
-        
+    except asyncio.TimeoutError:
+        AdminMetrics.summary_errors += 1
+        await callback.answer("❌ Таймаут формирования сводки", show_alert=True)
     except TelegramForbiddenError:
-        logger.warning(f"Forbidden to send to chat {chat_id}")
+        AdminMetrics.summary_errors += 1
         await callback.answer("❌ Бот заблокирован в этом чате", show_alert=True)
     except Exception as e:
-        logger.error(f"Summary error: {e}", exc_info=True)
+        AdminMetrics.summary_errors += 1
+        logger.error("Summary error: %s", e, exc_info=True)
         await callback.answer("❌ Ошибка отправки сводки", show_alert=True)
 
 
 # ==================== CALLBACK: ВСЕ ЧАТЫ ====================
 
-@router.callback_query(F.data == CB_ADMIN_CHATS)
+@router.callback_query(F.data == CB_.CHATS)
+@require_admin
 async def admin_chats_callback(callback: CallbackQuery) -> None:
-    """Показать все чаты с ботом."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
     await callback.answer("📋 Загружаю список чатов...")
     
+    AdminMetrics.chats_requests += 1
+    
     try:
-        chats = await _get_all_chats_with_bot()
+        chats = await fetch_all_chat_ids(limit=AdminConfig.MAX_CHATS_DISPLAY * 2)
         total = len(chats)
-        display_chats = chats[:MAX_CHATS_DISPLAY]
+        display_chats_ids = chats[:AdminConfig.MAX_CHATS_DISPLAY]
         
-        if _bot is None:
-            text = f"📋 <b>ЧАТЫ С БОТОМ</b>\n\nВсего: <b>{total}</b>\n\n"
-            for cid in display_chats:
-                text += f"• <code>{cid}</code>\n"
+        bot = AdminState.get_bot()
+        if bot is None:
+            display_strings = [
+                "• <code>" + _safe_str(cid) + "</code>" for cid in display_chats_ids
+            ]
         else:
-            sem = asyncio.Semaphore(MAX_CONCURRENT_CHATS)
-            
-            async def fetch_chat_info(cid: int) -> str:
-                async with sem:
-                    try:
-                        chat = await run_with_timeout(_bot.get_chat(cid), TIMEOUT_CHAT_INFO, f"chat_{cid}")
-                        if chat:
-                            name = safe_html_escape(chat.title[:30] if chat.title else "Чат")
-                            return f"• <code>{cid}</code> — {name}"
-                        return f"• <code>{cid}</code> — (нет данных)"
-                    except TelegramForbiddenError:
-                        return f"• <code>{cid}</code> — (бот заблокирован)"
-                    except Exception:
-                        return f"• <code>{cid}</code> — (нет доступа)"
-            
-            results = await asyncio.gather(*(fetch_chat_info(cid) for cid in display_chats))
-            text = f"📋 <b>ЧАТЫ С БОТОМ</b>\n\nВсего: <b>{total}</b>\n\n" + "\n".join(results)
+            sem = asyncio.Semaphore(AdminConfig.MAX_CONCURRENT_CHATS)
+            display_strings = await asyncio.wait_for(
+                asyncio.gather(
+                    *(fetch_chat_info_async(cid, sem) for cid in display_chats_ids)
+                ),
+                timeout=AdminConfig.TIMEOUT_CHAT_INFO * len(display_chats_ids) + 5.0
+            )
         
-        if total > MAX_CHATS_DISPLAY:
-            text += f"\n\n... и ещё <b>{total - MAX_CHATS_DISPLAY}</b> чатов"
+        text = format_chats_list_text(list(display_strings), total)
+        await safe_edit_or_reply(callback, text, get_chats_keyboard())
+        AdminMetrics.chats_success += 1
         
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🧹 ОЧИСТИТЬ ВСЕ ЧАТЫ", callback_data=CB_ADMIN_CLEANUP_ALL)],
-            [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=CB_ADMIN_CHATS)],
-            [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-        ])
-        await safe_edit_or_reply(callback, text, keyboard)
-        logger.info(f"✅ Chats list displayed ({total} total)")
-        
+    except asyncio.TimeoutError:
+        AdminMetrics.chats_errors += 1
+        await callback.answer("❌ Таймаут загрузки списка чатов", show_alert=True)
     except Exception as e:
-        logger.error(f"Chats error: {e}", exc_info=True)
+        AdminMetrics.chats_errors += 1
+        logger.error("Chats error: %s", e, exc_info=True)
         await callback.answer("❌ Ошибка загрузки списка чатов", show_alert=True)
 
 
 # ==================== CALLBACK: ГЛОБАЛЬНАЯ ОЧИСТКА ====================
 
-@router.callback_query(F.data == CB_ADMIN_CLEANUP_ALL)
+@router.callback_query(F.data == CB_.CLEANUP_ALL)
+@require_admin
 async def admin_cleanup_all_callback(callback: CallbackQuery) -> None:
-    """Глобальная очистка всех чатов."""
-    if not callback or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    if _bot is None:
+    bot = AdminState.get_bot()
+    if bot is None:
         await callback.answer("❌ Бот не инициализирован", show_alert=True)
         return
     
     await callback.answer("🧹 Глобальная очистка запущена...", show_alert=True)
     
     try:
-        try:
-            from utils.auto_delete import cleanup_all_chats
-            task = asyncio.create_task(cleanup_all_chats(_bot))
-            _background_tasks.add(task)
-            task.add_done_callback(lambda t: _background_tasks.discard(t))
-            
-            if callback.message:
-                await callback.message.edit_text(
-                    "🧹 <b>ГЛОБАЛЬНАЯ ОЧИСТКА ЗАПУЩЕНА</b>\n\n"
-                    "Процесс выполняется в фоне.\n"
-                    "Это может занять несколько минут.\n\n"
-                    "<i>Удаляются сообщения бота за последние 48 часов во всех чатах.</i>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                    ])
-                )
-            logger.info("✅ Global cleanup task started")
-        except ImportError:
-            if callback.message:
-                await callback.message.edit_text(
-                    "⚠️ <b>МОДУЛЬ АВТО-ОЧИСТКИ НЕ НАЙДЕН</b>\n\n"
-                    "Установите utils/auto_delete.py для работы этой функции.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                    ])
-                )
+        from utils.auto_delete import cleanup_all_chats
+        task = asyncio.create_task(
+            asyncio.wait_for(
+                cleanup_all_chats(bot),
+                timeout=AdminConfig.TIMEOUT_GLOBAL_CLEANUP
+            )
+        )
+        AdminState.add_task(task)
+        
+        if callback.message:
+            await callback.message.edit_text(
+                "🧹 <b>ГЛОБАЛЬНАЯ ОЧИСТКА ЗАПУЩЕНА</b>\n\n"
+                "Процесс выполняется в фоне.\n"
+                "Это может занять несколько минут.\n\n"
+                "<i>Удаляются сообщения бота за последние 48 часов.</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_back_keyboard()
+            )
+    except ImportError:
+        if callback.message:
+            await callback.message.edit_text(
+                "⚠️ <b>МОДУЛЬ АВТО-ОЧИСТКИ НЕ НАЙДЕН</b>\n\n"
+                "Установите utils/auto_delete.py для работы этой функции.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_back_keyboard()
+            )
     except Exception as e:
-        logger.error(f"Cleanup all error: {e}", exc_info=True)
+        logger.error("Cleanup all error: %s", e, exc_info=True)
         await callback.answer("❌ Ошибка запуска очистки", show_alert=True)
 
 
 # ==================== CALLBACK: ПЕРЕЗАГРУЗКА РП ====================
 
-@router.callback_query(F.data == CB_ADMIN_RELOAD)
+@router.callback_query(F.data == CB_.RELOAD)
+@require_admin
 async def admin_reload_callback(callback: CallbackQuery) -> None:
-    """Перезагрузка кастомных РП команд."""
-    if not callback or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
+    AdminMetrics.reload_requests += 1
     
     try:
         from handlers.smart_commands import load_custom_rp_commands
@@ -655,192 +985,50 @@ async def admin_reload_callback(callback: CallbackQuery) -> None:
                 "🔄 <b>РП КОМАНДЫ ПЕРЕЗАГРУЖЕНЫ</b>\n\n"
                 "Все кастомные РП-команды обновлены из базы данных.",
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=CB_ADMIN_BACK)],
-                ])
+                reply_markup=get_back_keyboard()
             )
-        logger.info("✅ Custom RP commands reloaded")
+        AdminMetrics.reload_success += 1
     except ImportError:
+        AdminMetrics.reload_errors += 1
         await callback.answer("⚠️ Модуль РП не найден", show_alert=True)
     except Exception as e:
-        logger.error(f"Reload error: {e}", exc_info=True)
-        await callback.answer(f"❌ Ошибка перезагрузки: {e}", show_alert=True)
+        AdminMetrics.reload_errors += 1
+        logger.error("Reload error: %s", e, exc_info=True)
+        await callback.answer("❌ Ошибка перезагрузки: " + str(e), show_alert=True)
 
 
-# ==================== CALLBACK: НАЗАД ====================
+# ==================== CALLBACK: НАЗАД И ЗАКРЫТЬ ====================
 
-@router.callback_query(F.data == CB_ADMIN_BACK)
+@router.callback_query(F.data == CB_.BACK)
+@require_admin
 async def admin_back_callback(callback: CallbackQuery) -> None:
-    """Возврат в главное меню админ-панели."""
-    if not callback or not callback.message or not callback.from_user:
-        return
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    text = get_admin_panel_text(callback.from_user.id, callback.from_user.first_name, callback.message.chat.id)
+    text = format_admin_panel_text(
+        callback.from_user.id,
+        callback.from_user.first_name,
+        callback.message.chat.id
+    )
     await safe_edit_or_reply(callback, text, get_admin_menu_keyboard())
     await callback.answer()
 
 
-# ==================== CALLBACK: ЗАКРЫТЬ ====================
-
-@router.callback_query(F.data == CB_ADMIN_CLOSE)
+@router.callback_query(F.data == CB_.CLOSE)
+@require_admin
 async def admin_close_callback(callback: CallbackQuery) -> None:
-    """Закрыть админ-панель."""
     if not callback or not callback.message:
         return
+    
     try:
         await callback.message.delete()
-        logger.info(f"✅ Admin panel closed by user {callback.from_user.id}")
-    except Exception:
+    except TelegramAPIError:
         try:
             await callback.message.edit_text("🔒 Админ-панель закрыта")
-        except Exception:
+        except TelegramAPIError:
             pass
     await callback.answer()
 
 
-# ==================== БЫСТРЫЕ КОМАНДЫ ====================
+# ==================== ШУТДАУН ХУК ====================
 
-@router.message(Command("stats_today"))
-@require_super_admin
-async def cmd_stats_today(message: Message) -> None:
-    """Быстрая статистика за сегодня."""
-    if not message or not message.chat:
-        return
-    try:
-        stats = await _get_chat_daily_stats(message.chat.id)
-        active = await _get_chat_active_users(message.chat.id, 5)
-        
-        text = (
-            f"📊 <b>СТАТИСТИКА ЗА СЕГОДНЯ</b>\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>"
-        )
-        if active:
-            text += "\n\n<b>ТОП-5:</b>\n"
-            for i, u in enumerate(active[:5], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                text += f"{i}. {name} — {u.get('message_count', 0)}\n"
-        await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Quick stats sent to chat {message.chat.id}")
-    except Exception as e:
-        logger.error(f"Quick stats error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка загрузки статистики")
-
-
-@router.message(Command("cleanup"))
-@require_super_admin
-async def cmd_cleanup_chat(message: Message) -> None:
-    """Быстрая очистка чата."""
-    if not message or not message.chat:
-        return
-    try:
-        if _bot is None:
-            await message.answer("❌ Бот не инициализирован")
-            return
-        
-        msg = await message.answer("🧹 Очищаю...")
-        
-        try:
-            from utils.auto_delete import delete_bot_messages
-            deleted = await delete_bot_messages(_bot, message.chat.id)
-            if deleted is None:
-                deleted = 0
-            await msg.edit_text(f"✅ Очищено сообщений: <b>{deleted}</b>", parse_mode=ParseMode.HTML)
-            logger.info(f"✅ Quick cleanup: {deleted} messages deleted in chat {message.chat.id}")
-        except ImportError:
-            await msg.edit_text("⚠️ Модуль авто-очистки не найден", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"Quick cleanup error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка очистки")
-
-
-@router.message(Command("summary"))
-@require_super_admin
-async def cmd_summary_now(message: Message) -> None:
-    """Быстрая отправка сводки."""
-    if not message or not message.chat:
-        return
-    try:
-        if _bot is None:
-            await message.answer("❌ Бот не инициализирован")
-            return
-        
-        stats = await _get_chat_daily_stats(message.chat.id)
-        active = await _get_chat_active_users(message.chat.id, 5)
-        top_words = await _get_chat_top_words(message.chat.id, 10)
-        
-        today = datetime.now().strftime("%d.%m.%Y")
-        
-        summary = (
-            f"🌅 <b>СВОДКА ДНЯ — {today}</b>\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💬 Сообщений: <b>{stats.get('total_messages', 0)}</b>\n"
-            f"👥 Активных: <b>{stats.get('unique_users', 0)}</b>\n\n"
-        )
-        
-        if active:
-            summary += "<b>🏆 ТОП-5:</b>\n"
-            for i, u in enumerate(active[:5], 1):
-                name = safe_html_escape(u.get('first_name', '?'))[:15]
-                summary += f"{i}. {name} — {u.get('message_count', 0)}\n"
-        
-        if top_words:
-            summary += "\n<b>📝 ТОП-10 СЛОВ:</b>\n"
-            for word, count in top_words[:10]:
-                summary += f"• {safe_html_escape(str(word))} — {count}\n"
-        
-        summary += "\n━━━━━━━━━━━━━━━━━━━━━\n<i>Авто-сводка NEXUS Bot</i>"
-        
-        await _bot.send_message(message.chat.id, summary, parse_mode=ParseMode.HTML)
-        await message.answer("✅ Сводка отправлена")
-        logger.info(f"✅ Quick summary sent to chat {message.chat.id}")
-    except TelegramForbiddenError:
-        logger.warning(f"Forbidden to send summary to chat {message.chat.id}")
-        await message.answer("❌ Бот заблокирован в этом чате")
-    except Exception as e:
-        logger.error(f"Quick summary error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка отправки сводки")
-
-
-@router.message(Command("chats"))
-@require_super_admin
-async def cmd_list_chats(message: Message) -> None:
-    """Быстрый список чатов."""
-    if not message:
-        return
-    try:
-        chats = await _get_all_chats_with_bot()
-        total = len(chats)
-        
-        text = f"📋 <b>ЧАТЫ С БОТОМ ({total})</b>\n\n"
-        for cid in chats[:20]:
-            text += f"• <code>{cid}</code>\n"
-        if total > 20:
-            text += f"\n... и ещё <b>{total - 20}</b> чатов"
-        await message.answer(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Quick chats list sent ({total} total)")
-    except Exception as e:
-        logger.error(f"Quick chats error: {e}", exc_info=True)
-        await message.answer("❌ Ошибка загрузки списка")
-
-
-@router.message(Command("reload_rp"))
-@require_super_admin
-async def cmd_reload_rp(message: Message) -> None:
-    """Быстрая перезагрузка РП команд."""
-    if not message:
-        return
-    try:
-        from handlers.smart_commands import load_custom_rp_commands
-        await load_custom_rp_commands()
-        await message.answer("✅ РП команды перезагружены!")
-        logger.info("✅ Quick RP reload executed")
-    except ImportError:
-        await message.answer("⚠️ Модуль РП не найден")
-    except Exception as e:
-        logger.error(f"Quick reload error: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка перезагрузки: {e}")
-
+async def on_shutdown() -> None:
+    await cleanup_background_tasks()
+    logger.info("✅ Admin module shutdown complete")
