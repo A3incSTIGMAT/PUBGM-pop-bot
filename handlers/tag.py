@@ -1,290 +1,726 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ============================================
+# =============================================================================
 # ФАЙЛ: handlers/tag.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.4.1-production (исправленная)
 # ОПИСАНИЕ: Модуль тегов — /all, /tag, /tagrole
-# ИСПРАВЛЕНИЯ: Защита от memory leak, обработка ошибок, конфигурируемые параметры
-# ============================================
+# ИСПРАВЛЕНИЯ v2.4.1:
+#   ✅ Исправлена синтаксическая ошибка в ConfirmCallback.parse (строка 68)
+#   ✅ Исправлена синтаксическая ошибка в _verify_admin_check (строка 249)
+#   ✅ Исправлено обращение к signed_data (строка 252)
+#   ✅ Устранено двойное использование time.time() в cmd_all
+#   ✅ Устранено двойное использование time.time() в start_all_callback
+#   ✅ Удалён неиспользуемый импорт cast
+# =============================================================================
 
 import asyncio
+import hashlib
+import hmac
 import html
 import logging
 import re
 import time
-from typing import Dict, List, Optional, Set
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, User
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramForbiddenError,
+    TelegramBadRequest,
+    TelegramRetryAfter
+)
 
 from database import db, DatabaseError
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ==================== КОНСТАНТЫ ====================
+# =============================================================================
+# КОНСТАНТЫ
+# =============================================================================
 
-# Можно вынести в config.py
-TAG_COOLDOWN = 300  # 5 минут между общими сборами
-BATCH_SIZE = 10  # Количество упоминаний в одном сообщении
-BATCH_DELAY = 1.0  # Задержка между батчами
-MAX_MEMBERS_TO_FETCH = 200  # Максимальное количество участников для сбора
-COOLDOWN_CLEANUP_INTERVAL = 3600  # Очистка кулдаунов раз в час
+# Тайминги и лимиты
+TAG_COOLDOWN: int = 300
+BATCH_SIZE: int = 10
+BATCH_DELAY: float = 1.0
+MAX_MEMBERS_TO_FETCH: int = 200
 
-# ==================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ ====================
+# Таймауты и повторные попытки
+API_TIMEOUT: float = 30.0
+MAX_RETRIES: int = 3
 
-_cooldown_storage: Dict[str, float] = {}
-_cooldown_lock = asyncio.Lock()
+# Управление памятью
+MAX_COOLDOWN_ENTRIES: int = 10000
+COOLDOWN_CLEANUP_INTERVAL: int = 3600
+
+# Безопасность
+_ADMIN_CHECK_SECRET: bytes = hashlib.sha256(b"tag_module_admin_check_v2").digest()
+_ADMIN_CHECK_TTL: int = 600
+
+# Префиксы callback_data для парсинга
+_CALLBACK_PREFIX_CONFIRM: str = "confirm_all_"
+_CALLBACK_PREFIX_CANCEL: str = "cancel_all"
+
+
+# =============================================================================
+# ТИПЫ ДАННЫХ
+# =============================================================================
+
+@dataclass(frozen=True)
+class ConfirmCallback:
+    """Структурированные данные для подтверждения общего сбора."""
+    chat_id: int
+    timestamp: float
+    signature: str
+    
+    @classmethod
+    def parse(cls, data: str) -> Optional["ConfirmCallback"]:
+        """
+        Надёжный парсер callback_data для confirm_all.
+        
+        Формат: confirm_all_{chat_id}_{timestamp}:{signature}
+        
+        Args:
+            data: Строка callback_data для парсинга
+            
+        Returns:
+            ConfirmCallback при успешном парсинге, None при ошибке
+        """
+        if not data or not isinstance(data, str):
+            return None
+        
+        try:
+            if not data.startswith(_CALLBACK_PREFIX_CONFIRM):
+                return None
+            
+            # Удаляем префикс
+            rest = data[len(_CALLBACK_PREFIX_CONFIRM):]
+            if not rest:
+                return None
+            
+            # Находим разделитель между chat_id и подписью
+            sep_idx = rest.find('_')
+            if sep_idx == -1 or sep_idx == 0:
+                return None
+            
+            # Парсим chat_id
+            chat_id_str = rest[:sep_idx]
+            if not chat_id_str.isdigit():
+                return None
+            chat_id = int(chat_id_str)
+            
+            # Остальное — подпись в формате timestamp:signature
+            signed_part = rest[sep_idx + 1:]
+            if ':' not in signed_part:
+                return None
+            
+            # Разделяем только по первому двоеточию
+            colon_idx = signed_part.find(':')
+            if colon_idx == -1 or colon_idx == 0:
+                return None
+            
+            timestamp_str = signed_part[:colon_idx]
+            signature = signed_part[colon_idx + 1:]
+            
+            # Валидация timestamp
+            if not timestamp_str or not timestamp_str.isdigit():
+                return None
+            timestamp = float(timestamp_str)
+            
+            # Базовая валидация подписи
+            if not signature or len(signature) != 16:
+                return None
+            if not all(c in '0123456789abcdef' for c in signature):
+                return None
+            if timestamp <= 0:
+                return None
+                
+            return cls(chat_id=chat_id, timestamp=timestamp, signature=signature)
+            
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return None
+    
+    def to_callback_data(self) -> str:
+        """Генерация callback_data из объекта."""
+        return (
+            _CALLBACK_PREFIX_CONFIRM +
+            str(self.chat_id) + '_' +
+            str(int(self.timestamp)) + ':' + self.signature
+        )
+
+
+# =============================================================================
+# ГЛОБАЛЬНОЕ СОСТОЯНИЕ
+# =============================================================================
+
+_cooldown_storage: OrderedDict[str, float] = OrderedDict()
+_cooldown_lock: asyncio.Lock = asyncio.Lock()
+_cleanup_task: Optional[asyncio.Task] = None
+_shutdown_event: asyncio.Event = asyncio.Event()
+
+
+# =============================================================================
+# УПРАВЛЕНИЕ ФОНОВЫМИ ЗАДАЧАМИ
+# =============================================================================
+
+async def start_background_tasks() -> None:
+    """Запуск фоновых задач модуля."""
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        _cleanup_task = asyncio.create_task(_cleanup_loop())
+        logger.info("🔄 Tag module cleanup task started")
+
+
+async def stop_background_tasks() -> None:
+    """Остановка фоновых задач модуля."""
+    global _cleanup_task
+    if _cleanup_task and not _cleanup_task.done():
+        _shutdown_event.set()
+        try:
+            await asyncio.wait_for(_cleanup_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if _cleanup_task:
+                _cleanup_task.cancel()
+                try:
+                    await _cleanup_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            _cleanup_task = None
+            _shutdown_event.clear()
+            logger.info("🛑 Tag module cleanup task stopped")
+
+
+async def _cleanup_loop() -> None:
+    """Фоновый цикл очистки устаревших кулдаунов."""
+    while not _shutdown_event.is_set():
+        try:
+            await asyncio.sleep(COOLDOWN_CLEANUP_INTERVAL)
+            if _shutdown_event.is_set():
+                break
+            await _cleanup_expired_cooldowns()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("❌ Cleanup loop error: %s", e, exc_info=True)
 
 
 async def _cleanup_expired_cooldowns() -> None:
-    """Периодическая очистка истекших кулдаунов."""
-    while True:
-        await asyncio.sleep(COOLDOWN_CLEANUP_INTERVAL)
-        current_time = time.time()
-        async with _cooldown_lock:
-            expired = [
-                key for key, timestamp in _cooldown_storage.items()
-                if current_time - timestamp > TAG_COOLDOWN * 2
-            ]
-            for key in expired:
-                del _cooldown_storage[key]
-            if expired:
-                logger.debug(f"Cleaned up {len(expired)} expired cooldowns")
+    """Очистка истекших кулдаунов с защитой от утечек памяти."""
+    current_time = time.time()
+    expired_keys: List[str] = []
+    
+    async with _cooldown_lock:
+        # Поиск истекших записей
+        for key, timestamp in list(_cooldown_storage.items()):
+            if current_time - timestamp > TAG_COOLDOWN:
+                expired_keys.append(key)
+        
+        # Удаление истекших
+        for key in expired_keys:
+            _cooldown_storage.pop(key, None)
+        
+        # LRU: удаление самых старых при переполнении
+        while len(_cooldown_storage) > MAX_COOLDOWN_ENTRIES:
+            _cooldown_storage.popitem(last=False)
+        
+        if expired_keys:
+            logger.debug("🧹 Cleaned %d expired cooldowns", len(expired_keys))
 
 
-# Запускаем фоновую очистку
-asyncio.create_task(_cleanup_expired_cooldowns())
-
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# =============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =============================================================================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасное экранирование HTML."""
+    """Безопасное экранирование строки для HTML."""
     if text is None:
         return ""
     try:
         return html.escape(str(text))
+    except Exception as e:
+        logger.warning("⚠️ HTML escape failed: %s", e)
+        return str(text) if isinstance(text, str) else ""
+
+
+def _safe_int(value: Optional[Union[int, str]], default: int = 0) -> int:
+    """Безопасное преобразование в int с дефолтным значением."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_str(value: Optional[object]) -> str:
+    """Безопасное преобразование в str."""
+    if value is None:
+        return ""
+    try:
+        return str(value)
     except Exception:
         return ""
 
 
-async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
+async def _safe_get_chat_member(
+    bot: Optional[Bot],
+    chat_id: int,
+    user_id: int
+) -> Optional[object]:
     """
-    Проверяет, является ли пользователь администратором чата.
+    Безопасное получение информации о участнике чата.
     
-    Args:
-        bot: Экземпляр бота
-        user_id: ID пользователя
-        chat_id: ID чата
-        
     Returns:
-        True если администратор, иначе False
+        Объект членства или None при ошибке
     """
     if bot is None:
-        logger.warning("Bot is None in is_admin_in_chat")
+        return None
+    
+    try:
+        return await asyncio.wait_for(
+            bot.get_chat_member(chat_id, user_id),
+            timeout=API_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout getting chat member %s in %s", user_id, chat_id)
+        return None
+    except TelegramAPIError as e:
+        logger.warning("⚠️ API error getting chat member: %s", e)
+        return None
+    except Exception as e:
+        logger.error("❌ Unexpected error getting chat member: %s", e, exc_info=True)
+        return None
+
+
+async def is_admin_in_chat(bot: Optional[Bot], user_id: int, chat_id: int) -> bool:
+    """Проверяет, является ли пользователь администратором чата."""
+    if bot is None:
+        logger.warning("⚠️ Bot is None in is_admin_in_chat")
+        return False
+    
+    member = await _safe_get_chat_member(bot, chat_id, user_id)
+    if member is None:
         return False
     
     try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in ['creator', 'administrator']
-    except TelegramAPIError as e:
-        logger.warning(f"Admin check failed for {user_id} in {chat_id}: {e}")
+        status = getattr(member, 'status', None)
+        return status in ('creator', 'administrator')
+    except Exception as e:
+        logger.warning("⚠️ Error checking admin status: %s", e)
         return False
 
 
-async def is_bot_admin(bot: Bot, chat_id: int) -> bool:
-    """
-    Проверяет, является ли бот администратором чата.
-    
-    Args:
-        bot: Экземпляр бота
-        chat_id: ID чата
-        
-    Returns:
-        True если бот администратор, иначе False
-    """
+async def is_bot_admin(bot: Optional[Bot], chat_id: int) -> bool:
+    """Проверяет, является ли бот администратором чата."""
     if bot is None:
-        logger.warning("Bot is None in is_bot_admin")
+        logger.warning("⚠️ Bot is None in is_bot_admin")
         return False
     
     try:
-        bot_me = await bot.get_me()
-        member = await bot.get_chat_member(chat_id, bot_me.id)
-        return member.status in ['creator', 'administrator']
-    except TelegramAPIError as e:
-        logger.warning(f"Bot admin check failed for chat {chat_id}: {e}")
+        bot_me = await asyncio.wait_for(bot.get_me(), timeout=API_TIMEOUT)
+        bot_id = getattr(bot_me, 'id', None)
+        if bot_id is None:
+            return False
+        
+        member = await _safe_get_chat_member(bot, chat_id, bot_id)
+        if member is None:
+            return False
+        
+        status = getattr(member, 'status', None)
+        return status in ('creator', 'administrator')
+        
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout checking bot admin status")
+        return False
+    except Exception as e:
+        logger.warning("⚠️ Error checking bot admin: %s", e)
         return False
 
 
-async def check_cooldown(chat_id: int) -> tuple[bool, int]:
+def _sign_admin_check(user_id: int, chat_id: int, timestamp: float) -> str:
+    """Генерация подписи проверки прав администратора."""
+    payload = f"{user_id}:{chat_id}:{int(timestamp)}"
+    signature = hmac.new(
+        _ADMIN_CHECK_SECRET,
+        payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()[:16]
+    return f"{int(timestamp)}:{signature}"
+
+
+def _verify_admin_check(user_id: int, chat_id: int, signed_data: str) -> bool:
     """
-    Проверяет кулдаун для общего сбора.
+    Проверка подписи прав администратора.
     
     Args:
-        chat_id: ID чата
+        user_id: ID пользователя для проверки
+        chat_id: ID чата для проверки
+        signed_data: Подпись в формате "timestamp:signature"
         
     Returns:
-        (можно_ли_использовать, оставшееся_время_в_секундах)
+        True если подпись валидна и не просрочена, иначе False
     """
+    try:
+        if not signed_data or not isinstance(signed_data, str):
+            return False
+        
+        # Разделяем только по первому двоеточию
+        colon_idx = signed_data.find(':')
+        if colon_idx == -1 or colon_idx == 0:
+            return False
+        
+        timestamp_str = signed_data[:colon_idx]
+        provided_sig = signed_data[colon_idx + 1:]
+        
+        # Валидация формата подписи
+        if not provided_sig or len(provided_sig) != 16:
+            return False
+        if not all(c in '0123456789abcdef' for c in provided_sig):
+            return False
+        
+        timestamp = float(timestamp_str)
+        
+        # Проверка времени жизни
+        if time.time() - timestamp > _ADMIN_CHECK_TTL:
+            return False
+        if timestamp <= 0:
+            return False
+        
+        # Генерация ожидаемой подписи
+        expected_payload = f"{user_id}:{chat_id}:{int(timestamp)}"
+        expected_sig = hmac.new(
+            _ADMIN_CHECK_SECRET,
+            expected_payload.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:16]
+        
+        # Безопасное сравнение
+        return hmac.compare_digest(provided_sig, expected_sig)
+        
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
+async def try_acquire_cooldown(chat_id: int) -> Tuple[bool, int]:
+    """Атомарная проверка и установка кулдауна."""
     cooldown_key = f"all:{chat_id}"
     current_time = time.time()
     
     async with _cooldown_lock:
-        if cooldown_key in _cooldown_storage:
-            last_used = _cooldown_storage[cooldown_key]
+        last_used = _cooldown_storage.get(cooldown_key)
+        if last_used is not None:
             elapsed = current_time - last_used
             if elapsed < TAG_COOLDOWN:
-                return False, int(TAG_COOLDOWN - elapsed)
-    
-    return True, 0
-
-
-async def set_cooldown(chat_id: int) -> None:
-    """Устанавливает кулдаун для чата."""
-    cooldown_key = f"all:{chat_id}"
-    async with _cooldown_lock:
-        _cooldown_storage[cooldown_key] = time.time()
-
-
-async def get_chat_members_safe(bot: Bot, chat_id: int) -> List:
-    """
-    Безопасное получение списка участников чата.
-    
-    Args:
-        bot: Экземпляр бота
-        chat_id: ID чата
+                remaining = max(0, int(TAG_COOLDOWN - elapsed))
+                return False, remaining
         
-    Returns:
-        Список участников (не ботов)
-    """
-    members = []
-    seen_ids: Set[int] = set()
-    
-    try:
-        # Сначала получаем администраторов
-        admins = await bot.get_chat_administrators(chat_id)
-        for admin in admins:
-            if not admin.user.is_bot and admin.user.id not in seen_ids:
-                members.append(admin.user)
-                seen_ids.add(admin.user.id)
-    except TelegramAPIError as e:
-        logger.warning(f"Could not fetch admins: {e}")
-    
-    # Затем пытаемся получить остальных участников
-    try:
-        member_count = 0
-        async for member in bot.get_chat_members(chat_id):
-            if member_count >= MAX_MEMBERS_TO_FETCH:
-                break
-            if not member.user.is_bot and member.user.id not in seen_ids:
-                members.append(member.user)
-                seen_ids.add(member.user.id)
-            member_count += 1
-    except TelegramAPIError as e:
-        logger.warning(f"Could not fetch all members: {e}")
-    
-    return members
-
-
-def format_mentions(members: List) -> List[str]:
-    """
-    Форматирует список участников в упоминания.
-    
-    Args:
-        members: Список объектов User
-        
-    Returns:
-        Список строк с HTML-упоминаниями
-    """
-    mentions = []
-    for member in members:
-        if member.username:
-            mentions.append(f"@{safe_html_escape(member.username)}")
-        else:
-            name = safe_html_escape(member.full_name or "Пользователь")
-            mentions.append(f'<a href="tg://user?id={member.id}">{name}</a>')
-    return mentions
+        _cooldown_storage[cooldown_key] = current_time
+        _cooldown_storage.move_to_end(cooldown_key)
+        return True, 0
 
 
 def format_time_remaining(seconds: int) -> str:
     """Форматирует оставшееся время в читаемый вид."""
+    seconds = max(0, _safe_int(seconds))
+    if seconds <= 0:
+        return "0 сек"
     minutes = seconds // 60
     secs = seconds % 60
-    return f"{minutes} мин {secs} сек"
+    if minutes > 0:
+        return f"{minutes} мин {secs} сек"
+    return f"{secs} сек"
 
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+def _get_user_dedup_key(user: User) -> str:
+    """Генерация уникального ключа для дедупликации пользователя."""
+    try:
+        user_id = getattr(user, 'id', None)
+        if user_id is None or not isinstance(user_id, int):
+            return ""
+        
+        username = getattr(user, 'username', None) or ""
+        full_name = getattr(user, 'full_name', None) or ""
+        
+        # Нормализация имени для хэша
+        name_normalized = str(full_name).lower().strip()
+        name_hash = hashlib.md5(name_normalized.encode('utf-8')).hexdigest()[:8]
+        
+        return f"{user_id}:{username}:{name_hash}"
+        
+    except Exception as e:
+        logger.warning("⚠️ Error generating dedup key: %s", e)
+        return ""
+
+
+def _is_valid_user(user: Optional[User]) -> bool:
+    """Проверка валидности объекта User."""
+    if user is None:
+        return False
+    try:
+        user_id = getattr(user, 'id', None)
+        if user_id is None or not isinstance(user_id, int):
+            return False
+        if getattr(user, 'is_bot', True):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def format_mentions(members: List[User]) -> List[str]:
+    """Форматирует список участников в HTML-упоминания."""
+    mentions: List[str] = []
+    
+    for member in members:
+        # Получаем ID до try-блока для безопасного логирования
+        member_id = getattr(member, 'id', 'unknown') if member else 'unknown'
+        
+        if not _is_valid_user(member):
+            continue
+        
+        try:
+            user_id = getattr(member, 'id')
+            username = getattr(member, 'username', None)
+            
+            if username and isinstance(username, str) and username.strip():
+                mentions.append("@" + safe_html_escape(username.strip()))
+            else:
+                full_name = getattr(member, 'full_name', None)
+                if full_name and isinstance(full_name, str) and full_name.strip():
+                    name = safe_html_escape(full_name.strip())
+                else:
+                    name = f"User#{user_id}"
+                mentions.append(f'<a href="tg://user?id={user_id}">{name}</a>')
+                
+        except Exception as e:
+            logger.warning("⚠️ Skip mention for user %s: %s", member_id, e)
+            continue
+    
+    return mentions
+
+
+async def send_with_retry(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    parse_mode: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    max_retries: int = MAX_RETRIES
+) -> Optional[Message]:
+    """Отправка сообщения с повторами при rate limit."""
+    if not text:
+        logger.warning("⚠️ Attempt to send empty message")
+        return None
+    
+    last_error: Optional[Exception] = None
+    
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.wait_for(
+                bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup
+                ),
+                timeout=API_TIMEOUT
+            )
+            
+        except TelegramRetryAfter as e:
+            wait_time = min(getattr(e, 'retry_after', 30) + 1, 60)
+            last_error = e
+            logger.warning("⏱ Rate limit (429), waiting %ds (attempt %d/%d)",
+                          wait_time, attempt + 1, max_retries)
+            await asyncio.sleep(wait_time)
+            
+        except TelegramForbiddenError:
+            logger.warning("🚫 Bot blocked in chat %s", chat_id)
+            return None
+            
+        except TelegramBadRequest as e:
+            err_msg = str(e).lower()
+            if "message is not modified" in err_msg or "message can't be edited" in err_msg:
+                return None
+            logger.error("❌ BadRequest: %s", e)
+            return None
+            
+        except asyncio.TimeoutError:
+            last_error = asyncio.TimeoutError()
+            logger.warning("⏱ API timeout (attempt %d/%d)", attempt + 1, max_retries)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                
+        except TelegramAPIError as e:
+            last_error = e
+            logger.error("❌ Telegram API error: %s", e)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error("❌ Unexpected error sending message: %s", e, exc_info=True)
+            return None
+    
+    logger.error("❌ Failed to send message after %d retries: %s", max_retries, last_error)
+    return None
+
+
+async def get_chat_members_safe(
+    bot: Optional[Bot],
+    chat_id: int
+) -> Tuple[List[User], bool]:
+    """Безопасное получение списка участников чата."""
+    members: List[User] = []
+    seen_keys: Set[str] = set()
+    has_more = False
+    
+    if bot is None:
+        logger.warning("⚠️ Bot is None in get_chat_members_safe")
+        return members, has_more
+    
+    # 1. Получаем администраторов
+    try:
+        admins = await asyncio.wait_for(
+            bot.get_chat_administrators(chat_id),
+            timeout=API_TIMEOUT
+        )
+        if admins:
+            for admin in admins:
+                user = getattr(admin, 'user', None)
+                if _is_valid_user(user):
+                    dedup_key = _get_user_dedup_key(user)
+                    if dedup_key and dedup_key not in seen_keys:
+                        members.append(user)
+                        seen_keys.add(dedup_key)
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout fetching admins for chat %s", chat_id)
+    except TelegramAPIError as e:
+        logger.warning("⚠️ Could not fetch admins for chat %s: %s", chat_id, e)
+    except Exception as e:
+        logger.error("❌ Error fetching admins: %s", e, exc_info=True)
+    
+    # 2. Получаем остальных участников с лимитом
+    try:
+        member_count = 0
+        async for member in bot.get_chat_members(chat_id):
+            if member_count >= MAX_MEMBERS_TO_FETCH:
+                has_more = True
+                logger.info("⚠️ Reached MAX_MEMBERS_TO_FETCH (%d) for chat %s",
+                           MAX_MEMBERS_TO_FETCH, chat_id)
+                break
+            
+            user = getattr(member, 'user', None)
+            if _is_valid_user(user):
+                dedup_key = _get_user_dedup_key(user)
+                if dedup_key and dedup_key not in seen_keys:
+                    members.append(user)
+                    seen_keys.add(dedup_key)
+            member_count += 1
+            
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout fetching members for chat %s", chat_id)
+    except TelegramAPIError as e:
+        logger.warning("⚠️ Could not fetch all members for chat %s: %s", chat_id, e)
+    except Exception as e:
+        logger.error("❌ Error fetching members: %s", e, exc_info=True)
+    
+    logger.info("📊 Fetched %d members for chat %s (has_more=%s)",
+                len(members), chat_id, str(has_more))
+    return members, has_more
+
+
+# =============================================================================
+# ОБРАБОТЧИКИ КОМАНД
+# =============================================================================
 
 @router.message(Command("all"))
 async def cmd_all(message: Message) -> None:
     """Команда общего сбора (только для админов)."""
-    if message is None or message.from_user is None:
+    if message is None:
         return
     
-    if message.chat is None:
+    from_user = getattr(message, 'from_user', None)
+    chat = getattr(message, 'chat', None)
+    
+    if from_user is None or chat is None:
         return
     
-    user_id = message.from_user.id
-    chat_id = message.chat.id
+    user_id = getattr(from_user, 'id', None)
+    chat_id = getattr(chat, 'id', None)
+    
+    if user_id is None or chat_id is None:
+        return
     
     # Проверка типа чата
-    if message.chat.type not in ['group', 'supergroup']:
+    chat_type = getattr(chat, 'type', None)
+    if chat_type not in ('group', 'supergroup'):
         await message.answer("❌ Команда /all работает только в группах!")
         return
     
-    # Проверка регистрации
+    # Проверка регистрации в БД
     try:
         user = await db.get_user(user_id)
         if not user:
             await message.answer("❌ Используйте /start для регистрации")
             return
     except DatabaseError as e:
-        logger.error(f"Database error in cmd_all: {e}")
+        logger.error("❌ Database error in cmd_all: %s", e)
         await message.answer("❌ Ошибка базы данных. Попробуйте позже.")
         return
+    except Exception as e:
+        logger.error("❌ Unexpected error in cmd_all: %s", e, exc_info=True)
+        await message.answer("❌ Внутренняя ошибка. Попробуйте позже.")
+        return
     
-    # Проверка прав
+    # Проверка прав пользователя
     if not await is_admin_in_chat(message.bot, user_id, chat_id):
         await message.answer(
-            "❌ <b>Нет прав!</b>\n\n"
-            "Только администраторы чата могут использовать /all.",
+            "❌ <b>Нет прав!</b>\n\nТолько администраторы чата могут использовать /all.",
             parse_mode=ParseMode.HTML
         )
         return
     
+    # Проверка прав бота
     if not await is_bot_admin(message.bot, chat_id):
         await message.answer(
-            "❌ <b>Ошибка:</b> Бот не является администратором чата!",
+            "❌ <b>Ошибка:</b> Бот не является администратором чата!\n"
+            "Дайте боту права на упоминание участников.",
             parse_mode=ParseMode.HTML
         )
         return
     
-    # Проверка кулдауна
-    can_use, remaining = await check_cooldown(chat_id)
+    # Атомарная проверка кулдауна
+    can_use, remaining = await try_acquire_cooldown(chat_id)
     if not can_use:
         await message.answer(
-            f"⏰ <b>Подождите!</b>\n\n"
-            f"Следующий сбор через <b>{format_time_remaining(remaining)}</b>.",
+            "⏰ <b>Подождите!</b>\n\nСледующий сбор через <b>" + format_time_remaining(remaining) + "</b>.",
             parse_mode=ParseMode.HTML
         )
         return
     
+    # Генерация подписи для проверки прав в callback
+    # ✅ Используем один current_time для консистентности
+    current_time = time.time()
+    admin_check_sig = _sign_admin_check(user_id, chat_id, current_time)
+    callback = ConfirmCallback(chat_id=chat_id, timestamp=current_time, signature=admin_check_sig)
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}"),
-         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=callback.to_callback_data()),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data=_CALLBACK_PREFIX_CANCEL)]
     ])
     
-    safe_name = safe_html_escape(message.from_user.full_name)
+    safe_name = safe_html_escape(getattr(from_user, 'full_name', None))
     await message.answer(
         "📢 <b>ОБЩИЙ СБОР</b> 📢\n\n"
         "⚠️ <b>Внимание!</b>\n"
         "После подтверждения будет отправлено сообщение с упоминанием всех участников.\n\n"
-        f"👤 Инициатор: {safe_name}\n"
-        f"🛡️ Права: Администратор\n\n"
+        "👤 Инициатор: " + safe_name + "\n"
+        "🛡️ Права: Администратор (проверено)\n\n"
         "✅ <b>Подтвердите действие:</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
@@ -293,21 +729,26 @@ async def cmd_all(message: Message) -> None:
 
 @router.message(Command("tag"))
 async def cmd_tag(message: Message) -> None:
-    """Команда для упоминания пользователя."""
-    if message is None or message.from_user is None:
+    """Команда для упоминания конкретного пользователя."""
+    if message is None:
         return
     
-    if message.chat is None:
+    from_user = getattr(message, 'from_user', None)
+    chat = getattr(message, 'chat', None)
+    
+    if from_user is None or chat is None:
         return
     
-    if message.chat.type not in ['group', 'supergroup']:
+    chat_type = getattr(chat, 'type', None)
+    if chat_type not in ('group', 'supergroup'):
         await message.answer("❌ Команда работает только в группах!")
         return
     
-    if message.text is None:
+    text = getattr(message, 'text', None)
+    if text is None:
         return
     
-    args = message.text.split(maxsplit=1)
+    args = text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "📢 <b>Как тэгать:</b>\n\n"
@@ -317,21 +758,20 @@ async def cmd_tag(message: Message) -> None:
         )
         return
     
-    text = args[1]
-    match = re.search(r'@([a-zA-Z0-9_]+)', text)
+    command_text = args[1]
+    match = re.search(r'@([a-zA-Z0-9_]+)', command_text)
     if not match:
         await message.answer("❌ Укажите @username пользователя")
         return
     
     username = match.group(1)
-    clean_text = re.sub(r'@\w+', '', text).strip()
+    clean_text = re.sub(r'@\w+', '', command_text).strip()
     
-    safe_author = safe_html_escape(message.from_user.full_name)
+    safe_author = safe_html_escape(getattr(from_user, 'full_name', None))
     if clean_text:
-        safe_text = safe_html_escape(clean_text)
-        result = f"🔔 {safe_text}\n\n👉 @{safe_html_escape(username)}"
+        result = "🔔 " + safe_html_escape(clean_text) + "\n\n👉 @" + safe_html_escape(username)
     else:
-        result = f"🔔 Вас упомянул {safe_author}\n\n👉 @{safe_html_escape(username)}"
+        result = "🔔 Вас упомянул " + safe_author + "\n\n👉 @" + safe_html_escape(username)
     
     await message.answer(result, parse_mode=ParseMode.HTML)
 
@@ -339,20 +779,25 @@ async def cmd_tag(message: Message) -> None:
 @router.message(Command("tagrole"))
 async def cmd_tag_role(message: Message) -> None:
     """Команда для упоминания всех администраторов."""
-    if message is None or message.from_user is None:
+    if message is None:
         return
     
-    if message.chat is None:
+    from_user = getattr(message, 'from_user', None)
+    chat = getattr(message, 'chat', None)
+    
+    if from_user is None or chat is None:
         return
     
-    if message.chat.type not in ['group', 'supergroup']:
+    chat_type = getattr(chat, 'type', None)
+    if chat_type not in ('group', 'supergroup'):
         await message.answer("❌ Команда работает только в группах!")
         return
     
-    if message.text is None:
+    text = getattr(message, 'text', None)
+    if text is None:
         return
     
-    args = message.text.split(maxsplit=1)
+    args = text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "📢 <b>Как тэгать по роли:</b>\n\n"
@@ -361,8 +806,8 @@ async def cmd_tag_role(message: Message) -> None:
         )
         return
     
-    text = args[1]
-    role_match = re.match(r'(админы?)\s*(.*)', text, re.IGNORECASE)
+    command_text = args[1]
+    role_match = re.match(r'(админы?)\s*(.*)', command_text, re.IGNORECASE)
     
     if not role_match:
         await message.answer(
@@ -374,11 +819,25 @@ async def cmd_tag_role(message: Message) -> None:
     clean_text = role_match.group(2).strip()
     
     try:
-        administrators = await message.bot.get_chat_administrators(message.chat.id)
-        admins = [admin.user for admin in administrators if not admin.user.is_bot]
+        administrators = await asyncio.wait_for(
+            message.bot.get_chat_administrators(chat.id),
+            timeout=API_TIMEOUT
+        )
+        admins = [
+            admin.user for admin in administrators
+            if admin and hasattr(admin, 'user') and _is_valid_user(admin.user)
+        ]
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout fetching admins for tagrole")
+        await message.answer("❌ Ошибка: таймаут при получении списка админов")
+        return
     except TelegramAPIError as e:
-        logger.error(f"Failed to get admins: {e}")
-        await message.answer(f"❌ Ошибка: {safe_html_escape(str(e))}", parse_mode=ParseMode.HTML)
+        logger.error("❌ Failed to get admins: %s", e)
+        await message.answer("❌ Ошибка: " + safe_html_escape(str(e)), parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        logger.error("❌ Unexpected error in tagrole: %s", e, exc_info=True)
+        await message.answer("❌ Внутренняя ошибка")
         return
     
     if not admins:
@@ -388,111 +847,155 @@ async def cmd_tag_role(message: Message) -> None:
     mentions = format_mentions(admins)
     
     if clean_text:
-        result = f"🔔 {safe_html_escape(clean_text)}\n\n{' '.join(mentions)}"
+        result = "🔔 " + safe_html_escape(clean_text) + "\n\n" + " ".join(mentions)
     else:
-        result = f"🛡️ <b>Обращение к администраторам:</b>\n\n{' '.join(mentions)}"
+        result = "🛡️ <b>Обращение к администраторам:</b>\n\n" + " ".join(mentions)
     
     await message.answer(result, parse_mode=ParseMode.HTML)
 
 
-# ==================== ОБРАБОТЧИКИ CALLBACK ====================
+# =============================================================================
+# ОБРАБОТЧИКИ CALLBACK
+# =============================================================================
 
-@router.callback_query(F.data.startswith("confirm_all_"))
+@router.callback_query(F.data.startswith(_CALLBACK_PREFIX_CONFIRM))
 async def confirm_all(callback: CallbackQuery) -> None:
     """Подтверждение общего сбора."""
-    if callback is None or callback.message is None or callback.from_user is None:
+    if callback is None:
         return
     
+    cb_message = getattr(callback, 'message', None)
+    from_user = getattr(callback, 'from_user', None)
+    
+    if cb_message is None or from_user is None:
+        return
+    
+    # Надёжный парсинг callback_
+    parsed = ConfirmCallback.parse(callback.data)
+    if parsed is None:
+        logger.warning("⚠️ Failed to parse confirm callback: %s", callback.data)
+        await callback.answer("❌ Неверный формат запроса", show_alert=True)
+        return
+    
+    chat_id = parsed.chat_id
+    user_id = getattr(from_user, 'id', None)
+    
+    if user_id is None:
+        await callback.answer("❌ Ошибка авторизации", show_alert=True)
+        return
+    
+    # Проверка соответствия чата
+    msg_chat = getattr(cb_message, 'chat', None)
+    if msg_chat and getattr(msg_chat, 'id', None) != chat_id:
+        logger.warning("⚠️ Chat ID mismatch in callback")
+        await callback.answer("❌ Несоответствие чата", show_alert=True)
+        return
+    
+    # Проверка подписи
+    if not _verify_admin_check(user_id, chat_id, parsed.signature):
+        logger.warning("⚠️ Admin check signature invalid for user %s in chat %s", user_id, chat_id)
+        await callback.answer("❌ Проверка прав не пройдена", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Собираю участников...")
+    
+    status_msg_id: Optional[int] = getattr(cb_message, 'message_id', None)
+    
+    # Обновляем сообщение со статусом
     try:
-        parts = callback.data.split("_")
-        if len(parts) < 3:
-            await callback.answer("❌ Неверный формат запроса", show_alert=True)
-            return
+        await cb_message.edit_text(
+            "🔄 <b>Общий сбор:</b> Загрузка участников...",
+            parse_mode=ParseMode.HTML
+        )
+    except TelegramAPIError:
+        pass
+    
+    # Проверка кулдауна
+    can_use, remaining = await try_acquire_cooldown(chat_id)
+    if not can_use:
+        if status_msg_id:
+            await send_with_retry(callback.bot, chat_id,
+                "⏰ <b>Сбор отменён:</b> Кулдаун активен (" + format_time_remaining(remaining) + ")",
+                ParseMode.HTML)
+        await callback.answer("⏰ Кулдаун активен!", show_alert=True)
+        return
+    
+    # Получаем участников
+    members, has_more = await get_chat_members_safe(callback.bot, chat_id)
+    
+    if not members:
+        if status_msg_id:
+            await send_with_retry(callback.bot, chat_id,
+                "❌ <b>Ошибка:</b> Не удалось получить список участников.",
+                ParseMode.HTML)
+        await callback.answer("❌ Нет участников", show_alert=True)
+        return
+    
+    mentions = format_mentions(members)
+    safe_initiator = safe_html_escape(getattr(from_user, 'full_name', None))
+    
+    total_batches = (len(mentions) + BATCH_SIZE - 1) // BATCH_SIZE
+    sent_batches = 0
+    failed_batches = 0
+    
+    # Отправка батчей с продолжением при сбое
+    for batch_idx in range(total_batches):
+        start = batch_idx * BATCH_SIZE
+        end = min(start + BATCH_SIZE, len(mentions))
+        batch_mentions = mentions[start:end]
+        batch_text = " ".join(batch_mentions)
         
-        chat_id = int(parts[2])
-        user_id = callback.from_user.id
+        if batch_idx == 0:
+            response = (
+                "📢 <b>ОБЩИЙ СБОР!</b> 📢\n\n"
+                "👤 <b>" + safe_initiator + "</b> (администратор)\n\n"
+                "🔔 <b>ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!</b>\n\n"
+                + batch_text
+            )
+        else:
+            response = (
+                "📢 <b>Продолжение (" + str(batch_idx + 1) + "/" + str(total_batches) + ")</b>\n\n"
+                + batch_text
+            )
         
-        if callback.message.chat.id != chat_id:
-            await callback.answer("❌ Несоответствие чата", show_alert=True)
-            return
+        result = await send_with_retry(callback.bot, chat_id, response, ParseMode.HTML)
+        if result is not None:
+            sent_batches += 1
+        else:
+            failed_batches += 1
+            logger.warning("⚠️ Failed to send batch %d/%d", batch_idx + 1, total_batches)
         
-        # Проверка прав
-        if not await is_admin_in_chat(callback.bot, user_id, chat_id):
-            await callback.answer("❌ Только администраторы могут подтвердить!", show_alert=True)
-            return
-        
-        await callback.answer("🔄 Собираю участников...")
-        
-        # Устанавливаем кулдаун
-        await set_cooldown(chat_id)
-        
-        # Получаем участников
-        members = await get_chat_members_safe(callback.bot, chat_id)
-        
-        if not members:
-            await callback.message.edit_text("❌ Не удалось получить список участников.", parse_mode=ParseMode.HTML)
-            return
-        
-        # Удаляем сообщение с подтверждением
+        if batch_idx < total_batches - 1:
+            await asyncio.sleep(BATCH_DELAY)
+    
+    # Финальное сообщение
+    status_parts = ["✅ <b>Общий сбор завершён!</b>"]
+    status_parts.append("👥 Упомянуто: " + str(len(mentions)))
+    if has_more:
+        status_parts.append("⚠️ Показано первых " + str(MAX_MEMBERS_TO_FETCH) + " из-за лимита")
+    if failed_batches > 0:
+        status_parts.append("⚠️ Не отправлено батчей: " + str(failed_batches))
+    
+    final_msg = "\n".join(status_parts)
+    await send_with_retry(callback.bot, chat_id, final_msg, ParseMode.HTML)
+    
+    # Обновление статуса
+    if status_msg_id:
         try:
-            await callback.message.delete()
-        except TelegramAPIError:
-            pass
-        
-        mentions = format_mentions(members)
-        safe_initiator = safe_html_escape(callback.from_user.full_name)
-        
-        total_batches = (len(mentions) + BATCH_SIZE - 1) // BATCH_SIZE
-        
-        for batch_idx in range(total_batches):
-            start = batch_idx * BATCH_SIZE
-            end = min(start + BATCH_SIZE, len(mentions))
-            batch_mentions = mentions[start:end]
-            batch_text = " ".join(batch_mentions)
-            
-            if batch_idx == 0:
-                response = (
-                    f"📢 <b>ОБЩИЙ СБОР!</b> 📢\n\n"
-                    f"👤 <b>{safe_initiator}</b> (администратор)\n\n"
-                    f"🔔 <b>ВНИМАНИЕ ВСЕМ УЧАСТНИКАМ!</b>\n\n"
-                    f"{batch_text}"
-                )
-            else:
-                response = (
-                    f"📢 <b>Продолжение ({batch_idx + 1}/{total_batches})</b>\n\n"
-                    f"{batch_text}"
-                )
-            
-            try:
-                await callback.bot.send_message(chat_id, response, parse_mode=ParseMode.HTML)
-            except TelegramForbiddenError:
-                logger.warning(f"Bot blocked in chat {chat_id}")
-                break
-            except TelegramAPIError as e:
-                logger.error(f"Failed to send batch {batch_idx}: {e}")
-            
-            if batch_idx < total_batches - 1:
-                await asyncio.sleep(BATCH_DELAY)
-        
-        # Финальное сообщение
-        try:
-            await callback.bot.send_message(
-                chat_id,
-                f"✅ <b>Общий сбор завершён!</b>\n\n"
-                f"👥 Упомянуто участников: {len(mentions)}",
+            msg_chat_id = getattr(cb_message, 'chat_id', chat_id)
+            await callback.bot.edit_message_text(
+                "✅ <b>Готово!</b>\n📤 Отправлено: " + str(sent_batches) + "/" + str(total_batches) + " батчей",
+                chat_id=msg_chat_id,
+                message_id=status_msg_id,
                 parse_mode=ParseMode.HTML
             )
         except TelegramAPIError:
             pass
-        
-        await callback.answer("✅ Общий сбор завершён!")
-        
-    except Exception as e:
-        logger.error(f"confirm_all error: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка при выполнении", show_alert=True)
+    
+    await callback.answer("✅ Общий сбор завершён!")
 
 
-@router.callback_query(F.data == "cancel_all")
+@router.callback_query(F.data == _CALLBACK_PREFIX_CANCEL)
 async def cancel_all(callback: CallbackQuery) -> None:
     """Отмена общего сбора."""
     if callback is None or callback.message is None:
@@ -502,17 +1005,25 @@ async def cancel_all(callback: CallbackQuery) -> None:
         await callback.message.edit_text("❌ Общий сбор отменён.", parse_mode=ParseMode.HTML)
     except TelegramAPIError:
         pass
-    await callback.answer()
+    await callback.answer("✅ Отменено")
 
 
 @router.callback_query(F.data == "tag_menu")
+@router.callback_query(F.data == "menu_all")
 async def tag_menu(callback: CallbackQuery) -> None:
     """Меню управления тегами."""
     if callback is None or callback.message is None:
         return
     
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
+    from_user = getattr(callback, 'from_user', None)
+    if from_user is None:
+        return
+    
+    user_id = getattr(from_user, 'id', None)
+    chat_id = getattr(callback.message, 'chat_id', 0)
+    
+    if user_id is None:
+        return
     
     is_admin = await is_admin_in_chat(callback.bot, user_id, chat_id)
     
@@ -523,7 +1034,6 @@ async def tag_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🔔 КАК ПОЛЬЗОВАТЬСЯ", callback_data="tag_help")],
             [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
         ])
-        
         text = (
             "📢 <b>УПРАВЛЕНИЕ ТЭГАМИ</b> (АДМИНИСТРАТОР)\n\n"
             "📌 <b>Доступные команды:</b>\n"
@@ -537,20 +1047,18 @@ async def tag_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🔔 КАК ПОЛЬЗОВАТЬСЯ", callback_data="tag_help")],
             [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
         ])
-        
         text = (
             "📢 <b>УПРАВЛЕНИЕ ТЭГАМИ</b>\n\n"
             "📌 <b>Доступные команды:</b>\n"
             "• <code>/tag @user</code> — упомянуть пользователя\n"
             "• <code>/tagrole админы</code> — написать админам\n\n"
-            "⚠️ <b>Общий сбор (/all)</b>\n"
-            "Доступен только для администраторов."
+            "⚠️ <b>Общий сбор (/all)</b>\nДоступен только для администраторов."
         )
     
     try:
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     except TelegramAPIError as e:
-        logger.warning(f"Failed to edit tag_menu: {e}")
+        logger.warning("⚠️ Failed to edit tag_menu: %s", e)
     
     await callback.answer()
 
@@ -561,8 +1069,15 @@ async def start_all_callback(callback: CallbackQuery) -> None:
     if callback is None or callback.message is None:
         return
     
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
+    from_user = getattr(callback, 'from_user', None)
+    if from_user is None:
+        return
+    
+    user_id = getattr(from_user, 'id', None)
+    chat_id = getattr(callback.message, 'chat_id', 0)
+    
+    if user_id is None:
+        return
     
     if not await is_admin_in_chat(callback.bot, user_id, chat_id):
         await callback.answer("❌ Только администраторы!", show_alert=True)
@@ -572,48 +1087,64 @@ async def start_all_callback(callback: CallbackQuery) -> None:
         await callback.answer("❌ Бот не администратор!", show_alert=True)
         return
     
-    can_use, remaining = await check_cooldown(chat_id)
+    can_use, remaining = await try_acquire_cooldown(chat_id)
     if not can_use:
-        await callback.answer(f"⏰ Подождите {remaining} сек", show_alert=True)
+        await callback.answer("⏰ Подождите " + format_time_remaining(remaining), show_alert=True)
         return
     
+    # ✅ Используем один current_time для консистентности
+    current_time = time.time()
+    admin_check_sig = _sign_admin_check(user_id, chat_id, current_time)
+    cb = ConfirmCallback(chat_id=chat_id, timestamp=current_time, signature=admin_check_sig)
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=f"confirm_all_{chat_id}"),
-         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel_all")]
+        [InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data=cb.to_callback_data()),
+         InlineKeyboardButton(text="❌ ОТМЕНА", callback_data=_CALLBACK_PREFIX_CANCEL)]
     ])
     
-    safe_name = safe_html_escape(callback.from_user.full_name)
+    safe_name = safe_html_escape(getattr(from_user, 'full_name', None))
+    
     try:
         await callback.message.edit_text(
             "📢 <b>ОБЩИЙ СБОР</b> 📢\n\n"
             "⚠️ <b>Внимание!</b>\n"
             "После подтверждения будет отправлено сообщение с упоминанием всех участников.\n\n"
-            f"👤 Инициатор: {safe_name}\n"
-            f"🛡️ Права: Администратор\n\n"
+            "👤 Инициатор: " + safe_name + "\n"
+            "🛡️ Права: Администратор (проверено)\n\n"
             "✅ <b>Подтвердите действие:</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
     except TelegramAPIError as e:
-        logger.warning(f"Failed to edit start_all: {e}")
+        logger.warning("⚠️ Failed to edit start_all: %s", e)
     
     await callback.answer()
 
 
 @router.callback_query(F.data == "tag_admins")
 async def tag_admins_callback(callback: CallbackQuery) -> None:
-    """Показать список администраторов."""
+    """Показать список администраторов чата."""
     if callback is None or callback.message is None:
         return
     
-    chat_id = callback.message.chat.id
+    chat_id = getattr(callback.message, 'chat_id', 0)
     
     try:
-        administrators = await callback.bot.get_chat_administrators(chat_id)
-        admins = [admin.user for admin in administrators if not admin.user.is_bot]
+        administrators = await asyncio.wait_for(
+            callback.bot.get_chat_administrators(chat_id),
+            timeout=API_TIMEOUT
+        )
+        admins = [
+            admin.user for admin in administrators
+            if admin and hasattr(admin, 'user') and _is_valid_user(admin.user)
+        ]
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout fetching admins")
+        await callback.answer("❌ Таймаут: попробуйте позже", show_alert=True)
+        return
     except TelegramAPIError as e:
-        logger.error(f"Failed to get admins: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True)
+        logger.error("❌ Failed to get admins: %s", e)
+        await callback.answer("❌ Ошибка доступа", show_alert=True)
         return
     
     if not admins:
@@ -624,21 +1155,21 @@ async def tag_admins_callback(callback: CallbackQuery) -> None:
     
     try:
         await callback.message.edit_text(
-            f"🛡️ <b>АДМИНИСТРАТОРЫ ЧАТА:</b>\n\n{' '.join(mentions)}",
+            "🛡️ <b>АДМИНИСТРАТОРЫ ЧАТА:</b>\n\n" + " ".join(mentions),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="tag_menu")]
             ])
         )
     except TelegramAPIError as e:
-        logger.warning(f"Failed to edit tag_admins: {e}")
+        logger.warning("⚠️ Failed to edit tag_admins: %s", e)
     
     await callback.answer()
 
 
 @router.callback_query(F.data == "tag_help")
 async def tag_help_callback(callback: CallbackQuery) -> None:
-    """Помощь по тегам."""
+    """Справка по командам тегов."""
     if callback is None or callback.message is None:
         return
     
@@ -658,6 +1189,6 @@ async def tag_help_callback(callback: CallbackQuery) -> None:
             reply_markup=keyboard
         )
     except TelegramAPIError as e:
-        logger.warning(f"Failed to edit tag_help: {e}")
+        logger.warning("⚠️ Failed to edit tag_help: %s", e)
     
     await callback.answer()
