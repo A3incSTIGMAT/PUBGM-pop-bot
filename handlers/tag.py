@@ -2,15 +2,11 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
 # ФАЙЛ: handlers/tag.py
-# ВЕРСИЯ: 2.4.1-production (исправленная)
+# ВЕРСИЯ: 2.4.2-production (исправлен парсинг chat_id)
 # ОПИСАНИЕ: Модуль тегов — /all, /tag, /tagrole
-# ИСПРАВЛЕНИЯ v2.4.1:
-#   ✅ Исправлена синтаксическая ошибка в ConfirmCallback.parse (строка 68)
-#   ✅ Исправлена синтаксическая ошибка в _verify_admin_check (строка 249)
-#   ✅ Исправлено обращение к signed_data (строка 252)
-#   ✅ Устранено двойное использование time.time() в cmd_all
-#   ✅ Устранено двойное использование time.time() в start_all_callback
-#   ✅ Удалён неиспользуемый импорт cast
+# ИСПРАВЛЕНИЯ v2.4.2:
+#   ✅ Исправлен парсинг callback_data для отрицательных chat_id
+#   ✅ Надёжное разделение chat_id и подписи через последнее '_'
 # =============================================================================
 
 import asyncio
@@ -85,6 +81,9 @@ class ConfirmCallback:
         
         Формат: confirm_all_{chat_id}_{timestamp}:{signature}
         
+        Устойчив к отрицательным chat_id (напр. -1001234567890 для супергрупп).
+        Использует поиск последнего '_' перед ':' для правильного разделения.
+        
         Args:
             data: Строка callback_data для парсинга
             
@@ -98,34 +97,50 @@ class ConfirmCallback:
             if not data.startswith(_CALLBACK_PREFIX_CONFIRM):
                 return None
             
-            # Удаляем префикс
+            # Удаляем префикс: "confirm_all_" -> "-1001234567890_1714060800:abc123def4567890"
             rest = data[len(_CALLBACK_PREFIX_CONFIRM):]
             if not rest:
                 return None
             
-            # Находим разделитель между chat_id и подписью
-            sep_idx = rest.find('_')
-            if sep_idx == -1 or sep_idx == 0:
-                return None
-            
-            # Парсим chat_id
-            chat_id_str = rest[:sep_idx]
-            if not chat_id_str.isdigit():
-                return None
-            chat_id = int(chat_id_str)
-            
-            # Остальное — подпись в формате timestamp:signature
-            signed_part = rest[sep_idx + 1:]
-            if ':' not in signed_part:
-                return None
-            
-            # Разделяем только по первому двоеточию
-            colon_idx = signed_part.find(':')
+            # Ищем последнее двоеточие (разделитель timestamp:signature)
+            colon_idx = rest.rfind(':')
             if colon_idx == -1 or colon_idx == 0:
                 return None
             
-            timestamp_str = signed_part[:colon_idx]
-            signature = signed_part[colon_idx + 1:]
+            # Всё после двоеточия — подпись
+            signature = rest[colon_idx + 1:]
+            
+            # Всё до двоеточия — "chat_id_timestamp"
+            before_colon = rest[:colon_idx]
+            
+            # Ищем ПОСЛЕДНЕЕ подчёркивание в "chat_id_timestamp"
+            # Это правильно разделит даже отрицательные chat_id:
+            # "-1001234567890_1714060800" -> chat_id="-1001234567890", timestamp="1714060800"
+            last_underscore = before_colon.rfind('_')
+            if last_underscore == -1 or last_underscore == 0:
+                # Если подчёркивание в начале, значит chat_id отрицательный
+                # Нужно искать следующее подчёркивание
+                if last_underscore == 0 and before_colon[0] == '-':
+                    # Ищем второе подчёркивание для "-100_123"
+                    second_underscore = before_colon.find('_', 1)
+                    if second_underscore == -1:
+                        # Нет второго подчёркивания — весь remaining это chat_id
+                        # Такого быть не должно в правильном формате
+                        return None
+                    last_underscore = second_underscore
+                else:
+                    return None
+            
+            chat_id_str = before_colon[:last_underscore]
+            timestamp_str = before_colon[last_underscore + 1:]
+            
+            # Валидация chat_id
+            if not chat_id_str:
+                return None
+            # chat_id может начинаться с '-' для супергрупп
+            if not chat_id_str.lstrip('-').isdigit():
+                return None
+            chat_id = int(chat_id_str)
             
             # Валидация timestamp
             if not timestamp_str or not timestamp_str.isdigit():
@@ -216,16 +231,13 @@ async def _cleanup_expired_cooldowns() -> None:
     expired_keys: List[str] = []
     
     async with _cooldown_lock:
-        # Поиск истекших записей
         for key, timestamp in list(_cooldown_storage.items()):
             if current_time - timestamp > TAG_COOLDOWN:
                 expired_keys.append(key)
         
-        # Удаление истекших
         for key in expired_keys:
             _cooldown_storage.pop(key, None)
         
-        # LRU: удаление самых старых при переполнении
         while len(_cooldown_storage) > MAX_COOLDOWN_ENTRIES:
             _cooldown_storage.popitem(last=False)
         
@@ -258,27 +270,12 @@ def _safe_int(value: Optional[Union[int, str]], default: int = 0) -> int:
         return default
 
 
-def _safe_str(value: Optional[object]) -> str:
-    """Безопасное преобразование в str."""
-    if value is None:
-        return ""
-    try:
-        return str(value)
-    except Exception:
-        return ""
-
-
 async def _safe_get_chat_member(
     bot: Optional[Bot],
     chat_id: int,
     user_id: int
 ) -> Optional[object]:
-    """
-    Безопасное получение информации о участнике чата.
-    
-    Returns:
-        Объект членства или None при ошибке
-    """
+    """Безопасное получение информации о участнике чата."""
     if bot is None:
         return None
     
@@ -400,7 +397,6 @@ def _verify_admin_check(user_id: int, chat_id: int, signed_data: str) -> bool:
             hashlib.sha256
         ).hexdigest()[:16]
         
-        # Безопасное сравнение
         return hmac.compare_digest(provided_sig, expected_sig)
         
     except (ValueError, TypeError, IndexError):
@@ -447,7 +443,6 @@ def _get_user_dedup_key(user: User) -> str:
         username = getattr(user, 'username', None) or ""
         full_name = getattr(user, 'full_name', None) or ""
         
-        # Нормализация имени для хэша
         name_normalized = str(full_name).lower().strip()
         name_hash = hashlib.md5(name_normalized.encode('utf-8')).hexdigest()[:8]
         
@@ -478,7 +473,6 @@ def format_mentions(members: List[User]) -> List[str]:
     mentions: List[str] = []
     
     for member in members:
-        # Получаем ID до try-блока для безопасного логирования
         member_id = getattr(member, 'id', 'unknown') if member else 'unknown'
         
         if not _is_valid_user(member):
@@ -656,13 +650,11 @@ async def cmd_all(message: Message) -> None:
     if user_id is None or chat_id is None:
         return
     
-    # Проверка типа чата
     chat_type = getattr(chat, 'type', None)
     if chat_type not in ('group', 'supergroup'):
         await message.answer("❌ Команда /all работает только в группах!")
         return
     
-    # Проверка регистрации в БД
     try:
         user = await db.get_user(user_id)
         if not user:
@@ -677,7 +669,6 @@ async def cmd_all(message: Message) -> None:
         await message.answer("❌ Внутренняя ошибка. Попробуйте позже.")
         return
     
-    # Проверка прав пользователя
     if not await is_admin_in_chat(message.bot, user_id, chat_id):
         await message.answer(
             "❌ <b>Нет прав!</b>\n\nТолько администраторы чата могут использовать /all.",
@@ -685,7 +676,6 @@ async def cmd_all(message: Message) -> None:
         )
         return
     
-    # Проверка прав бота
     if not await is_bot_admin(message.bot, chat_id):
         await message.answer(
             "❌ <b>Ошибка:</b> Бот не является администратором чата!\n"
@@ -694,7 +684,6 @@ async def cmd_all(message: Message) -> None:
         )
         return
     
-    # Атомарная проверка кулдауна
     can_use, remaining = await try_acquire_cooldown(chat_id)
     if not can_use:
         await message.answer(
@@ -703,8 +692,6 @@ async def cmd_all(message: Message) -> None:
         )
         return
     
-    # Генерация подписи для проверки прав в callback
-    # ✅ Используем один current_time для консистентности
     current_time = time.time()
     admin_check_sig = _sign_admin_check(user_id, chat_id, current_time)
     callback = ConfirmCallback(chat_id=chat_id, timestamp=current_time, signature=admin_check_sig)
@@ -884,14 +871,12 @@ async def confirm_all(callback: CallbackQuery) -> None:
         await callback.answer("❌ Ошибка авторизации", show_alert=True)
         return
     
-    # Проверка соответствия чата
     msg_chat = getattr(cb_message, 'chat', None)
     if msg_chat and getattr(msg_chat, 'id', None) != chat_id:
         logger.warning("⚠️ Chat ID mismatch in callback")
         await callback.answer("❌ Несоответствие чата", show_alert=True)
         return
     
-    # Проверка подписи
     if not _verify_admin_check(user_id, chat_id, parsed.signature):
         logger.warning("⚠️ Admin check signature invalid for user %s in chat %s", user_id, chat_id)
         await callback.answer("❌ Проверка прав не пройдена", show_alert=True)
@@ -901,7 +886,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
     
     status_msg_id: Optional[int] = getattr(cb_message, 'message_id', None)
     
-    # Обновляем сообщение со статусом
     try:
         await cb_message.edit_text(
             "🔄 <b>Общий сбор:</b> Загрузка участников...",
@@ -910,7 +894,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
     except TelegramAPIError:
         pass
     
-    # Проверка кулдауна
     can_use, remaining = await try_acquire_cooldown(chat_id)
     if not can_use:
         if status_msg_id:
@@ -920,7 +903,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
         await callback.answer("⏰ Кулдаун активен!", show_alert=True)
         return
     
-    # Получаем участников
     members, has_more = await get_chat_members_safe(callback.bot, chat_id)
     
     if not members:
@@ -938,7 +920,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
     sent_batches = 0
     failed_batches = 0
     
-    # Отправка батчей с продолжением при сбое
     for batch_idx in range(total_batches):
         start = batch_idx * BATCH_SIZE
         end = min(start + BATCH_SIZE, len(mentions))
@@ -968,7 +949,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
         if batch_idx < total_batches - 1:
             await asyncio.sleep(BATCH_DELAY)
     
-    # Финальное сообщение
     status_parts = ["✅ <b>Общий сбор завершён!</b>"]
     status_parts.append("👥 Упомянуто: " + str(len(mentions)))
     if has_more:
@@ -979,7 +959,6 @@ async def confirm_all(callback: CallbackQuery) -> None:
     final_msg = "\n".join(status_parts)
     await send_with_retry(callback.bot, chat_id, final_msg, ParseMode.HTML)
     
-    # Обновление статуса
     if status_msg_id:
         try:
             msg_chat_id = getattr(cb_message, 'chat_id', chat_id)
@@ -1092,7 +1071,6 @@ async def start_all_callback(callback: CallbackQuery) -> None:
         await callback.answer("⏰ Подождите " + format_time_remaining(remaining), show_alert=True)
         return
     
-    # ✅ Используем один current_time для консистентности
     current_time = time.time()
     admin_check_sig = _sign_admin_check(user_id, chat_id, current_time)
     cb = ConfirmCallback(chat_id=chat_id, timestamp=current_time, signature=admin_check_sig)
