@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
 # ФАЙЛ: handlers/tag.py
-# ВЕРСИЯ: 2.4.2-production (исправлен парсинг chat_id)
+# ВЕРСИЯ: 2.5.0-production (надёжный парсинг callback)
 # ОПИСАНИЕ: Модуль тегов — /all, /tag, /tagrole
-# ИСПРАВЛЕНИЯ v2.4.2:
-#   ✅ Исправлен парсинг callback_data для отрицательных chat_id
-#   ✅ Надёжное разделение chat_id и подписи через последнее '_'
+# ИСПРАВЛЕНИЯ v2.5.0:
+#   ✅ Полностью переработан парсер ConfirmCallback — устойчив к любым chat_id
+#   ✅ Простая и понятная логика: ищем ':' и последнее '_' перед ним
+#   ✅ Строгая валидация каждого поля с явными проверками
+#   ✅ Добавлены юнит-тесты в docstring для самопроверки
 # =============================================================================
 
 import asyncio
@@ -40,25 +42,20 @@ logger = logging.getLogger(__name__)
 # КОНСТАНТЫ
 # =============================================================================
 
-# Тайминги и лимиты
 TAG_COOLDOWN: int = 300
 BATCH_SIZE: int = 10
 BATCH_DELAY: float = 1.0
 MAX_MEMBERS_TO_FETCH: int = 200
 
-# Таймауты и повторные попытки
 API_TIMEOUT: float = 30.0
 MAX_RETRIES: int = 3
 
-# Управление памятью
 MAX_COOLDOWN_ENTRIES: int = 10000
 COOLDOWN_CLEANUP_INTERVAL: int = 3600
 
-# Безопасность
 _ADMIN_CHECK_SECRET: bytes = hashlib.sha256(b"tag_module_admin_check_v2").digest()
 _ADMIN_CHECK_TTL: int = 600
 
-# Префиксы callback_data для парсинга
 _CALLBACK_PREFIX_CONFIRM: str = "confirm_all_"
 _CALLBACK_PREFIX_CANCEL: str = "cancel_all"
 
@@ -69,92 +66,102 @@ _CALLBACK_PREFIX_CANCEL: str = "cancel_all"
 
 @dataclass(frozen=True)
 class ConfirmCallback:
-    """Структурированные данные для подтверждения общего сбора."""
+    """
+    Структурированные данные для подтверждения общего сбора.
+    
+    Формат callback_ confirm_all_{chat_id}_{timestamp}:{signature}
+    
+    Примеры:
+    >>> # Личный чат (положительный ID)
+    >>> ConfirmCallback.parse("confirm_all_123456_1714060800:abc123def4567890")
+    ConfirmCallback(chat_id=123456, timestamp=1714060800.0, signature='abc123def4567890')
+    
+    >>> # Супергруппа (отрицательный ID)
+    >>> ConfirmCallback.parse("confirm_all_-1001234567890_1714060800:abc123def4567890")
+    ConfirmCallback(chat_id=-1001234567890, timestamp=1714060800.0, signature='abc123def4567890')
+    
+    >>> # Неверный формат
+    >>> ConfirmCallback.parse("invalid") is None
+    True
+    >>> ConfirmCallback.parse("confirm_all_abc_123:short") is None  # короткая подпись
+    True
+    """
+    
     chat_id: int
     timestamp: float
     signature: str
     
     @classmethod
-    def parse(cls, data: str) -> Optional["ConfirmCallback"]:
+    def parse(cls,  str) -> Optional["ConfirmCallback"]:
         """
-        Надёжный парсер callback_data для confirm_all.
+        Надёжный парсер callback_data.
         
-        Формат: confirm_all_{chat_id}_{timestamp}:{signature}
+        Алгоритм (устойчив к отрицательным chat_id):
+        1. Найти ':' — он всегда разделяет timestamp и подпись
+        2. Всё после ':' — подпись (ровно 16 hex-символов)
+        3. Всё до ':' — "{chat_id}_{timestamp}"
+        4. Найти ПОСЛЕДНЕЕ '_' в этой части — оно всегда перед timestamp
+        5. Парсим chat_id (может быть отрицательным) и timestamp (только положительный)
         
-        Устойчив к отрицательным chat_id (напр. -1001234567890 для супергрупп).
-        Использует поиск последнего '_' перед ':' для правильного разделения.
-        
-        Args:
-            data: Строка callback_data для парсинга
-            
-        Returns:
-            ConfirmCallback при успешном парсинге, None при ошибке
+        Почему это работает с отрицательными chat_id:
+        "-1001234567890_1714060800:abc123def4567890"
+                          ↑ последний '_' здесь
+        chat_id = "-1001234567890" (отрицательный) ✅
         """
         if not data or not isinstance(data, str):
             return None
         
         try:
+            # 1. Проверка префикса
             if not data.startswith(_CALLBACK_PREFIX_CONFIRM):
                 return None
             
-            # Удаляем префикс: "confirm_all_" -> "-1001234567890_1714060800:abc123def4567890"
+            # 2. Удаляем префикс
             rest = data[len(_CALLBACK_PREFIX_CONFIRM):]
             if not rest:
                 return None
             
-            # Ищем последнее двоеточие (разделитель timestamp:signature)
+            # 3. Находим двоеточие (разделитель timestamp:signature)
+            # Двоеточие есть ТОЛЬКО между timestamp и подписью
             colon_idx = rest.rfind(':')
-            if colon_idx == -1 or colon_idx == 0:
+            if colon_idx == -1 or colon_idx == len(rest) - 1:
                 return None
             
-            # Всё после двоеточия — подпись
             signature = rest[colon_idx + 1:]
-            
-            # Всё до двоеточия — "chat_id_timestamp"
             before_colon = rest[:colon_idx]
             
-            # Ищем ПОСЛЕДНЕЕ подчёркивание в "chat_id_timestamp"
-            # Это правильно разделит даже отрицательные chat_id:
-            # "-1001234567890_1714060800" -> chat_id="-1001234567890", timestamp="1714060800"
+            # 4. Валидация подписи (ровно 16 hex-символов)
+            if len(signature) != 16:
+                return None
+            if not all(c in '0123456789abcdef' for c in signature.lower()):
+                return None
+            
+            # 5. Находим ПОСЛЕДНЕЕ подчёркивание в before_colon
+            # Это разделит chat_id и timestamp корректно даже для отрицательных chat_id
             last_underscore = before_colon.rfind('_')
-            if last_underscore == -1 or last_underscore == 0:
-                # Если подчёркивание в начале, значит chat_id отрицательный
-                # Нужно искать следующее подчёркивание
-                if last_underscore == 0 and before_colon[0] == '-':
-                    # Ищем второе подчёркивание для "-100_123"
-                    second_underscore = before_colon.find('_', 1)
-                    if second_underscore == -1:
-                        # Нет второго подчёркивания — весь remaining это chat_id
-                        # Такого быть не должно в правильном формате
-                        return None
-                    last_underscore = second_underscore
-                else:
-                    return None
+            if last_underscore == -1 or last_underscore == 0 or last_underscore == len(before_colon) - 1:
+                return None
             
             chat_id_str = before_colon[:last_underscore]
             timestamp_str = before_colon[last_underscore + 1:]
             
-            # Валидация chat_id
+            # 6. Валидация и парсинг chat_id (может быть отрицательным)
             if not chat_id_str:
                 return None
-            # chat_id может начинаться с '-' для супергрупп
+            # chat_id должен быть целым числом, возможно с минусом
             if not chat_id_str.lstrip('-').isdigit():
+                return None
+            if chat_id_str == '-':  # только минус без цифр
                 return None
             chat_id = int(chat_id_str)
             
-            # Валидация timestamp
+            # 7. Валидация и парсинг timestamp (только положительное целое)
             if not timestamp_str or not timestamp_str.isdigit():
                 return None
             timestamp = float(timestamp_str)
-            
-            # Базовая валидация подписи
-            if not signature or len(signature) != 16:
-                return None
-            if not all(c in '0123456789abcdef' for c in signature):
-                return None
             if timestamp <= 0:
                 return None
-                
+            
             return cls(chat_id=chat_id, timestamp=timestamp, signature=signature)
             
         except (ValueError, TypeError, IndexError, AttributeError):
@@ -165,7 +172,8 @@ class ConfirmCallback:
         return (
             _CALLBACK_PREFIX_CONFIRM +
             str(self.chat_id) + '_' +
-            str(int(self.timestamp)) + ':' + self.signature
+            str(int(self.timestamp)) + ':' + 
+            self.signature
         )
 
 
@@ -351,23 +359,12 @@ def _sign_admin_check(user_id: int, chat_id: int, timestamp: float) -> str:
     return f"{int(timestamp)}:{signature}"
 
 
-def _verify_admin_check(user_id: int, chat_id: int, signed_data: str) -> bool:
-    """
-    Проверка подписи прав администратора.
-    
-    Args:
-        user_id: ID пользователя для проверки
-        chat_id: ID чата для проверки
-        signed_data: Подпись в формате "timestamp:signature"
-        
-    Returns:
-        True если подпись валидна и не просрочена, иначе False
-    """
+def _verify_admin_check(user_id: int, chat_id: int, signed_ str) -> bool:
+    """Проверка подписи прав администратора."""
     try:
         if not signed_data or not isinstance(signed_data, str):
             return False
         
-        # Разделяем только по первому двоеточию
         colon_idx = signed_data.find(':')
         if colon_idx == -1 or colon_idx == 0:
             return False
@@ -375,21 +372,18 @@ def _verify_admin_check(user_id: int, chat_id: int, signed_data: str) -> bool:
         timestamp_str = signed_data[:colon_idx]
         provided_sig = signed_data[colon_idx + 1:]
         
-        # Валидация формата подписи
         if not provided_sig or len(provided_sig) != 16:
             return False
-        if not all(c in '0123456789abcdef' for c in provided_sig):
+        if not all(c in '0123456789abcdef' for c in provided_sig.lower()):
             return False
         
         timestamp = float(timestamp_str)
         
-        # Проверка времени жизни
         if time.time() - timestamp > _ADMIN_CHECK_TTL:
             return False
         if timestamp <= 0:
             return False
         
-        # Генерация ожидаемой подписи
         expected_payload = f"{user_id}:{chat_id}:{int(timestamp)}"
         expected_sig = hmac.new(
             _ADMIN_CHECK_SECRET,
@@ -577,7 +571,6 @@ async def get_chat_members_safe(
         logger.warning("⚠️ Bot is None in get_chat_members_safe")
         return members, has_more
     
-    # 1. Получаем администраторов
     try:
         admins = await asyncio.wait_for(
             bot.get_chat_administrators(chat_id),
@@ -598,7 +591,6 @@ async def get_chat_members_safe(
     except Exception as e:
         logger.error("❌ Error fetching admins: %s", e, exc_info=True)
     
-    # 2. Получаем остальных участников с лимитом
     try:
         member_count = 0
         async for member in bot.get_chat_members(chat_id):
@@ -1170,3 +1162,4 @@ async def tag_help_callback(callback: CallbackQuery) -> None:
         logger.warning("⚠️ Failed to edit tag_help: %s", e)
     
     await callback.answer()
+
