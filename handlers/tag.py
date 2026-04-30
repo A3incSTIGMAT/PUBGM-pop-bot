@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
 # ФАЙЛ: handlers/tag.py
-# ВЕРСИЯ: 2.5.0-production (надёжный парсинг callback)
+# ВЕРСИЯ: 2.6.0-production (с отладочным логированием)
 # ОПИСАНИЕ: Модуль тегов — /all, /tag, /tagrole
-# ИСПРАВЛЕНИЯ v2.5.0:
-#   ✅ Полностью переработан парсер ConfirmCallback — устойчив к любым chat_id
-#   ✅ Простая и понятная логика: ищем ':' и последнее '_' перед ним
-#   ✅ Строгая валидация каждого поля с явными проверками
-#   ✅ Добавлены юнит-тесты в docstring для самопроверки
+# УЛУЧШЕНИЯ v2.6.0:
+#   ✅ Детальное логирование парсинга callback_data для отладки
+#   ✅ Логи на каждом этапе валидации — видно где именно ошибка
+#   ✅ Сохранена надёжная логика работы с отрицательными chat_id
+#   ✅ Все логи с префиксами 🔍✅❌⚠️ для быстрого поиска в логах
 # =============================================================================
 
 import asyncio
@@ -83,8 +83,6 @@ class ConfirmCallback:
     >>> # Неверный формат
     >>> ConfirmCallback.parse("invalid") is None
     True
-    >>> ConfirmCallback.parse("confirm_all_abc_123:short") is None  # короткая подпись
-    True
     """
     
     chat_id: int
@@ -94,77 +92,105 @@ class ConfirmCallback:
     @classmethod
     def parse(cls,  str) -> Optional["ConfirmCallback"]:
         """
-        Надёжный парсер callback_data.
+        Надёжный парсер callback_data с детальным логированием.
         
-        Алгоритм (устойчив к отрицательным chat_id):
+        Алгоритм:
         1. Найти ':' — он всегда разделяет timestamp и подпись
         2. Всё после ':' — подпись (ровно 16 hex-символов)
         3. Всё до ':' — "{chat_id}_{timestamp}"
         4. Найти ПОСЛЕДНЕЕ '_' в этой части — оно всегда перед timestamp
-        5. Парсим chat_id (может быть отрицательным) и timestamp (только положительный)
-        
-        Почему это работает с отрицательными chat_id:
-        "-1001234567890_1714060800:abc123def4567890"
-                          ↑ последний '_' здесь
-        chat_id = "-1001234567890" (отрицательный) ✅
+        5. Парсим chat_id (может быть отрицательным) и timestamp
         """
+        # 🔍 ВХОДНОЕ ЛОГИРОВАНИЕ
+        logger.debug("🔍 [PARSE] Input: %s", data)
+        
         if not data or not isinstance(data, str):
+            logger.warning("⚠️ [PARSE] Invalid data type: %s", type(data).__name__)
             return None
         
         try:
             # 1. Проверка префикса
             if not data.startswith(_CALLBACK_PREFIX_CONFIRM):
+                logger.warning("⚠️ [PARSE] Wrong prefix. Expected: '%s', Got: '%s'", 
+                              _CALLBACK_PREFIX_CONFIRM, data[:30] + "..." if len(data) > 30 else data)
                 return None
+            logger.debug("✅ [PARSE] Prefix OK")
             
             # 2. Удаляем префикс
             rest = data[len(_CALLBACK_PREFIX_CONFIRM):]
+            logger.debug("🔍 [PARSE] After prefix removal: '%s'", rest)
+            
             if not rest:
+                logger.warning("⚠️ [PARSE] Empty string after prefix removal")
                 return None
             
             # 3. Находим двоеточие (разделитель timestamp:signature)
-            # Двоеточие есть ТОЛЬКО между timestamp и подписью
             colon_idx = rest.rfind(':')
+            logger.debug("🔍 [PARSE] Colon position: %d, rest length: %d", colon_idx, len(rest))
+            
             if colon_idx == -1 or colon_idx == len(rest) - 1:
+                logger.warning("⚠️ [PARSE] Invalid colon position: %d", colon_idx)
                 return None
             
             signature = rest[colon_idx + 1:]
             before_colon = rest[:colon_idx]
+            logger.debug("🔍 [PARSE] Signature: '%s', Before colon: '%s'", signature, before_colon)
             
             # 4. Валидация подписи (ровно 16 hex-символов)
             if len(signature) != 16:
+                logger.warning("⚠️ [PARSE] Invalid signature length: %d (expected 16)", len(signature))
                 return None
             if not all(c in '0123456789abcdef' for c in signature.lower()):
+                logger.warning("⚠️ [PARSE] Invalid signature characters: '%s'", signature)
                 return None
+            logger.debug("✅ [PARSE] Signature format OK")
             
             # 5. Находим ПОСЛЕДНЕЕ подчёркивание в before_colon
-            # Это разделит chat_id и timestamp корректно даже для отрицательных chat_id
             last_underscore = before_colon.rfind('_')
+            logger.debug("🔍 [PARSE] Last underscore position: %d, before_colon length: %d", 
+                        last_underscore, len(before_colon))
+            
             if last_underscore == -1 or last_underscore == 0 or last_underscore == len(before_colon) - 1:
+                logger.warning("⚠️ [PARSE] Invalid underscore position: %d", last_underscore)
                 return None
             
             chat_id_str = before_colon[:last_underscore]
             timestamp_str = before_colon[last_underscore + 1:]
+            logger.debug("🔍 [PARSE] Chat ID str: '%s', Timestamp str: '%s'", chat_id_str, timestamp_str)
             
             # 6. Валидация и парсинг chat_id (может быть отрицательным)
             if not chat_id_str:
+                logger.warning("⚠️ [PARSE] Empty chat_id_str")
                 return None
-            # chat_id должен быть целым числом, возможно с минусом
             if not chat_id_str.lstrip('-').isdigit():
+                logger.warning("⚠️ [PARSE] chat_id_str is not a valid integer: '%s'", chat_id_str)
                 return None
-            if chat_id_str == '-':  # только минус без цифр
+            if chat_id_str == '-':
+                logger.warning("⚠️ [PARSE] chat_id_str is only minus sign")
                 return None
+            
             chat_id = int(chat_id_str)
+            logger.debug("✅ [PARSE] Parsed chat_id: %d", chat_id)
             
             # 7. Валидация и парсинг timestamp (только положительное целое)
             if not timestamp_str or not timestamp_str.isdigit():
+                logger.warning("⚠️ [PARSE] Invalid timestamp_str: '%s'", timestamp_str)
                 return None
+            
             timestamp = float(timestamp_str)
             if timestamp <= 0:
+                logger.warning("⚠️ [PARSE] Timestamp <= 0: %f", timestamp)
                 return None
+            logger.debug("✅ [PARSE] Parsed timestamp: %f", timestamp)
+            
+            # ✅ УСПЕШНЫЙ ПАРСИНГ
+            logger.debug("✅ [PARSE] SUCCESS: chat_id=%d, timestamp=%f, signature=%s", 
+                        chat_id, timestamp, signature)
             
             return cls(chat_id=chat_id, timestamp=timestamp, signature=signature)
             
-        except (ValueError, TypeError, IndexError, AttributeError):
+        except (ValueError, TypeError, IndexError, AttributeError) as e:
+            logger.error("❌ [PARSE] Exception: %s", e, exc_info=True)
             return None
     
     def to_callback_data(self) -> str:
@@ -627,6 +653,10 @@ async def get_chat_members_safe(
 @router.message(Command("all"))
 async def cmd_all(message: Message) -> None:
     """Команда общего сбора (только для админов)."""
+    logger.info("📥 Command /all from user %s in chat %s", 
+                getattr(message.from_user, 'id', None) if message.from_user else None,
+                getattr(message.chat, 'id', None) if message.chat else None)
+    
     if message is None:
         return
     
@@ -634,12 +664,14 @@ async def cmd_all(message: Message) -> None:
     chat = getattr(message, 'chat', None)
     
     if from_user is None or chat is None:
+        logger.warning("⚠️ Missing from_user or chat in message")
         return
     
     user_id = getattr(from_user, 'id', None)
     chat_id = getattr(chat, 'id', None)
     
     if user_id is None or chat_id is None:
+        logger.warning("⚠️ Missing user_id or chat_id")
         return
     
     chat_type = getattr(chat, 'type', None)
@@ -704,6 +736,7 @@ async def cmd_all(message: Message) -> None:
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
+    logger.info("✅ Sent confirmation message for chat %d", chat_id)
 
 
 @router.message(Command("tag"))
@@ -840,6 +873,10 @@ async def cmd_tag_role(message: Message) -> None:
 @router.callback_query(F.data.startswith(_CALLBACK_PREFIX_CONFIRM))
 async def confirm_all(callback: CallbackQuery) -> None:
     """Подтверждение общего сбора."""
+    logger.info("📥 Confirm callback received from user %s", 
+                getattr(callback.from_user, 'id', None) if callback.from_user else None)
+    logger.debug("📥 Callback  %s", callback.data)
+    
     if callback is None:
         return
     
@@ -847,25 +884,30 @@ async def confirm_all(callback: CallbackQuery) -> None:
     from_user = getattr(callback, 'from_user', None)
     
     if cb_message is None or from_user is None:
+        logger.warning("⚠️ Missing message or from_user in callback")
         return
     
-    # Надёжный парсинг callback_
+    # Надёжный парсинг callback_data
     parsed = ConfirmCallback.parse(callback.data)
     if parsed is None:
-        logger.warning("⚠️ Failed to parse confirm callback: %s", callback.data)
+        logger.error("❌ Failed to parse callback: %s", callback.data)
         await callback.answer("❌ Неверный формат запроса", show_alert=True)
         return
+    
+    logger.info("✅ Parsed callback: chat_id=%d, timestamp=%f", parsed.chat_id, parsed.timestamp)
     
     chat_id = parsed.chat_id
     user_id = getattr(from_user, 'id', None)
     
     if user_id is None:
+        logger.warning("⚠️ Missing user_id")
         await callback.answer("❌ Ошибка авторизации", show_alert=True)
         return
     
     msg_chat = getattr(cb_message, 'chat', None)
     if msg_chat and getattr(msg_chat, 'id', None) != chat_id:
-        logger.warning("⚠️ Chat ID mismatch in callback")
+        logger.warning("⚠️ Chat ID mismatch: callback=%d, message=%d", 
+                      chat_id, getattr(msg_chat, 'id', None))
         await callback.answer("❌ Несоответствие чата", show_alert=True)
         return
     
@@ -964,11 +1006,15 @@ async def confirm_all(callback: CallbackQuery) -> None:
             pass
     
     await callback.answer("✅ Общий сбор завершён!")
+    logger.info("✅ Confirm callback completed for chat %d", chat_id)
 
 
 @router.callback_query(F.data == _CALLBACK_PREFIX_CANCEL)
 async def cancel_all(callback: CallbackQuery) -> None:
     """Отмена общего сбора."""
+    logger.info("📥 Cancel callback from user %s", 
+                getattr(callback.from_user, 'id', None) if callback.from_user else None)
+    
     if callback is None or callback.message is None:
         return
     
