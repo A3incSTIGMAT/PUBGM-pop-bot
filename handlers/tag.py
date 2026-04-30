@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
 # ФАЙЛ: handlers/tag.py
-# ВЕРСИЯ: 2.6.0-production (с отладочным логированием)
+# ВЕРСИЯ: 2.6.1-production (исправлены все ошибки)
 # ОПИСАНИЕ: Модуль тегов — /all, /tag, /tagrole
-# УЛУЧШЕНИЯ v2.6.0:
-#   ✅ Детальное логирование парсинга callback_data для отладки
-#   ✅ Логи на каждом этапе валидации — видно где именно ошибка
-#   ✅ Сохранена надёжная логика работы с отрицательными chat_id
-#   ✅ Все логи с префиксами 🔍✅❌⚠️ для быстрого поиска в логах
+# ИСПРАВЛЕНИЯ v2.6.1:
+#   ✅ Исправлена синтаксическая ошибка в ConfirmCallback.parse
+#   ✅ Исправлена синтаксическая ошибка в _verify_admin_check
+#   ✅ Убрана неверная проверка last_underscore == 0
+#   ✅ Сохранено детальное логирование для отладки
 # =============================================================================
 
 import asyncio
@@ -72,9 +72,9 @@ class ConfirmCallback:
     Формат callback_ confirm_all_{chat_id}_{timestamp}:{signature}
     
     Примеры:
-    >>> # Личный чат (положительный ID)
-    >>> ConfirmCallback.parse("confirm_all_123456_1714060800:abc123def4567890")
-    ConfirmCallback(chat_id=123456, timestamp=1714060800.0, signature='abc123def4567890')
+    >>> # Обычная группа (отрицательный ID)
+    >>> ConfirmCallback.parse("confirm_all_-5276597027_1714060800:abc123def4567890")
+    ConfirmCallback(chat_id=-5276597027, timestamp=1714060800.0, signature='abc123def4567890')
     
     >>> # Супергруппа (отрицательный ID)
     >>> ConfirmCallback.parse("confirm_all_-1001234567890_1714060800:abc123def4567890")
@@ -90,18 +90,17 @@ class ConfirmCallback:
     signature: str
     
     @classmethod
-    def parse(cls,  str) -> Optional["ConfirmCallback"]:
+    def parse(cls, data: str) -> Optional["ConfirmCallback"]:
         """
         Надёжный парсер callback_data с детальным логированием.
         
         Алгоритм:
-        1. Найти ':' — он всегда разделяет timestamp и подпись
+        1. Найти ':' — разделяет timestamp и подпись
         2. Всё после ':' — подпись (ровно 16 hex-символов)
         3. Всё до ':' — "{chat_id}_{timestamp}"
-        4. Найти ПОСЛЕДНЕЕ '_' в этой части — оно всегда перед timestamp
+        4. Найти ПОСЛЕДНЕЕ '_' — оно всегда перед timestamp
         5. Парсим chat_id (может быть отрицательным) и timestamp
         """
-        # 🔍 ВХОДНОЕ ЛОГИРОВАНИЕ
         logger.debug("🔍 [PARSE] Input: %s", data)
         
         if not data or not isinstance(data, str):
@@ -150,7 +149,9 @@ class ConfirmCallback:
             logger.debug("🔍 [PARSE] Last underscore position: %d, before_colon length: %d", 
                         last_underscore, len(before_colon))
             
-            if last_underscore == -1 or last_underscore == 0 or last_underscore == len(before_colon) - 1:
+            # ✅ ИСПРАВЛЕНО: убрана проверка last_underscore == 0
+            # Отрицательные chat_id (например, -5276597027) дают last_underscore > 0
+            if last_underscore == -1 or last_underscore == len(before_colon) - 1:
                 logger.warning("⚠️ [PARSE] Invalid underscore position: %d", last_underscore)
                 return None
             
@@ -172,7 +173,7 @@ class ConfirmCallback:
             chat_id = int(chat_id_str)
             logger.debug("✅ [PARSE] Parsed chat_id: %d", chat_id)
             
-            # 7. Валидация и парсинг timestamp (только положительное целое)
+            # 7. Валидация и парсинг timestamp
             if not timestamp_str or not timestamp_str.isdigit():
                 logger.warning("⚠️ [PARSE] Invalid timestamp_str: '%s'", timestamp_str)
                 return None
@@ -184,7 +185,7 @@ class ConfirmCallback:
             logger.debug("✅ [PARSE] Parsed timestamp: %f", timestamp)
             
             # ✅ УСПЕШНЫЙ ПАРСИНГ
-            logger.debug("✅ [PARSE] SUCCESS: chat_id=%d, timestamp=%f, signature=%s", 
+            logger.info("✅ [PARSE] SUCCESS: chat_id=%d, timestamp=%.0f, signature=%s", 
                         chat_id, timestamp, signature)
             
             return cls(chat_id=chat_id, timestamp=timestamp, signature=signature)
@@ -385,8 +386,18 @@ def _sign_admin_check(user_id: int, chat_id: int, timestamp: float) -> str:
     return f"{int(timestamp)}:{signature}"
 
 
-def _verify_admin_check(user_id: int, chat_id: int, signed_ str) -> bool:
-    """Проверка подписи прав администратора."""
+def _verify_admin_check(user_id: int, chat_id: int, signed_data: str) -> bool:
+    """
+    Проверка подписи прав администратора.
+    
+    Args:
+        user_id: ID пользователя для проверки
+        chat_id: ID чата для проверки
+        signed_data: Подпись в формате "timestamp:signature"
+        
+    Returns:
+        True если подпись валидна и не просрочена, иначе False
+    """
     try:
         if not signed_data or not isinstance(signed_data, str):
             return False
@@ -1208,4 +1219,3 @@ async def tag_help_callback(callback: CallbackQuery) -> None:
         logger.warning("⚠️ Failed to edit tag_help: %s", e)
     
     await callback.answer()
-
