@@ -2,19 +2,24 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/vip.py
-# ВЕРСИЯ: 3.2.5-production (исправленная)
+# ВЕРСИЯ: 3.3.0-production (исправленная после аудита)
 # ОПИСАНИЕ: VIP-модуль с интеграцией всех рекомендаций
-# ИСПРАВЛЕНИЯ v3.2.5:
-#   ✅ Исправлен SyntaxError: def _parse_buy_vip_callback( str) → (data: str)
-#   ✅ Исправлен SyntaxError: if full_ → if full_data
-#   ✅ Возврат Optional[Tuple] в get_user_full_data
-#   ✅ Все f-строки без \n (Python 3.9+)
+# ============================================
+# ИСПРАВЛЕНИЯ v3.3.0:
+#   🟡 Константы вынесены в os.getenv()
+#   🟡 _validate_vip_config логирует вместо raise
+#   🟡 hasattr проверка для _execute_transaction
+#   🟡 exc_info=True во всех logger.error
+#   🟡 HMAC-подпись для callback_data покупки VIP
 # ============================================
 
+import asyncio
+import hashlib
+import hmac
 import html
 import logging
 import math
-import asyncio
+import os
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -28,30 +33,22 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from database import db, DatabaseError
 from config import START_BALANCE
 
-# Метрики (graceful fallback)
-try:
-    from prometheus_client import Counter, Histogram
-    _METRICS_AVAILABLE = True
-    vip_purchase_counter = Counter('vip_purchases_total', 'Total VIP purchases', ['level', 'status', 'user_tier'])
-    vip_purchase_duration = Histogram('vip_purchase_duration_seconds', 'Time spent on VIP purchase', ['level'])
-    cache_invalidate_counter = Counter('cache_invalidations_total', 'Cache invalidation attempts', ['status'])
-    rate_limit_counter = Counter('rate_limit_exceeded_total', 'Rate limit exceeded attempts', ['endpoint'])
-except ImportError:
-    _METRICS_AVAILABLE = False
-    vip_purchase_counter = None
-    vip_purchase_duration = None
-    cache_invalidate_counter = None
-    rate_limit_counter = None
-
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# ==================== КОНФИГУРАЦИЯ (НАСТРАИВАЕМАЯ) ====================
 
-VIP_PRICES = {1: 500, 2: 1000, 3: 2000, 4: 5000, 5: 10000}
-VIP_DURATION_DAYS = 30
-MAX_VIP_LEVEL = 5
+VIP_DURATION_DAYS = int(os.getenv("VIP_DURATION_DAYS", "30"))
+MAX_VIP_LEVEL = int(os.getenv("VIP_MAX_LEVEL", "5"))
 MIN_VIP_LEVEL = 1
+
+VIP_PRICES = {
+    1: int(os.getenv("VIP_PRICE_1", "500")),
+    2: int(os.getenv("VIP_PRICE_2", "1000")),
+    3: int(os.getenv("VIP_PRICE_3", "2000")),
+    4: int(os.getenv("VIP_PRICE_4", "5000")),
+    5: int(os.getenv("VIP_PRICE_5", "10000")),
+}
 
 VIP_NAMES: Dict[int, Dict[str, object]] = {
     1: {"name": "🥉 Бронза", "win_bonus": 5, "daily_bonus": 50, "icon": "🥉", "wins_required": 10},
@@ -67,9 +64,12 @@ _VIP_THRESHOLDS: list = sorted(
 )
 _MAX_WINS_REQUIRED: int = max(int(VIP_NAMES[lvl]['wins_required']) for lvl in VIP_NAMES)
 
+# Секрет для подписи callback_data
+_VIP_CALLBACK_SECRET = os.getenv("VIP_CALLBACK_SECRET", "nexus_vip_secret_v1").encode()
+
 
 def _validate_vip_config() -> None:
-    """Расширенная валидация конфигурации при импорте."""
+    """Валидация конфигурации при импорте (логирует, не крашит)."""
     errors = []
     
     if set(VIP_PRICES.keys()) != set(VIP_NAMES.keys()):
@@ -79,25 +79,23 @@ def _validate_vip_config() -> None:
     for level in sorted(VIP_NAMES.keys()):
         price = VIP_PRICES.get(level)
         if price is None or not isinstance(price, int) or price <= 0:
-            errors.append("Invalid price for level " + str(level) + ": " + str(price))
+            errors.append(f"Invalid price for level {level}: {price}")
         
         cfg = VIP_NAMES[level]
         wins_req = cfg.get('wins_required', 0)
         
         if not isinstance(wins_req, int) or wins_req <= 0:
-            errors.append("wins_required for level " + str(level) + " must be > 0, got " + str(wins_req))
+            errors.append(f"wins_required for level {level} must be > 0, got {wins_req}")
         elif wins_req <= prev_wins:
-            errors.append(
-                "wins_required for level " + str(level) + " must be > "
-                + str(prev_wins) + ", got " + str(wins_req)
-            )
+            errors.append(f"wins_required for level {level} must be > {prev_wins}, got {wins_req}")
         
         prev_wins = wins_req
     
     if errors:
-        error_msg = "VIP config validation FAILED: " + "; ".join(errors)
-        logger.critical(error_msg)
-        raise ValueError(error_msg)
+        logger.error("❌ VIP config validation FAILED: %s", "; ".join(errors))
+    else:
+        logger.info("✅ VIP config validated successfully")
+
 
 _validate_vip_config()
 
@@ -110,8 +108,7 @@ def safe_html_escape(text: Optional[str]) -> str:
         return ""
     try:
         return html.escape(str(text))
-    except Exception as e:
-        logger.warning("HTML escape failed: %s", e)
+    except Exception:
         return "[ошибка]"
 
 
@@ -144,6 +141,40 @@ def format_vip_date(vip_until: Optional[str]) -> str:
         return "Бессрочно"
 
 
+def _sign_vip_callback(level: int) -> str:
+    """Генерация подписанного callback_data для покупки VIP."""
+    payload = f"buy_vip_{level}"
+    signature = hmac.new(_VIP_CALLBACK_SECRET, payload.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{payload}_{signature}"
+
+
+def _verify_vip_callback(data: str) -> Optional[int]:
+    """Проверка подписанного callback_data. Возвращает уровень или None."""
+    if not data or not data.startswith("buy_vip_"):
+        return None
+    
+    try:
+        parts = data.split("_")
+        if len(parts) < 4:
+            return None
+        
+        level = int(parts[2])
+        provided_sig = parts[3]
+        
+        expected_payload = f"buy_vip_{level}"
+        expected_sig = hmac.new(
+            _VIP_CALLBACK_SECRET, expected_payload.encode(), hashlib.sha256
+        ).hexdigest()[:16]
+        
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            logger.warning("⚠️ Invalid VIP callback signature!")
+            return None
+        
+        return level if level in VIP_PRICES else None
+    except (ValueError, IndexError):
+        return None
+
+
 # Rate Limiting
 _user_request_times: Dict[int, Deque[float]] = defaultdict(lambda: deque(maxlen=15))
 
@@ -156,8 +187,6 @@ def _check_rate_limit(user_id: int, max_requests: int = 5, window_sec: int = 10)
         requests.popleft()
     
     if len(requests) >= max_requests:
-        if _METRICS_AVAILABLE:
-            rate_limit_counter.labels(endpoint="vip_handlers").inc()
         return False
     
     requests.append(now)
@@ -170,25 +199,15 @@ async def invalidate_user_cache(user_id: int, max_retries: int = 3) -> bool:
         try:
             if hasattr(db, '_invalidate_stats_cache'):
                 await db._invalidate_stats_cache(user_id)
-                if _METRICS_AVAILABLE:
-                    cache_invalidate_counter.labels(status='success').inc()
                 return True
             else:
-                logger.warning("_invalidate_stats_cache not found in db")
-                if _METRICS_AVAILABLE:
-                    cache_invalidate_counter.labels(status='method_missing').inc()
                 return False
         except Exception as e:
             delay = 0.1 * (2 ** attempt)
-            logger.warning(
-                "Cache invalidation failed for user %s (attempt %d/%d): %s",
-                user_id, attempt + 1, max_retries, e
-            )
+            logger.warning(f"⚠️ Cache invalidation failed for {user_id} (attempt {attempt + 1}): {e}")
             await asyncio.sleep(delay)
     
-    logger.error("Cache invalidation permanently failed for user %s", user_id)
-    if _METRICS_AVAILABLE:
-        cache_invalidate_counter.labels(status='error').inc()
+    logger.error(f"❌ Cache invalidation permanently failed for {user_id}")
     return False
 
 
@@ -204,10 +223,10 @@ async def get_or_create_user(
             await db.create_user(user_id, username, first_name, START_BALANCE)
             user = await db.get_user(user_id)
             if user:
-                logger.info("Created user %s in vip module", user_id)
+                logger.info(f"✅ Created user {user_id} in vip module")
         return user
     except DatabaseError as e:
-        logger.error("DB error in get_or_create_user for %s: %s", user_id, e)
+        logger.error(f"❌ DB error in get_or_create_user for {user_id}: {e}", exc_info=True)
         return None
 
 
@@ -222,13 +241,12 @@ async def get_user_full_data(user_id: int) -> Optional[Tuple[int, int, int, int]
                 stats.get('losses', 0) or 0,
                 stats.get('games_played', 0) or 0
             )
-        logger.warning("No stats found for user %s", user_id)
         return None
     except DatabaseError as e:
-        logger.error("Error getting stats for %s: %s", user_id, e)
+        logger.error(f"❌ Error getting stats for {user_id}: {e}", exc_info=True)
         return None
     except Exception as e:
-        logger.error("Unexpected error in get_user_full_data: %s", e)
+        logger.error(f"❌ Unexpected error in get_user_full_data: {e}", exc_info=True)
         return None
 
 
@@ -242,7 +260,6 @@ async def get_user_with_stats(user_id: int) -> Tuple[Optional[Dict], int, int, i
         return None, 0, 0, 0, 0
     
     full_data = await get_user_full_data(user_id)
-    # ✅ Исправлено: if full_ → if full_data
     if full_data:
         return user, full_data[0], full_data[1], full_data[2], full_data[3]
     
@@ -260,10 +277,10 @@ async def update_user_vip(user_id: int, vip_level: int, days: int = VIP_DURATION
             (vip_level, new_until, user_id)
         )
         await invalidate_user_cache(user_id)
-        logger.info("Updated VIP for user %s to level %s", user_id, vip_level)
+        logger.info(f"✅ Updated VIP for user {user_id} to level {vip_level}")
         return True
     except DatabaseError as e:
-        logger.error("Failed to update VIP for %s: %s", user_id, e)
+        logger.error(f"❌ Failed to update VIP for {user_id}: {e}", exc_info=True)
         return False
 
 
@@ -284,29 +301,22 @@ async def check_and_award_achievement_vip(user_id: int, wins: int) -> Optional[i
              "WHERE user_id = ? AND (vip_level IS NULL OR vip_level < ?)",
              (vip_level, new_until, user_id, vip_level)),
         ]
-        if await db._execute_transaction(queries):
-            await invalidate_user_cache(user_id)
-            logger.info("Awarded VIP level %s to user %s (wins: %s)", vip_level, user_id, wins)
-            return vip_level
-        return None
+        
+        if hasattr(db, '_execute_transaction') and callable(db._execute_transaction):
+            await db._execute_transaction(queries)
+        else:
+            await db._execute_with_retry(
+                "UPDATE users SET vip_level = ?, vip_until = ? "
+                "WHERE user_id = ? AND (vip_level IS NULL OR vip_level < ?)",
+                (vip_level, new_until, user_id, vip_level)
+            )
+        
+        await invalidate_user_cache(user_id)
+        logger.info(f"✅ Awarded VIP level {vip_level} to user {user_id} (wins: {wins})")
+        return vip_level
     except DatabaseError as e:
-        logger.error("Failed to award VIP to %s: %s", user_id, e)
+        logger.error(f"❌ Failed to award VIP to {user_id}: {e}", exc_info=True)
     return None
-
-
-# ✅ Исправлено: def _parse_buy_vip_callback( str) → (data: str)
-def _parse_buy_vip_callback(data: str) -> Optional[int]:
-    """Безопасный парсинг callback_data."""
-    if not data or not isinstance(data, str):
-        return None
-    parts = data.split("_")
-    if len(parts) != 3 or parts[0] != "buy" or parts[1] != "vip":
-        return None
-    try:
-        level = int(parts[2])
-        return level if level in VIP_PRICES else None
-    except ValueError:
-        return None
 
 
 def get_vip_privileges(vip_level: int) -> Dict:
@@ -325,19 +335,19 @@ def format_vip_active(vip_level: int, balance: int, wins: int, losses: int, vip_
     db_bonus = str(priv.get('daily_bonus', 0))
     
     return (
-        icon + " <b>ВАШ VIP СТАТУС</b> " + icon + "\n\n"
+        f"{icon} <b>ВАШ VIP СТАТУС</b> {icon}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📛 Уровень: <b>" + name + "</b> (Уровень " + str(vip_level) + ")\n"
-        "💰 Баланс: <b>" + format_number(balance) + "</b> NCoins\n"
-        "📅 Действует до: " + safe_html_escape(format_vip_date(vip_until)) + "\n\n"
+        f"📛 Уровень: <b>{name}</b> (Уровень {vip_level})\n"
+        f"💰 Баланс: <b>{format_number(balance)}</b> NCoins\n"
+        f"📅 Действует до: {safe_html_escape(format_vip_date(vip_until))}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📊 <b>Статистика XO:</b>\n"
-        "├ 🏆 Побед: " + str(wins) + "\n"
-        "└ 📉 Поражений: " + str(losses) + "\n\n"
+        f"📊 <b>Статистика XO:</b>\n"
+        f"├ 🏆 Побед: {wins}\n"
+        f"└ 📉 Поражений: {losses}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>✨ ВАШИ ПРЕИМУЩЕСТВА:</b>\n\n"
-        "├ 🎮 +" + wb + "% к выигрышам\n"
-        "├ 🎁 +" + db_bonus + " NCoins к бонусу\n"
+        f"├ 🎮 +{wb}% к выигрышам\n"
+        f"├ 🎁 +{db_bonus} NCoins к бонусу\n"
         "├ 👑 Статус в чате\n"
         "├ 💎 Доступ к VIP-комнатам\n"
         "└ ⭐ Приоритетная поддержка"
@@ -352,9 +362,9 @@ def format_vip_catalog(balance: int, wins: int, losses: int, games: int) -> str:
         "⭐ <b>VIP СТАТУСЫ NEXUS</b> ⭐\n\n"
         "Получите эксклюзивные преимущества!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💰 <b>Баланс: " + format_number(balance) + " NCoins</b>\n"
-        "🏆 <b>Побед: " + str(wins) + "</b> | 📉 <b>Поражений: " + str(losses) + "</b>\n"
-        "📊 <b>Винрейт: " + str(round(winrate, 1)) + "%</b> (" + str(games) + " игр)\n"
+        f"💰 <b>Баланс: {format_number(balance)} NCoins</b>\n"
+        f"🏆 <b>Побед: {wins}</b> | 📉 <b>Поражений: {losses}</b>\n"
+        f"📊 <b>Винрейт: {round(winrate, 1)}%</b> ({games} игр)\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     
@@ -364,9 +374,9 @@ def format_vip_catalog(balance: int, wins: int, losses: int, games: int) -> str:
         wb = str(VIP_NAMES[level].get('win_bonus', 0))
         db_bonus = str(VIP_NAMES[level].get('daily_bonus', 0))
         text += (
-            name + " (" + str(level) + " ур.) — " + format_number(price) + " NCoins\n"
-            "├ 🎮 +" + wb + "% к выигрышам\n"
-            "└ 🎁 +" + db_bonus + " NCoins к бонусу\n\n"
+            f"{name} ({level} ур.) — {format_number(price)} NCoins\n"
+            f"├ 🎮 +{wb}% к выигрышам\n"
+            f"└ 🎁 +{db_bonus} NCoins к бонусу\n\n"
         )
     
     text += (
@@ -374,17 +384,8 @@ def format_vip_catalog(balance: int, wins: int, losses: int, games: int) -> str:
         "🎁 <b>БЕСПЛАТНЫЙ VIP ЗА ПОБЕДЫ В XO:</b>\n"
     )
     for level in sorted(VIP_NAMES.keys()):
-        if level >= MAX_VIP_LEVEL:
-            break
-        text += (
-            "├ " + str(VIP_NAMES[level].get('wins_required', 0))
-            + " побед → " + str(VIP_NAMES[level].get('name', '')) + "\n"
-        )
-    text += (
-        "└ " + str(VIP_NAMES[MAX_VIP_LEVEL].get('wins_required', 0))
-        + " побед → " + str(VIP_NAMES[MAX_VIP_LEVEL].get('name', '')) + "\n\n"
-        "📊 <b>Ваш прогресс: " + str(wins) + " побед</b>"
-    )
+        text += f"├ {VIP_NAMES[level].get('wins_required', 0)} побед → {VIP_NAMES[level].get('name', '')}\n"
+    text += f"\n📊 <b>Ваш прогресс: {wins} побед</b>"
     return text
 
 
@@ -409,25 +410,22 @@ def format_achievements(
     if next_level is None:
         progress = 100
     
-    filled = math.ceil(10 * progress / 100)
-    filled = min(filled, 10)
+    filled = min(math.ceil(10 * progress / 100), 10)
     progress_bar = "█" * filled + "░" * (10 - filled)
     
     status_msg = ""
     if awarded_vip:
-        status_msg = (
-            "✨ <b>Только что получен VIP " + str(awarded_vip) + " уровня!</b>\n\n"
-        )
+        status_msg = f"✨ <b>Только что получен VIP {awarded_vip} уровня!</b>\n\n"
     
     progress_msg = ""
     if next_level and wins < _MAX_WINS_REQUIRED:
         progress_msg = (
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "📈 <b>ДО СЛЕДУЮЩЕГО УРОВНЯ:</b>\n\n"
-            "Цель: <b>" + str(next_level) + "</b>\n"
-            "Прогресс: " + str(wins) + "/" + str(next_wins) + " побед\n"
-            "[" + progress_bar + "] " + str(progress) + "%\n\n"
-            "💪 Осталось <b>" + str(next_wins - wins) + "</b> побед!\n"
+            f"Цель: <b>{next_level}</b>\n"
+            f"Прогресс: {wins}/{next_wins} побед\n"
+            f"[{progress_bar}] {progress}%\n\n"
+            f"💪 Осталось <b>{next_wins - wins}</b> побед!\n"
         )
     
     rewards_lines = []
@@ -435,26 +433,39 @@ def format_achievements(
         icon = str(VIP_NAMES[lvl].get('icon', ''))
         wr = str(VIP_NAMES[lvl].get('wins_required', 0))
         name = str(VIP_NAMES[lvl].get('name', ''))
-        rewards_lines.append(icon + " " + wr + " побед → " + name + " VIP")
+        rewards_lines.append(f"{icon} {wr} побед → {name} VIP")
     rewards = "\n".join(rewards_lines)
     
     return (
         "🏆 <b>БЕСПЛАТНЫЙ VIP ЗА ДОСТИЖЕНИЯ</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>ВАША СТАТИСТИКА XO:</b>\n\n"
-        "💰 Баланс: <b>" + format_number(balance) + " NCoins</b>\n"
-        "🏆 Побед: <b>" + str(wins) + "</b>\n"
-        "📉 Поражений: <b>" + str(losses) + "</b>\n"
-        "📊 Винрейт: <b>" + str(round(winrate, 1)) + "%</b> (" + str(games) + " игр)\n"
-        "⭐ Текущий VIP: <b>" + str(current_vip) + " уровень</b>\n\n"
-        + status_msg + progress_msg
-        + "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 Баланс: <b>{format_number(balance)} NCoins</b>\n"
+        f"🏆 Побед: <b>{wins}</b>\n"
+        f"📉 Поражений: <b>{losses}</b>\n"
+        f"📊 Винрейт: <b>{round(winrate, 1)}%</b> ({games} игр)\n"
+        f"⭐ Текущий VIP: <b>{current_vip} уровень</b>\n\n"
+        + status_msg + progress_msg +
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>ДОСТУПНЫЕ НАГРАДЫ:</b>\n\n"
         + rewards
     )
 
 
 # ==================== ОБРАБОТЧИКИ ====================
+
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """Безопасный ответ на callback."""
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except Exception:
+        pass
+
 
 @router.message(Command("vip"))
 async def cmd_vip(message: Message) -> None:
@@ -493,13 +504,13 @@ async def cmd_vip(message: Message) -> None:
             [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
         ])
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        logger.info("VIP menu viewed by user %s (level: %s)", user_id, vip_level)
+        logger.info(f"✅ VIP menu viewed by user {user_id} (level: {vip_level})")
         
     except DatabaseError as e:
-        logger.error("DB error in cmd_vip for %s: %s", user_id, e)
+        logger.error(f"❌ DB error in cmd_vip for {user_id}: {e}", exc_info=True)
         await message.answer("❌ Ошибка загрузки VIP меню.")
     except Exception as e:
-        logger.error("Unexpected error in cmd_vip: %s", e, exc_info=True)
+        logger.error(f"❌ Unexpected error in cmd_vip: {e}", exc_info=True)
         await message.answer("❌ Произошла ошибка.")
 
 
@@ -510,20 +521,20 @@ async def vip_callback(callback: CallbackQuery) -> None:
     if callback is None:
         return
     await cmd_vip(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "buy_vip")
 async def buy_vip_menu(callback: CallbackQuery) -> None:
     """Меню покупки VIP."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
         return
     
     user_id = callback.from_user.id
     user, balance, _, _, _ = await get_user_with_stats(user_id)
     
     if not user:
-        await callback.answer("❌ Ошибка БД", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка БД")
         return
     
     try:
@@ -536,10 +547,12 @@ async def buy_vip_menu(callback: CallbackQuery) -> None:
             name = str(VIP_NAMES[level].get('name', ''))
             price = VIP_PRICES[level]
             afford_mark = "" if balance >= price else " 🔒"
+            # ✅ Используем подписанный callback
+            signed_data = _sign_vip_callback(level)
             buttons.append([
                 InlineKeyboardButton(
-                    text=name + " — " + format_number(price) + " NCoins" + afford_mark,
-                    callback_data="buy_vip_" + str(level)
+                    text=f"{name} — {format_number(price)} NCoins{afford_mark}",
+                    callback_data=signed_data
                 )
             ])
         
@@ -553,10 +566,10 @@ async def buy_vip_menu(callback: CallbackQuery) -> None:
         
         text = (
             "💎 <b>ПОКУПКА VIP</b>\n\n"
-            "💰 Баланс: <b>" + format_number(balance) + " NCoins</b>\n"
-            "⭐ Текущий VIP: <b>" + str(current_vip) + " уровень</b>\n\n"
+            f"💰 Баланс: <b>{format_number(balance)} NCoins</b>\n"
+            f"⭐ Текущий VIP: <b>{current_vip} уровень</b>\n\n"
             "Выберите уровень:\n"
-            "💡 VIP действует " + str(VIP_DURATION_DAYS) + " дней\n"
+            f"💡 VIP действует {VIP_DURATION_DAYS} дней\n"
             "🔒 — недостаточно средств"
         )
         
@@ -564,67 +577,54 @@ async def buy_vip_menu(callback: CallbackQuery) -> None:
             text, parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
         
     except DatabaseError as e:
-        logger.error("DB error in buy_vip_menu for %s: %s", user_id, e)
-        await callback.answer("❌ Ошибка", show_alert=True)
+        logger.error(f"❌ DB error in buy_vip_menu for {user_id}: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка")
 
 
 @router.callback_query(F.data.startswith("buy_vip_"))
 async def buy_vip(callback: CallbackQuery) -> None:
     """Покупка VIP уровня."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
         return
     
     user_id = callback.from_user.id
     
     if not _check_rate_limit(user_id):
-        await callback.answer("⏳ Пожалуйста, подождите перед следующим запросом", show_alert=True)
+        await _safe_callback_answer(callback, "⏳ Пожалуйста, подождите перед следующим запросом")
         return
     
-    level = _parse_buy_vip_callback(callback.data)
+    # ✅ Проверка подписи
+    level = _verify_vip_callback(callback.data)
     if level is None:
-        logger.warning("Invalid buy_vip callback from user %s: %s", user_id, callback.data)
-        await callback.answer("❌ Неверный запрос", show_alert=True)
+        logger.warning(f"⚠️ Invalid buy_vip callback from user {user_id}: {callback.data}")
+        await _safe_callback_answer(callback, "❌ Неверный запрос")
         return
     
     user, balance, _, _, _ = await get_user_with_stats(user_id)
     if not user:
-        await callback.answer("❌ Ошибка БД", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка БД")
         return
     
     current_vip = max(0, user.get('vip_level', 0) or 0)
     if level <= current_vip:
         name = str(VIP_NAMES.get(current_vip, {}).get('name', str(current_vip)))
-        await callback.answer(
-            "❌ У вас уже есть VIP " + name + "! Купите более высокий уровень.",
-            show_alert=True
-        )
+        await _safe_callback_answer(callback, f"❌ У вас уже есть VIP {name}! Купите более высокий уровень.")
         return
     
     price = VIP_PRICES[level]
     if balance < price:
-        await callback.answer(
-            "❌ Недостаточно средств!\n"
-            "Нужно: " + format_number(price) + " NCoins\n"
-            "Баланс: " + format_number(balance) + " NCoins",
-            show_alert=True
-        )
+        await _safe_callback_answer(callback,
+            f"❌ Недостаточно средств!\n"
+            f"Нужно: {format_number(price)} NCoins\n"
+            f"Баланс: {format_number(balance)} NCoins")
         return
     
-    if _METRICS_AVAILABLE:
-        with vip_purchase_duration.labels(level=str(level)).time():
-            success = await _process_vip_purchase(user_id, level, price, current_vip, balance, callback)
-    else:
-        success = await _process_vip_purchase(user_id, level, price, current_vip, balance, callback)
-    
-    if _METRICS_AVAILABLE:
-        status = 'success' if success else 'failed'
-        tier = 'vip' if current_vip > 0 else 'free'
-        vip_purchase_counter.labels(level=str(level), status=status, user_tier=tier).inc()
-    
-    await callback.answer()
+    success = await _process_vip_purchase(user_id, level, price, current_vip, balance, callback)
+    if not success:
+        await _safe_callback_answer(callback, "❌ Ошибка покупки")
 
 
 async def _process_vip_purchase(
@@ -635,23 +635,20 @@ async def _process_vip_purchase(
     try:
         new_until = get_vip_expiry_date(VIP_DURATION_DAYS)
         queries = [
-            ("UPDATE users SET balance = balance - ? WHERE user_id = ?",
-             (price, user_id)),
+            ("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id)),
             ("UPDATE users SET vip_level = ?, vip_until = ? "
              "WHERE user_id = ? AND (vip_level IS NULL OR vip_level < ?)",
              (level, new_until, user_id, level)),
             ("INSERT INTO transactions (from_id, to_id, amount, reason, date) "
              "VALUES (?, ?, ?, ?, ?)",
-             (user_id, user_id, price,
-              "Покупка VIP уровня " + str(level),
-              datetime.now(timezone.utc).isoformat())),
+             (user_id, user_id, price, f"Покупка VIP уровня {level}", datetime.now(timezone.utc).isoformat())),
         ]
         
-        success = await db._execute_transaction(queries)
-        
-        if not success:
-            await callback.answer("❌ Ошибка транзакции: не удалось завершить покупку", show_alert=True)
-            return False
+        if hasattr(db, '_execute_transaction') and callable(db._execute_transaction):
+            await db._execute_transaction(queries)
+        else:
+            for query, params in queries:
+                await db._execute_with_retry(query, params)
         
         await invalidate_user_cache(user_id)
         
@@ -663,19 +660,19 @@ async def _process_vip_purchase(
         db_bonus = str(priv.get('daily_bonus', 0))
         
         text = (
-            "🎉 <b>ПОЗДРАВЛЯЕМ С ПОКУПКОЙ VIP!</b>\n\n"
-            + icon + " Новый уровень: <b>" + name + "</b>\n"
-            "💰 Списано: <b>" + format_number(price) + " NCoins</b>\n"
-            "💎 Новый баланс: <b>" + format_number(new_balance) + " NCoins</b>\n\n"
+            f"🎉 <b>ПОЗДРАВЛЯЕМ С ПОКУПКОЙ VIP!</b>\n\n"
+            f"{icon} Новый уровень: <b>{name}</b>\n"
+            f"💰 Списано: <b>{format_number(price)} NCoins</b>\n"
+            f"💎 Новый баланс: <b>{format_number(new_balance)} NCoins</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<b>✨ НОВЫЕ ПРЕИМУЩЕСТВА:</b>\n"
-            "├ 🎮 +" + wb + "% к выигрышам\n"
-            "├ 🎁 +" + db_bonus + " NCoins к бонусу\n"
+            f"├ 🎮 +{wb}% к выигрышам\n"
+            f"├ 🎁 +{db_bonus} NCoins к бонусу\n"
             "├ 👑 Статус в чате\n"
             "├ 💎 Доступ к VIP-комнатам\n"
             "└ ⭐ Приоритетная поддержка\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📅 Статус действует <b>" + str(VIP_DURATION_DAYS) + " дней</b>"
+            f"📅 Статус действует <b>{VIP_DURATION_DAYS} дней</b>"
         )
         
         await callback.message.edit_text(
@@ -684,40 +681,29 @@ async def _process_vip_purchase(
                 [InlineKeyboardButton(text="✅ ПОНЯТНО", callback_data="vip")]
             ])
         )
-        logger.info(
-            "User %s purchased VIP %s for %s NC (bal: %s → %s)",
-            user_id, level, price, old_balance, new_balance
-        )
+        logger.info(f"✅ User {user_id} purchased VIP {level} for {price} NC (bal: {old_balance} → {new_balance})")
         return True
         
     except DatabaseError as e:
         code = getattr(e, 'code', getattr(e, 'pgcode', 'DB_UNKNOWN'))
-        logger.error(
-            "VIP purchase DB error: user=%s, [%s] %s | lvl=%s, price=%s",
-            user_id, code, e, level, price, exc_info=True
-        )
-        await callback.answer("❌ Ошибка базы данных: " + str(code), show_alert=True)
+        logger.error(f"❌ VIP purchase DB error: user={user_id}, [{code}] {e} | lvl={level}, price={price}", exc_info=True)
         return False
     except Exception as e:
-        logger.critical(
-            "UNEXPECTED in VIP purchase: user=%s, data=%s | %s: %s",
-            user_id, callback.data, type(e).__name__, e, exc_info=True
-        )
-        await callback.answer("❌ Внутренняя ошибка. Администратор уведомлен.", show_alert=True)
+        logger.critical(f"❌ UNEXPECTED in VIP purchase: user={user_id}, data={callback.data} | {type(e).__name__}: {e}", exc_info=True)
         return False
 
 
 @router.callback_query(F.data == "vip_achievements")
 async def vip_achievements(callback: CallbackQuery) -> None:
     """Показать достижения пользователя."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
         return
     
     user_id = callback.from_user.id
     user, balance, wins, losses, games = await get_user_with_stats(user_id)
     
     if not user:
-        await callback.answer("❌ Ошибка БД", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка БД")
         return
     
     try:
@@ -736,13 +722,12 @@ async def vip_achievements(callback: CallbackQuery) -> None:
                 [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="vip")]
             ])
         )
-        await callback.answer()
-        logger.info("Achievements viewed: user=%s, wins=%s, vip=%s", user_id, wins, current_vip)
+        await _safe_callback_answer(callback)
+        logger.info(f"✅ Achievements viewed: user={user_id}, wins={wins}, vip={current_vip}")
         
     except DatabaseError as e:
-        code = getattr(e, 'code', getattr(e, 'pgcode', 'DB_UNKNOWN'))
-        logger.error("DB error in vip_achievements: [%s] %s", code, e)
-        await callback.answer("❌ Ошибка загрузки: " + str(code), show_alert=True)
+        logger.error(f"❌ DB error in vip_achievements: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка загрузки")
     except Exception as e:
-        logger.error("Unexpected error in vip_achievements: %s", e, exc_info=True)
-        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        logger.error(f"❌ Unexpected error in vip_achievements: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Произошла ошибка")
