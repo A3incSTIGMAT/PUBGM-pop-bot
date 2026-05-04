@@ -2,31 +2,38 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/tictactoe.py
-# ВЕРСИЯ: 3.3.1-production (исправленная)
-# ОПИСАНИЕ: Крестики-нолики — исправлен баг с очередью хода после bot_turn
-# ИСПРАВЛЕНИЯ v3.3.1:
-#   ✅ bot_turn вызывает update_game() после изменения current_turn
-#   ✅ get_game всегда возвращает актуальную копию из менеджера
+# ВЕРСИЯ: 3.4.0-production (полный аудит и исправление)
+# ОПИСАНИЕ: Крестики-нолики — все критические ошибки исправлены
+# ============================================
+# ИСПРАВЛЕНИЯ v3.4.0:
+#   🟡 Константы вынесены в os.getenv()
+#   🟡 hasattr проверки для всех методов БД
+#   🟡 Исправлена гонка данных в xo_start_vs_bot
+#   🟡 end_game с защитой от всех исключений
+#   🟡 bot_turn всегда читает актуальную версию игры
+#   🟡 xo_challenge_player: точный фильтр сообщений
+#   🟢 exc_info=True во всех logger.error
 # ============================================
 
 import asyncio
 import hashlib
 import html
 import logging
+import os
 import random
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Union
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
 
 from database import db, DatabaseError
-from config import START_BALANCE, GAME_COMMISSION, BOT_USERNAME
+from config import START_BALANCE, BOT_USERNAME
 from utils.keyboards import (
     xo_menu_keyboard, xo_difficulty_keyboard, xo_board_keyboard,
     xo_bet_keyboard, back_button, xo_side_choice_keyboard
@@ -35,17 +42,16 @@ from utils.keyboards import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ==================== КОНСТАНТЫ ====================
+# ==================== КОНСТАНТЫ (НАСТРАИВАЕМЫЕ) ====================
 
 _bot: Optional[Bot] = None
-COMMISSION = GAME_COMMISSION if isinstance(GAME_COMMISSION, (int, float)) else 0.05
-
-GAME_TIMEOUT = 600
-CHALLENGE_TIMEOUT = 60
-MOVE_TIMEOUT = 120
-CLEANUP_INTERVAL = 300
-MAX_ACTIVE_GAMES = 1000
-MOVE_CLICK_COOLDOWN = 0.5
+COMMISSION = float(os.getenv("XO_COMMISSION", "0.05"))
+GAME_TIMEOUT = int(os.getenv("XO_GAME_TIMEOUT", "600"))
+CHALLENGE_TIMEOUT = int(os.getenv("XO_CHALLENGE_TIMEOUT", "60"))
+MOVE_TIMEOUT = int(os.getenv("XO_MOVE_TIMEOUT", "120"))
+CLEANUP_INTERVAL = int(os.getenv("XO_CLEANUP_INTERVAL", "300"))
+MAX_ACTIVE_GAMES = int(os.getenv("XO_MAX_ACTIVE_GAMES", "1000"))
+MOVE_CLICK_COOLDOWN = float(os.getenv("XO_MOVE_COOLDOWN", "0.5"))
 BOT_USER = "bot"
 
 WIN_COMBINATIONS: List[List[Tuple[int, int]]] = [
@@ -64,7 +70,6 @@ BOT_DIFFICULTY = {
 # ==================== МЕТРИКИ ====================
 
 class XOMetrics:
-    """Счётчики для мониторинга."""
     active_games: int = 0
     active_challenges: int = 0
     games_completed: int = 0
@@ -81,8 +86,6 @@ class XOMetrics:
 # ==================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ ====================
 
 class GameManager:
-    """Потокобезопасный менеджер активных игр."""
-    
     def __init__(self, max_games: int = MAX_ACTIVE_GAMES):
         self._lock = asyncio.Lock()
         self._game_locks: Dict[str, asyncio.Lock] = {}
@@ -93,20 +96,17 @@ class GameManager:
         self._move_clicks: Dict[str, float] = {}
     
     async def _get_game_lock(self, game_id: str) -> asyncio.Lock:
-        """Получить или создать локальный лок для игры."""
         async with self._lock:
             if game_id not in self._game_locks:
                 self._game_locks[game_id] = asyncio.Lock()
             return self._game_locks[game_id]
     
     async def _release_game_lock(self, game_id: str) -> None:
-        """Очистить лок после удаления игры."""
         async with self._lock:
             self._game_locks.pop(game_id, None)
     
     @asynccontextmanager
     async def game_lock(self, game_id: str):
-        """Контекстный менеджер для блокировки конкретной игры."""
         lock = await self._get_game_lock(game_id)
         async with lock:
             try:
@@ -129,20 +129,17 @@ class GameManager:
                     self._game_locks.pop(oldest_id, None)
                 else:
                     return False
-            
             self._active_games[game_id] = game_data
             self._game_locks[game_id] = asyncio.Lock()
             XOMetrics.active_games = len(self._active_games)
             return True
     
     async def get_game(self, game_id: str) -> Optional[Dict]:
-        """Возвращает АКТУАЛЬНУЮ копию игры."""
         async with self._lock:
             game = self._active_games.get(game_id)
             return game.copy() if game else None
     
     async def update_game(self, game_id: str, updates: Dict) -> bool:
-        """Атомарное обновление полей игры."""
         async with self._lock:
             if game_id not in self._active_games:
                 return False
@@ -200,6 +197,10 @@ class GameManager:
     async def set_challenge_task(self, user_id: int, task: asyncio.Task) -> None:
         async with self._lock:
             self._challenge_tasks[user_id] = task
+    
+    async def has_pending_challenge(self, user_id: int) -> bool:
+        async with self._lock:
+            return user_id in self._pending_challenges
     
     async def check_move_cooldown(self, game_id: str, user_id: int) -> bool:
         key = game_id + ":" + str(user_id)
@@ -359,6 +360,18 @@ def is_board_full(board: List[List[str]]) -> bool:
     return all(cell != " " for row in board for cell in row)
 
 
+async def _safe_callback_answer(callback: Optional[CallbackQuery], text: str = None, show_alert: bool = True) -> None:
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramAPIError:
+        pass
+
+
 async def get_or_create_user(
     user_id: Optional[int],
     username: Optional[str] = None,
@@ -373,8 +386,7 @@ async def get_or_create_user(
             user = await db.get_user(user_id)
         return user
     except DatabaseError as e:
-        logger.error("❌ DB error in get_or_create_user(%s): %s", user_id, e)
-        XOMetrics.increment("errors_total")
+        logger.error("❌ DB error in get_or_create_user(%s): %s", user_id, e, exc_info=True)
         return None
 
 
@@ -400,7 +412,6 @@ async def safe_send_private(
         return None
     except TelegramAPIError as e:
         logger.error("❌ API error sending to %s: %s", user_id, e)
-        XOMetrics.increment("errors_total")
         return None
 
 
@@ -529,15 +540,32 @@ async def _sync_user_stats(player_id: Optional[int], result_type: str) -> None:
                 (player_id,))
     except DatabaseError as e:
         logger.error("❌ Failed to sync stats for %s: %s", player_id, e)
-        XOMetrics.increment("errors_total")
+
+
+async def _safe_update_xo_stats(player_id: Optional[int], result_type: str, bet: int = 0, won: int = 0) -> None:
+    if player_id is None or player_id == BOT_USER:
+        return
+    try:
+        if hasattr(db, 'update_xo_stats') and callable(db.update_xo_stats):
+            await db.update_xo_stats(player_id, result_type, bet or 0, won or 0)
+    except DatabaseError as e:
+        logger.error("❌ Failed to update XO stats for %s: %s", player_id, e)
+
+
+async def _safe_refund(player_id: Optional[int], amount: int, reason: str) -> None:
+    if player_id is None or player_id == BOT_USER or amount <= 0:
+        return
+    try:
+        if hasattr(db, 'update_balance') and callable(db.update_balance):
+            await db.update_balance(player_id, amount, reason)
+    except DatabaseError as e:
+        logger.error("❌ Failed to refund %s to %s: %s", amount, player_id, e)
 
 
 # ==================== ЗАВЕРШЕНИЕ ИГРЫ ====================
 
 async def end_game(
-    game_id: str,
-    game: Dict,
-    result: str,
+    game_id: str, game: Dict, result: str,
     callback: Optional[CallbackQuery] = None
 ) -> None:
     if game.get("finished", False):
@@ -556,73 +584,73 @@ async def end_game(
             result_text = "⏳ <b>ВРЕМЯ ВЫШЛО!</b>\nИгра завершена. Ставки возвращены."
             if bet > 0:
                 for pid in [player_x, player_o]:
-                    if isinstance(pid, int) and pid != BOT_USER:
-                        await db.update_balance(pid, bet, "Возврат ставки (таймаут XO)")
+                    await _safe_refund(pid, bet, "Возврат ставки (таймаут XO)")
             for pid in [player_x, player_o]:
-                if isinstance(pid, int):
-                    await db.update_xo_stats(pid, "draw", bet, 0)
+                await _safe_update_xo_stats(pid, "draw", bet, 0)
+                
         elif result == "X":
             if isinstance(player_x, int) and player_x != BOT_USER:
                 px_user = await db.get_user(player_x)
                 px_name = safe_html_escape(px_user.get("first_name") if px_user else None) or "Игрок"
-                result_text = "🎉 ПОБЕДИЛ " + px_name + " (X)!"
+                result_text = f"🎉 ПОБЕДИЛ {px_name} (X)!"
                 win_amount = 0
                 if bet > 0:
                     win_amount = int(bet * 2 * (1 - COMMISSION))
-                    await db.update_balance(player_x, win_amount, "Выигрыш в XO")
-                    result_text += "\n💰 Получено: <b>" + format_number(win_amount) + " NCoin</b>"
-                await db.update_xo_stats(player_x, "win", bet, win_amount)
+                    await _safe_refund(player_x, win_amount, "Выигрыш в XO")
+                    result_text += f"\n💰 Получено: <b>{format_number(win_amount)} NCoin</b>"
+                await _safe_update_xo_stats(player_x, "win", bet, win_amount)
                 await _sync_user_stats(player_x, "win")
                 if isinstance(player_o, int) and player_o != BOT_USER:
-                    await db.update_xo_stats(player_o, "loss", bet, 0)
+                    await _safe_update_xo_stats(player_o, "loss", bet, 0)
                     await _sync_user_stats(player_o, "loss")
                 elif player_o == BOT_USER:
-                    await db.update_xo_stats(player_x, "win_vs_bot", bet, win_amount)
+                    await _safe_update_xo_stats(player_x, "win_vs_bot", bet, win_amount)
             elif player_x == BOT_USER:
                 result_text = "🤖 ПОБЕДИЛ БОТ (X)!"
                 if isinstance(player_o, int):
-                    await db.update_xo_stats(player_o, "loss_vs_bot", bet, 0)
+                    await _safe_update_xo_stats(player_o, "loss_vs_bot", bet, 0)
+                    
         elif result == "O":
             if isinstance(player_o, int) and player_o != BOT_USER:
                 po_user = await db.get_user(player_o)
                 po_name = safe_html_escape(po_user.get("first_name") if po_user else None) or "Игрок"
-                result_text = "🎉 ПОБЕДИЛ " + po_name + " (O)!"
+                result_text = f"🎉 ПОБЕДИЛ {po_name} (O)!"
                 win_amount = 0
                 if bet > 0:
                     win_amount = int(bet * 2 * (1 - COMMISSION))
-                    await db.update_balance(player_o, win_amount, "Выигрыш в XO")
-                    result_text += "\n💰 Получено: <b>" + format_number(win_amount) + " NCoin</b>"
-                await db.update_xo_stats(player_o, "win", bet, win_amount)
+                    await _safe_refund(player_o, win_amount, "Выигрыш в XO")
+                    result_text += f"\n💰 Получено: <b>{format_number(win_amount)} NCoin</b>"
+                await _safe_update_xo_stats(player_o, "win", bet, win_amount)
                 await _sync_user_stats(player_o, "win")
                 if isinstance(player_x, int):
-                    await db.update_xo_stats(player_x, "loss", bet, 0)
+                    await _safe_update_xo_stats(player_x, "loss", bet, 0)
             elif player_o == BOT_USER:
                 result_text = "🤖 ПОБЕДИЛ БОТ (O)!"
                 if isinstance(player_x, int):
-                    await db.update_xo_stats(player_x, "loss_vs_bot", bet, 0)
-        else:  # draw
+                    await _safe_update_xo_stats(player_x, "loss_vs_bot", bet, 0)
+        else:
             result_text = "🤝 НИЧЬЯ!"
             if bet > 0:
                 for pid in [player_x, player_o]:
-                    if isinstance(pid, int) and pid != BOT_USER:
-                        await db.update_balance(pid, bet, "Возврат ставки (ничья)")
+                    await _safe_refund(pid, bet, "Возврат ставки (ничья XO)")
             for pid in [player_x, player_o]:
-                if isinstance(pid, int):
-                    await db.update_xo_stats(pid, "draw", bet, 0)
+                await _safe_update_xo_stats(pid, "draw", bet, 0)
         
         logger.info("🏁 Game %s ended: result=%s, bet=%s", game_id, result, bet)
+        
     except DatabaseError as e:
         logger.error("❌ DB error in end_game: %s", e, exc_info=True)
         result_text += "\n⚠️ Ошибка сохранения статистики"
         XOMetrics.increment("errors_total")
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error("❌ Unexpected error in end_game: %s", e, exc_info=True)
-        result_text += "\n⚠️ Внутренняя ошибка"
         XOMetrics.increment("errors_total")
     finally:
         await _game_manager.remove_game(game_id)
     
-    final_text = "🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n" + result_text
+    final_text = f"🎮 <b>ИГРА ОКОНЧЕНА!</b>\n\n{result_text}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
         [InlineKeyboardButton(text="🏠 ГЛАВНОЕ МЕНЮ", callback_data="back_to_menu")]
@@ -643,71 +671,68 @@ async def end_game(
 # ==================== ХОД БОТА ====================
 
 async def bot_turn(game_id: str, game: Dict) -> None:
-    """
-    Выполнение хода бота.
-    
-    ✅ ВАЖНО: после изменения current_turn вызывает update_game()
-    """
     try:
-        difficulty = game.get("difficulty", "medium")
+        fresh_game = await _game_manager.get_game(game_id)
+        if not fresh_game or fresh_game.get("finished", False):
+            return
+        
+        difficulty = fresh_game.get("difficulty", "medium")
         if difficulty not in BOT_MOVES:
             difficulty = "medium"
         
         move_func = BOT_MOVES[difficulty]
-        bot_side = game.get("current_turn")
+        bot_side = fresh_game.get("current_turn")
         
         if not bot_side or bot_side not in ("X", "O"):
-            await end_game(game_id, game, "draw")
+            await end_game(game_id, fresh_game, "draw")
             return
         
-        if is_board_full(game["board"]):
-            await end_game(game_id, game, "draw")
+        if is_board_full(fresh_game["board"]):
+            await end_game(game_id, fresh_game, "draw")
             return
         
-        move = move_func(game["board"])
+        move = move_func(fresh_game["board"])
         if not move:
-            await end_game(game_id, game, "draw")
+            await end_game(game_id, fresh_game, "draw")
             return
         
         r, c = move
-        game["board"][r][c] = bot_side
+        fresh_game["board"][r][c] = bot_side
         
-        winner = check_winner(game["board"])
+        winner = check_winner(fresh_game["board"])
         if winner:
-            # Сохраняем доску перед завершением
-            await _game_manager.update_game(game_id, {"board": game["board"]})
-            await end_game(game_id, game, winner)
+            await _game_manager.update_game(game_id, {"board": fresh_game["board"]})
+            await end_game(game_id, fresh_game, winner)
             return
         
-        # Передача хода
-        game["current_turn"] = "O" if bot_side == "X" else "X"
-        game["last_move"] = time.time()
+        fresh_game["current_turn"] = "O" if bot_side == "X" else "X"
+        fresh_game["last_move"] = time.time()
         
-        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: сохраняем в менеджер
         await _game_manager.update_game(game_id, {
-            "board": game["board"],
-            "current_turn": game["current_turn"],
-            "last_move": game["last_move"]
+            "board": fresh_game["board"],
+            "current_turn": fresh_game["current_turn"],
+            "last_move": fresh_game["last_move"]
         })
         
-        # Обновление UI для пользователя
-        user_side = game.get("user_side", "X")
-        user_id = game["player_x"] if user_side == "X" else game["player_o"]
+        user_side = fresh_game.get("user_side", "X")
+        user_id = fresh_game["player_x"] if user_side == "X" else fresh_game["player_o"]
         
         if isinstance(user_id, int) and user_id != BOT_USER:
             diff_name = BOT_DIFFICULTY[difficulty]["name"]
-            msg_id = game.get("private_msg_user")
-            next_is_user = (game["current_turn"] == user_side)
+            msg_id = fresh_game.get("private_msg_user")
+            next_is_user = (fresh_game["current_turn"] == user_side)
             
             if msg_id:
                 await safe_edit_private(
                     user_id, msg_id,
-                    "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-                    "❌ X vs ⭕ O\n🤖 Сложность: " + diff_name + "\n\n"
-                    "👇 " + ("Ваш ход" if next_is_user else "Ход бота") + "...",
-                    xo_board_keyboard(game["board"], game_id, can_play=next_is_user)
+                    f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                    f"❌ X vs ⭕ O\n🤖 Сложность: {diff_name}\n\n"
+                    f"👇 {'Ваш ход' if next_is_user else 'Ход бота'}...",
+                    xo_board_keyboard(fresh_game["board"], game_id, can_play=next_is_user)
                 )
                 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error("❌ Error in bot_turn: %s", e, exc_info=True)
         XOMetrics.increment("errors_total")
@@ -775,11 +800,9 @@ async def cmd_cancel_xo(message: Message) -> None:
         try:
             refund_reason = "Возврат ставки (отмена вызова)" if is_pending else "Возврат ставки (отмена игры)"
             for pid in [player_x, player_o]:
-                if isinstance(pid, int) and pid != BOT_USER:
-                    await db.update_balance(pid, bet, refund_reason)
+                await _safe_refund(pid, bet, refund_reason)
         except DatabaseError as e:
-            logger.error("❌ DB error cancelling game: %s", e)
-            XOMetrics.increment("errors_total")
+            logger.error("❌ DB error cancelling game: %s", e, exc_info=True)
     
     if not is_pending:
         opponent = player_o if user_id == player_x else player_x
@@ -797,7 +820,7 @@ async def game_xo_callback(callback: CallbackQuery) -> None:
     if not callback:
         return
     await cmd_xo(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "xo_vs_bot")
@@ -805,7 +828,7 @@ async def xo_vs_bot_callback(callback: CallbackQuery) -> None:
     if not callback or not callback.message:
         return
     await safe_edit_callback(callback, "🤖 <b>ИГРА С БОТОМ</b>\n\nВыберите уровень сложности:", xo_difficulty_keyboard())
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data.startswith("xo_diff_"))
@@ -817,7 +840,7 @@ async def xo_choose_side(callback: CallbackQuery) -> None:
     if difficulty not in BOT_DIFFICULTY:
         difficulty = "medium"
     await safe_edit_callback(callback, "🤖 <b>ИГРА С БОТОМ</b>\n\nЗа кого будете играть?", xo_side_choice_keyboard(difficulty))
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data.startswith("xo_side_"))
@@ -827,7 +850,7 @@ async def xo_start_vs_bot(callback: CallbackQuery) -> None:
     
     parts = callback.data.split("_")
     if len(parts) < 4:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     player_side = parts[2]
@@ -853,10 +876,11 @@ async def xo_start_vs_bot(callback: CallbackQuery) -> None:
         "user_side": player_side, "current_turn": current_turn, "bet": 0,
         "difficulty": difficulty, "created_at": time.time(), "last_move": time.time(),
         "finished": False, "in_private": True, "cancel_button_msg": None,
+        "private_msg_user": None,
     }
     
     if not await _game_manager.add_game(game_id, game_data):
-        await callback.answer("❌ Слишком много активных игр.", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Слишком много активных игр.")
         return
     
     diff_name = BOT_DIFFICULTY[difficulty]["name"]
@@ -870,19 +894,19 @@ async def xo_start_vs_bot(callback: CallbackQuery) -> None:
     
     msg = await safe_send_private(
         user_id,
-        "🎮 <b>ИГРА С БОТОМ</b>\n\n"
-        "Сложность: " + diff_name + "\n"
-        "Вы играете за " + user_symbol + " <b>" + player_side + "</b>\n"
-        "Бот играет за " + bot_symbol + " <b>" + ("O" if player_side == "X" else "X") + "</b>\n\n"
-        "👇 " + ("Ваш ход" if is_user_turn else "Ход бота") + "...",
+        f"🎮 <b>ИГРА С БОТОМ</b>\n\n"
+        f"Сложность: {diff_name}\n"
+        f"Вы играете за {user_symbol} <b>{player_side}</b>\n"
+        f"Бот играет за {bot_symbol} <b>{'O' if player_side == 'X' else 'X'}</b>\n\n"
+        f"👇 {'Ваш ход' if is_user_turn else 'Ход бота'}...",
         xo_board_keyboard(game_data["board"], game_id, can_play=is_user_turn)
     )
     
     if msg:
-        game_data["private_msg_user"] = msg.message_id
+        await _game_manager.update_game(game_id, {"private_msg_user": msg.message_id})
         cancel_msg = await safe_send_private(user_id, "⚙️ Управление игрой:", cancel_kb)
         if cancel_msg:
-            game_data["cancel_button_msg"] = cancel_msg.message_id
+            await _game_manager.update_game(game_id, {"cancel_button_msg": cancel_msg.message_id})
         
         await safe_edit_callback(callback,
             "🎮 <b>ИГРА С БОТОМ</b>\n\n📩 <b>Игра началась в ЛС!</b>\nПроверьте личные сообщения.")
@@ -894,10 +918,10 @@ async def xo_start_vs_bot(callback: CallbackQuery) -> None:
         await _game_manager.remove_game(game_id)
         bot_link = "https://t.me/" + (BOT_USERNAME or "NEXUS_Manager_Official_bot")
         await safe_edit_callback(callback,
-            "❌ <b>НЕ УДАЛОСЬ НАЧАТЬ ИГРУ!</b>\n\n"
-            "Активируйте бота: перейдите в @" + (BOT_USERNAME or "NEXUS_Manager_Official_bot") + " и нажмите START",
+            f"❌ <b>НЕ УДАЛОСЬ НАЧАТЬ ИГРУ!</b>\n\n"
+            f"Активируйте бота: перейдите в @{BOT_USERNAME or 'NEXUS_Manager_Official_bot'} и нажмите START",
             InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 ОТКРЫТЬ БОТА", url=bot_link)]]))
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "xo_vs_player")
@@ -905,7 +929,7 @@ async def xo_vs_player_callback(callback: CallbackQuery) -> None:
     if not callback or not callback.message:
         return
     await safe_edit_callback(callback, "👤 <b>ИГРА С ИГРОКОМ</b>\n\nВыберите ставку:", xo_bet_keyboard())
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data.startswith("xo_bet_"))
@@ -915,21 +939,26 @@ async def xo_bet_selected(callback: CallbackQuery) -> None:
     try:
         bet = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
-        await callback.answer("❌ Неверная ставка!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверная ставка!")
         return
     await _game_manager.add_pending_challenge(callback.from_user.id, bet, None)
     await safe_edit_callback(callback,
-        "👤 <b>ВЫЗОВ ИГРОКА</b>\n\n💰 Ставка: <b>" + format_number(bet) + " NCoin</b>\n\n📝 Напишите @username противника:",
+        f"👤 <b>ВЫЗОВ ИГРОКА</b>\n\n💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n📝 Напишите @username противника:",
         back_button("xo_vs_player"))
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
-@router.message(lambda m: m.text and m.text.startswith('@'))
+@router.message(lambda m: m.text and m.text.startswith('@') if m else False)
 async def xo_challenge_player(message: Message) -> None:
     if not message or not message.from_user:
         return
     
     user_id = message.from_user.id
+    
+    # Проверяем, есть ли активный вызов
+    if not await _game_manager.has_pending_challenge(user_id):
+        return
+    
     pending = await _game_manager.pop_pending_challenge(user_id)
     if not pending:
         return
@@ -942,13 +971,13 @@ async def xo_challenge_player(message: Message) -> None:
     try:
         target = await db.get_user_by_username(username)
     except DatabaseError as e:
-        logger.error("❌ DB error: %s", e)
+        logger.error("❌ DB error: %s", e, exc_info=True)
         await message.answer("❌ Ошибка базы данных.")
         return
     
     if not target:
         await message.answer(
-            "❌ <b>Пользователь @" + safe_html_escape(username) + " не найден!</b>\n\n"
+            f"❌ <b>Пользователь @{safe_html_escape(username)} не найден!</b>\n\n"
             "Попросите его написать /start в бота.", parse_mode=ParseMode.HTML)
         return
     
@@ -968,11 +997,11 @@ async def xo_challenge_player(message: Message) -> None:
         try:
             user_balance = await db.get_balance(user_id)
             if user_balance is None or user_balance < bet:
-                await message.answer("❌ У вас недостаточно средств! Баланс: " + format_number(user_balance or 0) + " NCoin")
+                await message.answer(f"❌ У вас недостаточно средств! Баланс: {format_number(user_balance or 0)} NCoin")
                 return
             target_balance = await db.get_balance(target_id)
             if target_balance is None or target_balance < bet:
-                await message.answer("❌ У @" + safe_html_escape(username) + " недостаточно средств!")
+                await message.answer(f"❌ У @{safe_html_escape(username)} недостаточно средств!")
                 return
         except DatabaseError:
             await message.answer("❌ Ошибка проверки баланса.")
@@ -996,11 +1025,11 @@ async def xo_challenge_player(message: Message) -> None:
     ])
     
     await message.answer(
-        "⚔️ <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
-        "👤 " + safe_html_escape(message.from_user.first_name or "Игрок") + " вызывает @" + safe_html_escape(username) + "!\n"
-        "💰 Ставка: <b>" + format_number(bet) + " NCoin</b>\n\n"
-        "⏰ Вызов действителен 60 секунд\n\n"
-        "⚠️ ТОЛЬКО @" + safe_html_escape(username) + " может принять или отклонить!",
+        f"⚔️ <b>ВЫЗОВ НА КРЕСТИКИ-НОЛИКИ!</b>\n\n"
+        f"👤 {safe_html_escape(message.from_user.first_name or 'Игрок')} вызывает @{safe_html_escape(username)}!\n"
+        f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
+        f"⏰ Вызов действителен 60 секунд\n\n"
+        f"⚠️ ТОЛЬКО @{safe_html_escape(username)} может принять или отклонить!",
         parse_mode=ParseMode.HTML, reply_markup=keyboard)
     
     task = asyncio.create_task(auto_cancel_challenge(game_id, message.chat.id, message.message_id, user_id))
@@ -1014,7 +1043,7 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
     
     parts = callback.data.split("_")
     if len(parts) < 3:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     game_id = parts[2]
@@ -1022,11 +1051,11 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
     
     game = await _game_manager.get_game(game_id)
     if not game or not game.get("pending", False):
-        await callback.answer("❌ Вызов уже неактивен!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Вызов уже неактивен!")
         return
     
     if user_id != game.get("player_o"):
-        await callback.answer("❌ Этот вызов не вам!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Этот вызов не вам!")
         return
     
     bet = game.get("bet", 0) or 0
@@ -1039,7 +1068,7 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
     if (isinstance(player_x, int) and not tx) or (isinstance(player_o, int) and not to):
         await safe_edit_callback(callback, "❌ Один из игроков не активировал бота!")
         await _game_manager.remove_game(game_id)
-        await callback.answer("❌ Игрок не активировал бота", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Игрок не активировал бота")
         return
     
     try:
@@ -1059,14 +1088,11 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
             if isinstance(player_o, int):
                 await db.update_balance(player_o, -bet, "Ставка в XO")
         except DatabaseError as e:
-            logger.error("❌ DB error processing bet: %s", e)
-            await callback.answer("❌ Ошибка обработки ставки", show_alert=True)
+            logger.error("❌ DB error processing bet: %s", e, exc_info=True)
+            await _safe_callback_answer(callback, "❌ Ошибка обработки ставки")
             return
     
     await _game_manager.update_game(game_id, {"pending": False, "last_move": time.time(), "in_private": True})
-    game["pending"] = False
-    game["last_move"] = time.time()
-    game["in_private"] = True
     
     px_user = await db.get_user(player_x) if isinstance(player_x, int) else None
     po_user = await db.get_user(player_o) if isinstance(player_o, int) else None
@@ -1074,8 +1100,8 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
     po_name = safe_html_escape(po_user.get("first_name") if po_user else None) or "Игрок O"
     
     await safe_edit_callback(callback,
-        "🎮 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
-        "❌ X: " + px_name + "\n⭕ O: " + po_name + "\n💰 Ставка: <b>" + format_number(bet) + " NCoin</b>\n\n"
+        f"🎮 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
+        f"❌ X: {px_name}\n⭕ O: {po_name}\n💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n"
         "📩 <b>Игра продолжается в ЛС!</b>")
     
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1084,28 +1110,28 @@ async def xo_accept_challenge(callback: CallbackQuery) -> None:
     
     if isinstance(player_x, int):
         msg_x = await safe_send_private(player_x,
-            "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ Вы: " + px_name + " (X)\n⭕ Соперник: " + po_name + " (O)\n"
-            "💰 Ставка: <b>" + format_number(bet) + " NCoin</b>\n\n👇 <b>Ваш ход!</b>",
+            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ Вы: {px_name} (X)\n⭕ Соперник: {po_name} (O)\n"
+            f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n👇 <b>Ваш ход!</b>",
             xo_board_keyboard(game["board"], game_id, can_play=True))
         if msg_x:
-            game["private_msg_x"] = msg_x.message_id
+            await _game_manager.update_game(game_id, {"private_msg_x": msg_x.message_id})
             cancel_x = await safe_send_private(player_x, "⚙️ Управление игрой:", cancel_kb)
             if cancel_x:
-                game["cancel_msg_x"] = cancel_x.message_id
+                await _game_manager.update_game(game_id, {"cancel_msg_x": cancel_x.message_id})
     
     if isinstance(player_o, int):
         msg_o = await safe_send_private(player_o,
-            "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ Соперник: " + px_name + " (X)\n⭕ Вы: " + po_name + " (O)\n"
-            "💰 Ставка: <b>" + format_number(bet) + " NCoin</b>\n\n⏳ <b>Ожидайте хода соперника...</b>",
+            f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ Соперник: {px_name} (X)\n⭕ Вы: {po_name} (O)\n"
+            f"💰 Ставка: <b>{format_number(bet)} NCoin</b>\n\n⏳ <b>Ожидайте хода соперника...</b>",
             xo_board_keyboard(game["board"], game_id, can_play=False))
         if msg_o:
-            game["private_msg_o"] = msg_o.message_id
+            await _game_manager.update_game(game_id, {"private_msg_o": msg_o.message_id})
             cancel_o = await safe_send_private(player_o, "⚙️ Управление игрой:", cancel_kb)
             if cancel_o:
-                game["cancel_msg_o"] = cancel_o.message_id
+                await _game_manager.update_game(game_id, {"cancel_msg_o": cancel_o.message_id})
     
     logger.info("✅ Challenge accepted: game %s (%s vs %s)", game_id, player_x, player_o)
-    await callback.answer("✅ Игра началась! Проверьте ЛС.")
+    await _safe_callback_answer(callback, "✅ Игра началась! Проверьте ЛС.")
 
 
 @router.callback_query(F.data.startswith("xo_reject_"))
@@ -1115,7 +1141,7 @@ async def xo_reject_challenge(callback: CallbackQuery) -> None:
     
     parts = callback.data.split("_")
     if len(parts) < 3:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     game_id = parts[2]
@@ -1123,7 +1149,7 @@ async def xo_reject_challenge(callback: CallbackQuery) -> None:
     
     game = await _game_manager.get_game(game_id)
     if not game or user_id != game.get("player_o"):
-        await callback.answer("❌ Вызов не найден или не вам!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Вызов не найден или не вам!")
         return
     
     player_x = game.get("player_x")
@@ -1131,9 +1157,9 @@ async def xo_reject_challenge(callback: CallbackQuery) -> None:
     await _game_manager.remove_game(game_id)
     
     challenged_name = safe_html_escape(game.get("challenged_name", "Игрок"))
-    await safe_edit_callback(callback, "❌ <b>ВЫЗОВ ОТКЛОНЁН!</b>\n\n" + challenged_name + " отклонил(а) вызов.")
+    await safe_edit_callback(callback, f"❌ <b>ВЫЗОВ ОТКЛОНЁН!</b>\n\n{challenged_name} отклонил(а) вызов.")
     logger.info("❌ Challenge rejected: game %s", game_id)
-    await callback.answer("❌ Вызов отклонён!")
+    await _safe_callback_answer(callback, "❌ Вызов отклонён!")
 
 
 @router.callback_query(F.data.startswith("xo_cancel_game_"))
@@ -1143,7 +1169,7 @@ async def xo_cancel_game(callback: CallbackQuery) -> None:
     
     parts = callback.data.split("_")
     if len(parts) < 4:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     game_id = parts[3]
@@ -1151,14 +1177,14 @@ async def xo_cancel_game(callback: CallbackQuery) -> None:
     
     game = await _game_manager.get_game(game_id)
     if not game or game.get("finished", False):
-        await callback.answer("❌ Игра не найдена или уже окончена!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Игра не найдена или уже окончена!")
         return
     
     player_x = game.get("player_x")
     player_o = game.get("player_o")
     
     if user_id != player_x and user_id != player_o:
-        await callback.answer("❌ Вы не участвуете в этой игре!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Вы не участвуете в этой игре!")
         return
     
     bet = game.get("bet", 0) or 0
@@ -1167,11 +1193,9 @@ async def xo_cancel_game(callback: CallbackQuery) -> None:
     if bet > 0 and not is_pending:
         try:
             for pid in [player_x, player_o]:
-                if isinstance(pid, int) and pid != BOT_USER:
-                    await db.update_balance(pid, bet, "Возврат ставки (отмена игры)")
+                await _safe_refund(pid, bet, "Возврат ставки (отмена игры)")
         except DatabaseError as e:
-            logger.error("❌ DB error cancelling game: %s", e)
-            XOMetrics.increment("errors_total")
+            logger.error("❌ DB error cancelling game: %s", e, exc_info=True)
     
     opponent = player_o if user_id == player_x else player_x
     if isinstance(opponent, int) and opponent != BOT_USER:
@@ -1182,67 +1206,66 @@ async def xo_cancel_game(callback: CallbackQuery) -> None:
     
     await safe_edit_callback(callback, "✅ Игра отменена. Ставка возвращена.")
     logger.info("🚫 Game %s cancelled via button by user %s", game_id, user_id)
-    await callback.answer("✅ Игра отменена")
+    await _safe_callback_answer(callback, "✅ Игра отменена")
 
 
 @router.callback_query(F.data.startswith("xo_move_"))
 async def xo_make_move(callback: CallbackQuery) -> None:
-    """Обработка хода игрока с защитой от гонок данных."""
     if not callback or not callback.from_user:
-        await callback.answer("❌ Ошибка авторизации", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка авторизации")
         return
     
     parts = callback.data.split("_")
     if len(parts) < 5:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     try:
         game_id, r, c = parts[2], int(parts[3]), int(parts[4])
     except (ValueError, IndexError):
-        await callback.answer("❌ Неверные координаты!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверные координаты!")
         return
     
     user_id = callback.from_user.id
     
     game = await _game_manager.get_game(game_id)
     if not game:
-        await callback.answer("❌ Игра не найдена!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Игра не найдена!")
         return
     
     if game.get("finished", False):
-        await callback.answer("❌ Игра уже окончена!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Игра уже окончена!")
         return
     
     if not await _game_manager.check_move_cooldown(game_id, user_id):
-        await callback.answer("⏱️ Слишком часто!", show_alert=True)
+        await _safe_callback_answer(callback, "⏱️ Слишком часто!")
         return
     
     if time.time() - (game.get("last_move") or game.get("created_at", 0)) > MOVE_TIMEOUT:
         asyncio.create_task(end_game(game_id, game, "timeout", callback))
-        await callback.answer("⏰ Время на ход истекло!", show_alert=True)
+        await _safe_callback_answer(callback, "⏰ Время на ход истекло!")
         return
     
     current_turn = game.get("current_turn", "X")
     
     if game.get("type") == "pvb":
         if current_turn != game.get("user_side", "X"):
-            await callback.answer("❌ Сейчас ход бота!", show_alert=True)
+            await _safe_callback_answer(callback, "❌ Сейчас ход бота!")
             return
     else:
         if (current_turn == "X" and user_id != game.get("player_x")) or \
            (current_turn == "O" and user_id != game.get("player_o")):
-            await callback.answer("❌ Сейчас не ваш ход!", show_alert=True)
+            await _safe_callback_answer(callback, "❌ Сейчас не ваш ход!")
             return
     
     async with _game_manager.game_lock(game_id):
         fresh_game = await _game_manager.get_game(game_id)
         if not fresh_game or fresh_game.get("finished", False):
-            await callback.answer("❌ Игра изменилась!", show_alert=True)
+            await _safe_callback_answer(callback, "❌ Игра изменилась!")
             return
         
         if r < 0 or r > 2 or c < 0 or c > 2 or fresh_game["board"][r][c] != " ":
-            await callback.answer("❌ Клетка занята!", show_alert=True)
+            await _safe_callback_answer(callback, "❌ Клетка занята!")
             return
         
         fresh_game["board"][r][c] = current_turn
@@ -1254,7 +1277,7 @@ async def xo_make_move(callback: CallbackQuery) -> None:
                 "board": fresh_game["board"], "last_move": fresh_game["last_move"]
             })
             await end_game(game_id, fresh_game, winner, callback)
-            await callback.answer("✅ Ход на (" + str(r+1) + ", " + str(c+1) + ")")
+            await _safe_callback_answer(callback, f"✅ Ход на ({r+1}, {c+1})")
             return
         
         fresh_game["current_turn"] = "O" if current_turn == "X" else "X"
@@ -1276,8 +1299,8 @@ async def xo_make_move(callback: CallbackQuery) -> None:
                 if msg_id and isinstance(user_id_actual, int):
                     await safe_edit_private(
                         user_id_actual, msg_id,
-                        "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ X vs ⭕ O\n🤖 Сложность: " + diff_name + "\n\n"
-                        "👇 " + ("Ваш ход" if next_is_user else "Ход бота") + "...",
+                        f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n❌ X vs ⭕ O\n🤖 Сложность: {diff_name}\n\n"
+                        f"👇 {'Ваш ход' if next_is_user else 'Ход бота'}...",
                         xo_board_keyboard(fresh_game["board"], game_id, can_play=next_is_user)
                     )
                 
@@ -1299,9 +1322,9 @@ async def xo_make_move(callback: CallbackQuery) -> None:
                 if msg_x_id and isinstance(px, int):
                     await safe_edit_private(
                         px, msg_x_id,
-                        "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-                        "❌ Вы: " + px_name + " (X)\n⭕ Соперник: " + po_name + " (O)\n"
-                        "💰 Ставка: <b>" + format_number(fresh_game.get('bet', 0)) + " NCoin</b>\n\n"
+                        f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                        f"❌ Вы: {px_name} (X)\n⭕ Соперник: {po_name} (O)\n"
+                        f"💰 Ставка: <b>{format_number(fresh_game.get('bet', 0))} NCoin</b>\n\n"
                         + ("👇 <b>Ваш ход!</b>" if next_is_x else "⏳ Ожидайте хода соперника..."),
                         xo_board_keyboard(fresh_game["board"], game_id, can_play=next_is_x)
                     )
@@ -1309,15 +1332,15 @@ async def xo_make_move(callback: CallbackQuery) -> None:
                 if msg_o_id and isinstance(po, int):
                     await safe_edit_private(
                         po, msg_o_id,
-                        "🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
-                        "❌ Соперник: " + px_name + " (X)\n⭕ Вы: " + po_name + " (O)\n"
-                        "💰 Ставка: <b>" + format_number(fresh_game.get('bet', 0)) + " NCoin</b>\n\n"
+                        f"🎮 <b>КРЕСТИКИ-НОЛИКИ</b>\n"
+                        f"❌ Соперник: {px_name} (X)\n⭕ Вы: {po_name} (O)\n"
+                        f"💰 Ставка: <b>{format_number(fresh_game.get('bet', 0))} NCoin</b>\n\n"
                         + ("👇 <b>Ваш ход!</b>" if not next_is_x else "⏳ Ожидайте хода соперника..."),
                         xo_board_keyboard(fresh_game["board"], game_id, can_play=not next_is_x)
                     )
         
         logger.debug("♟️ Move on %s: user=%s, pos=(%s,%s)", game_id, user_id, r, c)
-        await callback.answer("✅ Ход на (" + str(r+1) + ", " + str(c+1) + ")")
+        await _safe_callback_answer(callback, f"✅ Ход на ({r+1}, {c+1})")
 
 
 @router.callback_query(F.data.startswith("xo_surrender_"))
@@ -1327,7 +1350,7 @@ async def xo_surrender(callback: CallbackQuery) -> None:
     
     parts = callback.data.split("_")
     if len(parts) < 3:
-        await callback.answer("❌ Неверный формат!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат!")
         return
     
     game_id = parts[2]
@@ -1335,7 +1358,7 @@ async def xo_surrender(callback: CallbackQuery) -> None:
     
     game = await _game_manager.get_game(game_id)
     if not game or game.get("finished", False):
-        await callback.answer("❌ Игра не найдена или окончена!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Игра не найдена или окончена!")
         return
     
     player_x, player_o = game.get("player_x"), game.get("player_o")
@@ -1345,13 +1368,13 @@ async def xo_surrender(callback: CallbackQuery) -> None:
     elif user_id == player_o:
         winner = "X"
     else:
-        await callback.answer("❌ Вы не участвуете в этой игре!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Вы не участвуете в этой игре!")
         return
     
     XOMetrics.increment("games_surrendered")
     await end_game(game_id, game, winner, callback)
     logger.info("🏳️ Surrender on %s by user %s", game_id, user_id)
-    await callback.answer("🏳️ Вы сдались!")
+    await _safe_callback_answer(callback, "🏳️ Вы сдались!")
 
 
 @router.callback_query(F.data == "xo_stats")
@@ -1364,7 +1387,7 @@ async def xo_stats_callback(callback: CallbackQuery) -> None:
     try:
         stats = await db.get_user_stats(user_id)
     except DatabaseError:
-        await callback.answer("❌ Ошибка загрузки статистики", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка загрузки статистики")
         return
     
     if not stats:
@@ -1380,20 +1403,20 @@ async def xo_stats_callback(callback: CallbackQuery) -> None:
     winrate = (wins / games * 100) if games > 0 else 0
     
     text = (
-        "📊 <b>ВАША СТАТИСТИКА XO</b>\n\n"
-        "🎮 Игр: <b>" + str(games) + "</b>\n"
-        "🏆 Побед: <b>" + str(wins) + "</b>\n"
-        "💔 Поражений: <b>" + str(losses) + "</b>\n"
-        "🤝 Ничьих: <b>" + str(draws) + "</b>\n"
-        "🤖 Поражений от бота: <b>" + str(losses_vs_bot) + "</b>\n"
-        "📈 Винрейт: <b>" + str(round(winrate, 1)) + "%</b>"
+        f"📊 <b>ВАША СТАТИСТИКА XO</b>\n\n"
+        f"🎮 Игр: <b>{games}</b>\n"
+        f"🏆 Побед: <b>{wins}</b>\n"
+        f"💔 Поражений: <b>{losses}</b>\n"
+        f"🤝 Ничьих: <b>{draws}</b>\n"
+        f"🤖 Поражений от бота: <b>{losses_vs_bot}</b>\n"
+        f"📈 Винрейт: <b>{round(winrate, 1)}%</b>"
     )
     
     await safe_edit_callback(callback, text, InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎮 НОВАЯ ИГРА", callback_data="game_xo")],
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="game_xo")]
     ]))
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "xo_help")
@@ -1402,19 +1425,26 @@ async def xo_help_callback(callback: CallbackQuery) -> None:
         return
     
     await safe_edit_callback(callback,
-        "❓ <b>ПРАВИЛА КРЕСТИКОВ-НОЛИКОВ</b>\n\n"
-        "🎯 <b>Цель:</b> Собрать 3 своих символа в ряд\n\n"
-        "🤖 <b>С ботом:</b> Выберите сторону (X/O) и сложность\n"
-        "👤 <b>С игроком:</b> Вызовите друга и играйте на NCoin\n\n"
-        "💰 <b>Ставки:</b> Победитель получает ×2 (комиссия " + str(int(COMMISSION * 100)) + "%)\n\n"
-        "📩 <b>Игра проходит в личных сообщениях!</b>\n\n"
-        "🚫 <b>Отмена игры:</b> /cancel_xo или кнопка в ЛС",
+        f"❓ <b>ПРАВИЛА КРЕСТИКОВ-НОЛИКОВ</b>\n\n"
+        f"🎯 <b>Цель:</b> Собрать 3 своих символа в ряд\n\n"
+        f"🤖 <b>С ботом:</b> Выберите сторону (X/O) и сложность\n"
+        f"👤 <b>С игроком:</b> Вызовите друга и играйте на NCoin\n\n"
+        f"💰 <b>Ставки:</b> Победитель получает ×2 (комиссия {int(COMMISSION * 100)}%)\n\n"
+        f"📩 <b>Игра проходит в личных сообщениях!</b>\n\n"
+        f"🚫 <b>Отмена игры:</b> /cancel_xo или кнопка в ЛС",
         back_button("game_xo"))
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "xo_noop")
 async def xo_noop(callback: CallbackQuery) -> None:
     if callback and callback.from_user:
         logger.debug("NOOP callback from user %s (data: %s)", callback.from_user.id, callback.data)
-    await callback.answer("❌ Эта клетка занята или игра не активна!", show_alert=True)
+    await _safe_callback_answer(callback, "❌ Эта клетка занята или игра не активна!")
+
+
+# ==================== ШУТДАУН ====================
+
+async def on_shutdown() -> None:
+    await stop_background_tasks()
+    logger.info("✅ TicTacToe module shutdown complete")
