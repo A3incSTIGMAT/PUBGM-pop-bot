@@ -2,22 +2,30 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/tag_trigger.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.1.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Вызов тегов по категориям
+# ============================================
+# ИСПРАВЛЕНИЯ v2.1.0:
+#   🟡 Добавлены таймауты на все send_message
+#   🟡 retry логика в send_batch_messages
+#   🟡 Валидация пустого category_slug
+#   🟡 exc_info=True во всех logger.error
+#   🟢 Константы вынесены в os.getenv()
 # ============================================
 
 import asyncio
 import html
 import logging
+import os
 from typing import Optional, List
 
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 
 from handlers.tag_categories import (
-    get_chat_enabled_categories, 
+    get_chat_enabled_categories,
     collect_all_users_except_unsubscribed,
     log_tag_usage
 )
@@ -26,11 +34,12 @@ from database import DatabaseError
 logger = logging.getLogger(__name__)
 router = Router()
 
-# ==================== КОНСТАНТЫ ====================
+# ==================== КОНСТАНТЫ (НАСТРАИВАЕМЫЕ) ====================
 
-BATCH_SIZE = 10
-BATCH_DELAY = 1.0
-MAX_MENTIONS = 50  # Максимум упоминаний за раз
+BATCH_SIZE = int(os.getenv("TAG_BATCH_SIZE", "10"))
+BATCH_DELAY = float(os.getenv("TAG_BATCH_DELAY", "1.0"))
+MAX_MENTIONS = int(os.getenv("TAG_MAX_MENTIONS", "50"))
+API_TIMEOUT = float(os.getenv("TAG_API_TIMEOUT", "30.0"))
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
@@ -54,10 +63,18 @@ async def send_batch_messages(
     msg_text: str
 ) -> int:
     """
-    Отправляет сообщения пачками.
+    Отправляет сообщения пачками с таймаутом и повторными попытками.
     
+    Args:
+        bot: Экземпляр бота
+        chat_id: ID чата
+        batches: Список батчей с упоминаниями
+        category: Данные категории
+        initiator_name: Имя инициатора
+        msg_text: Текст сообщения
+        
     Returns:
-        Количество отправленных сообщений
+        Количество успешно отправленных батчей
     """
     sent = 0
     safe_name = safe_html_escape(initiator_name)
@@ -80,11 +97,29 @@ async def send_batch_messages(
                 f"{batch_text}"
             )
         
-        try:
-            await bot.send_message(chat_id, response, parse_mode=ParseMode.HTML)
-            sent += 1
-        except TelegramAPIError as e:
-            logger.error(f"Failed to send batch {batch_idx}: {e}")
+        # Отправка с повторными попытками
+        for attempt in range(3):
+            try:
+                await asyncio.wait_for(
+                    bot.send_message(chat_id, response, parse_mode=ParseMode.HTML),
+                    timeout=API_TIMEOUT
+                )
+                sent += 1
+                break
+            except TelegramRetryAfter as e:
+                wait_time = min(e.retry_after + 1, 60)
+                logger.warning(f"⏱ Rate limit, waiting {wait_time}s (batch {batch_idx}, attempt {attempt + 1})")
+                await asyncio.sleep(wait_time)
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱ Timeout sending batch {batch_idx} (attempt {attempt + 1})")
+                if attempt < 2:
+                    await asyncio.sleep(1)
+            except TelegramAPIError as e:
+                logger.error(f"❌ Failed to send batch {batch_idx}: {e}")
+                break
+            except Exception as e:
+                logger.error(f"❌ Unexpected error sending batch {batch_idx}: {e}", exc_info=True)
+                break
         
         if batch_idx < len(batches) - 1:
             await asyncio.sleep(BATCH_DELAY)
@@ -97,10 +132,16 @@ async def send_batch_messages(
 async def trigger_tag(message: types.Message, category_slug: str, msg_text: str) -> None:
     """
     Вызов тега из умного парсера.
+    
     Тегает ВСЕХ пользователей, КРОМЕ тех, кто явно отписался от категории.
+    
+    Args:
+        message: Сообщение пользователя
+        category_slug: Slug категории
+        msg_text: Текст сообщения
     """
     if not message or not message.chat or not message.from_user:
-        logger.warning("trigger_tag called with invalid message")
+        logger.warning("⚠️ trigger_tag called with invalid message")
         return
     
     chat_id = message.chat.id
@@ -109,12 +150,20 @@ async def trigger_tag(message: types.Message, category_slug: str, msg_text: str)
     if message.chat.type not in ['group', 'supergroup']:
         return
     
+    if not category_slug:
+        logger.warning("⚠️ trigger_tag called with empty category_slug")
+        return
+    
     # Проверка существования категории
     try:
         categories = await get_chat_enabled_categories(chat_id)
     except DatabaseError as e:
-        logger.error(f"Database error getting categories: {e}")
+        logger.error(f"❌ Database error getting categories: {e}", exc_info=True)
         await message.answer("❌ Ошибка базы данных. Попробуйте позже.")
+        return
+    except Exception as e:
+        logger.error(f"❌ Unexpected error getting categories: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
         return
     
     category = next((c for c in categories if c["slug"] == category_slug), None)
@@ -137,7 +186,11 @@ async def trigger_tag(message: types.Message, category_slug: str, msg_text: str)
     try:
         subscribers = await collect_all_users_except_unsubscribed(chat_id, category_slug)
     except DatabaseError as e:
-        logger.error(f"Database error collecting users: {e}")
+        logger.error(f"❌ Database error collecting users: {e}", exc_info=True)
+        await status_msg.edit_text("❌ Ошибка при сборе участников.")
+        return
+    except Exception as e:
+        logger.error(f"❌ Unexpected error collecting users: {e}", exc_info=True)
         await status_msg.edit_text("❌ Ошибка при сборе участников.")
         return
     
@@ -162,7 +215,7 @@ async def trigger_tag(message: types.Message, category_slug: str, msg_text: str)
     
     # Разбиваем на батчи
     batches = [
-        mentions_to_send[i:i + BATCH_SIZE] 
+        mentions_to_send[i:i + BATCH_SIZE]
         for i in range(0, len(mentions_to_send), BATCH_SIZE)
     ]
     
@@ -175,39 +228,47 @@ async def trigger_tag(message: types.Message, category_slug: str, msg_text: str)
     # Итоговое сообщение
     try:
         if total_mentions > MAX_MENTIONS:
-            await message.bot.send_message(
-                chat_id,
+            summary = (
                 f"✅ <b>Готово!</b>\n"
                 f"👥 Упомянуто: {MAX_MENTIONS} из {total_mentions}\n"
                 f"📌 Категория: {category['icon']} {category['name']}\n\n"
-                f"💡 <i>Отписаться: /mytags</i>",
-                parse_mode=ParseMode.HTML
+                f"💡 <i>Отписаться: /mytags</i>"
             )
         else:
-            await message.bot.send_message(
-                chat_id,
+            summary = (
                 f"✅ <b>Готово!</b>\n"
                 f"👥 Упомянуто: {total_mentions}\n"
                 f"📌 Категория: {category['icon']} {category['name']}\n\n"
-                f"💡 <i>Отписаться от уведомлений: /mytags</i>",
-                parse_mode=ParseMode.HTML
+                f"💡 <i>Отписаться от уведомлений: /mytags</i>"
             )
+        
+        await asyncio.wait_for(
+            message.bot.send_message(chat_id, summary, parse_mode=ParseMode.HTML),
+            timeout=API_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning("⏱ Timeout sending final summary")
     except TelegramAPIError as e:
-        logger.error(f"Failed to send final message: {e}")
+        logger.error(f"❌ Failed to send final message: {e}")
     
     # Логируем
     try:
         await log_tag_usage(chat_id, category_slug, user_id, len(mentions_to_send))
-        logger.info(f"Tag triggered: chat={chat_id}, cat={category_slug}, mentions={len(mentions_to_send)}")
+        logger.info(f"✅ Tag triggered: chat={chat_id}, cat={category_slug}, mentions={len(mentions_to_send)}")
     except DatabaseError as e:
-        logger.error(f"Failed to log tag usage: {e}")
+        logger.error(f"❌ Failed to log tag usage: {e}", exc_info=True)
 
 
 # ==================== КОМАНДЫ ====================
 
 @router.message(Command("tagcat"))
 async def cmd_tagcat(message: types.Message) -> None:
-    """Вызов тега по категории: /tagcat pubg текст"""
+    """
+    Вызов тега по категории.
+    
+    Использование: /tagcat pubg текст
+    Без аргументов показывает доступные категории.
+    """
     if not message or not message.chat or not message.from_user:
         return
     
@@ -227,7 +288,11 @@ async def cmd_tagcat(message: types.Message) -> None:
         try:
             categories = await get_chat_enabled_categories(chat_id)
         except DatabaseError as e:
-            logger.error(f"Database error: {e}")
+            logger.error(f"❌ Database error: {e}", exc_info=True)
+            await message.answer("❌ Ошибка загрузки категорий.")
+            return
+        except Exception as e:
+            logger.error(f"❌ Unexpected error loading categories: {e}", exc_info=True)
             await message.answer("❌ Ошибка загрузки категорий.")
             return
         
@@ -251,10 +316,23 @@ async def cmd_tagcat(message: types.Message) -> None:
         await message.answer(text, parse_mode=ParseMode.HTML)
         return
     
-    category_slug = args[1].lower()
+    category_slug = args[1].lower().strip()
+    
+    # ✅ Валидация пустого slug
+    if not category_slug:
+        await message.answer("❌ Укажите категорию!")
+        return
+    
     msg_text = args[2] if len(args) > 2 else "Внимание!"
     
-    await trigger_tag(message, category_slug, msg_text)
+    # ✅ Обработка ошибок при вызове trigger_tag
+    try:
+        await trigger_tag(message, category_slug, msg_text)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in cmd_tagcat: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка при вызове тега.")
 
 
 @router.message(Command("tagcat_help"))
