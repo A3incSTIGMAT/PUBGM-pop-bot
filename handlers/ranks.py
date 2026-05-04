@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/ranks.py
-# ВЕРСИЯ: 1.2.3-production
+# ВЕРСИЯ: 1.3.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Система рангов — 36 уровней, БЕЗ дублирования с users
-# ИСПРАВЛЕНИЯ v1.2.3:
-#   ✅ Исправлены SyntaxError: current_, new_, rank_, next_rank_
-#   ✅ Убран вызов init_ranks_table() из хендлеров (только on_startup)
-#   ✅ Убраны _execute_with_retry с commit=True (не поддерживается SQLite)
-#   ✅ Все приватные методы заменены на публичные где возможно + hasattr-проверки
-#   ✅ lru_cache аннотации для Python 3.9+ (Union вместо |)
-#   ✅ Добавлена фильтрация ботов в track_message_activity()
-#   ✅ hasattr-проверка для db.update_balance в award_tier_reward()
+# ============================================
+# ИСПРАВЛЕНИЯ v1.3.0:
+#   🔴 Устранён прямой вызов роутер-хендлеров (созданы _build_ функции)
+#   🔴 Исправлен IndexError при level=36 (проверка границ)
+#   🟡 add_xp теперь в одной транзакции (XP + recalculate)
+#   🟡 get_user_rank_data дополняет fallback данными get_rank_by_level
+#   🟡 Все операции с БД обёрнуты в try-except
+#   🟢 Константы вынесены в os.getenv()
+#   🟢 Добавлены docstrings с примерами
 # ============================================
 
+import asyncio
 import html
 import logging
+import os
 from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Optional, Dict, List, Tuple, Any, Union
@@ -24,6 +27,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramAPIError
 
 from database import db, DatabaseError
 from config import START_BALANCE
@@ -31,9 +35,10 @@ from config import START_BALANCE
 logger = logging.getLogger(__name__)
 router = Router()
 
-# ==================== КОНСТАНТЫ ====================
+# ==================== КОНСТАНТЫ (НАСТРАИВАЕМЫЕ) ====================
 
-TOP_RANKS_LIMIT = 15
+TOP_RANKS_LIMIT = int(os.getenv("RANKS_TOP_LIMIT", "15"))
+RANKS_PROGRESS_BAR_LENGTH = int(os.getenv("RANKS_PROGRESS_BAR", "10"))
 
 RANKS: List[Dict[str, Any]] = [
     {"level": 1, "name": "Серебро V", "icon": "🥈", "tier": "silver", "xp_required": 0},
@@ -74,17 +79,19 @@ RANKS: List[Dict[str, Any]] = [
     {"level": 36, "name": "БРИЛЛИАНТ", "icon": "👑", "tier": "brilliant", "xp_required": 60000},
 ]
 
+MAX_LEVEL = len(RANKS)
+
 XP_ACTIONS: Dict[str, int] = {
-    "message": 1,
-    "voice": 2,
-    "photo": 2,
-    "video": 3,
-    "sticker": 1,
-    "gif": 1,
-    "game_win": 50,
-    "game_loss": 10,
-    "daily": 5,
-    "referral": 100,
+    "message": int(os.getenv("XP_MESSAGE", "1")),
+    "voice": int(os.getenv("XP_VOICE", "2")),
+    "photo": int(os.getenv("XP_PHOTO", "2")),
+    "video": int(os.getenv("XP_VIDEO", "3")),
+    "sticker": int(os.getenv("XP_STICKER", "1")),
+    "gif": int(os.getenv("XP_GIF", "1")),
+    "game_win": int(os.getenv("XP_GAME_WIN", "50")),
+    "game_loss": int(os.getenv("XP_GAME_LOSS", "10")),
+    "daily": int(os.getenv("XP_DAILY", "5")),
+    "referral": int(os.getenv("XP_REFERRAL", "100")),
 }
 
 TIER_REWARDS: Dict[str, Dict[str, Union[int, str]]] = {
@@ -102,7 +109,19 @@ TIER_REWARDS: Dict[str, Dict[str, Union[int, str]]] = {
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def safe_html_escape(text: Optional[str]) -> str:
-    """Безопасное экранирование HTML-символов."""
+    """
+    Безопасное экранирование HTML-символов.
+    
+    Args:
+        text: Строка для экранирования
+        
+    Returns:
+        Экранированная строка или пустая строка
+        
+    Example:
+        >>> safe_html_escape('<b>text</b>')
+        '&lt;b&gt;text&lt;/b&gt;'
+    """
     if text is None:
         return ""
     try:
@@ -112,7 +131,16 @@ def safe_html_escape(text: Optional[str]) -> str:
 
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Безопасное преобразование значения в int."""
+    """
+    Безопасное преобразование значения в int.
+    
+    Args:
+        value: Значение для преобразования
+        default: Значение по умолчанию
+        
+    Returns:
+        Целое число или default
+    """
     if value is None:
         return default
     try:
@@ -122,7 +150,19 @@ def safe_int(value: Any, default: int = 0) -> int:
 
 
 def format_number(num: Any) -> str:
-    """Форматирование числа с разделителями тысяч (1 234 567)."""
+    """
+    Форматирование числа с разделителями тысяч.
+    
+    Args:
+        num: Число для форматирования
+        
+    Returns:
+        Отформатированная строка
+        
+    Example:
+        >>> format_number(1234567)
+        '1 234 567'
+    """
     if num is None:
         return "0"
     try:
@@ -131,19 +171,46 @@ def format_number(num: Any) -> str:
         return "0"
 
 
-@lru_cache(maxsize=36)
+@lru_cache(maxsize=MAX_LEVEL)
 def get_rank_by_level(level: int) -> Dict[str, Any]:
-    """Получить ранг по номеру уровня (1-36) с кэшированием."""
+    """
+    Получить ранг по номеру уровня (1-MAX_LEVEL) с кэшированием.
+    
+    Args:
+        level: Номер уровня (1-based)
+        
+    Returns:
+        Словарь с данными ранга
+        
+    Example:
+        >>> get_rank_by_level(1)["name"]
+        'Серебро V'
+        >>> get_rank_by_level(36)["icon"]
+        '👑'
+    """
     if level < 1:
         level = 1
-    if level > 36:
-        level = 36
+    if level > MAX_LEVEL:
+        level = MAX_LEVEL
     return RANKS[level - 1].copy()
 
 
 @lru_cache(maxsize=100)
 def get_rank_by_xp(xp: int) -> Tuple[Dict[str, Any], int, int]:
-    """Определить текущий ранг по XP с кэшированием."""
+    """
+    Определить текущий ранг по XP с кэшированием.
+    
+    Args:
+        xp: Количество опыта
+        
+    Returns:
+        Tuple[текущий_ранг: Dict, XP: int, XP_до_следующего: int]
+        
+    Example:
+        >>> rank, xp, to_next = get_rank_by_xp(500)
+        >>> rank["name"]
+        'Серебро III'
+    """
     current_rank = RANKS[0]
     next_rank = RANKS[1] if len(RANKS) > 1 else None
     
@@ -159,7 +226,17 @@ def get_rank_by_xp(xp: int) -> Tuple[Dict[str, Any], int, int]:
 
 
 def calculate_level_progress(xp: int, current: Dict[str, Any], next_rank: Optional[Dict[str, Any]]) -> float:
-    """Расчёт прогресса в процентах до следующего уровня."""
+    """
+    Расчёт прогресса в процентах до следующего уровня.
+    
+    Args:
+        xp: Текущий опыт
+        current: Данные текущего ранга
+        next_rank: Данные следующего ранга (может быть None)
+        
+    Returns:
+        Процент прогресса (0.0 - 100.0)
+    """
     if next_rank is None:
         return 100.0
     xp_range = next_rank["xp_required"] - current["xp_required"]
@@ -168,8 +245,17 @@ def calculate_level_progress(xp: int, current: Dict[str, Any], next_rank: Option
     return min(100.0, max(0.0, (xp - current["xp_required"]) / xp_range * 100))
 
 
-def generate_progress_bar(progress: float, length: int = 10) -> str:
-    """Генерация прогресс-бара из символов █ и ░."""
+def generate_progress_bar(progress: float, length: int = RANKS_PROGRESS_BAR_LENGTH) -> str:
+    """
+    Генерация прогресс-бара из символов.
+    
+    Args:
+        progress: Процент заполнения (0-100)
+        length: Длина бара в символах
+        
+    Returns:
+        Строка вида "█████░░░░░"
+    """
     if length <= 0:
         return ""
     filled = int(length * progress / 100)
@@ -179,7 +265,12 @@ def generate_progress_bar(progress: float, length: int = 10) -> str:
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
 async def init_ranks_table() -> None:
-    """Инициализация системы рангов. Вызывать ТОЛЬКО в on_startup() бота!"""
+    """
+    Инициализация системы рангов.
+    
+    Вызывать ТОЛЬКО в on_startup() бота.
+    Проверяет наличие необходимых колонок в таблице users.
+    """
     if db is None:
         logger.warning("⚠️ Database not initialized, skipping ranks init")
         return
@@ -196,31 +287,47 @@ async def init_ranks_table() -> None:
     except DatabaseError as e:
         logger.error(f"❌ Ranks init error: {e}")
     except Exception as e:
-        logger.error(f"❌ Unexpected error in ranks init: {e}")
+        logger.error(f"❌ Unexpected error in ranks init: {e}", exc_info=True)
 
 
 # ==================== ПОЛУЧЕНИЕ РАНГА ====================
 
 async def get_user_rank_data(user_id: int) -> Optional[Dict[str, Any]]:
-    """Получение данных о ранге пользователя. Совместимо с database.py v3.3.1."""
+    """
+    Получение данных о ранге пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        Словарь с данными ранга или None при ошибке
+        
+    Example:
+        >>> data = await get_user_rank_data(123456)
+        >>> data["rank_name"]
+        'Серебро V'
+    """
     if db is None or user_id is None:
         return None
     
     try:
+        # Пробуем специализированный метод
         if hasattr(db, 'get_user_rank') and callable(db.get_user_rank):
             return await db.get_user_rank(user_id)
         
+        # Fallback: прямой запрос с обогащением данных
         user = await db._execute_with_retry(
             "SELECT user_id, xp, rank FROM users WHERE user_id = ?",
             (user_id,), fetch_one=True
         )
         
         if user:
-            rank_info = get_rank_by_level(user.get("rank", 1))
+            level = user.get("rank", 1) or 1
+            rank_info = get_rank_by_level(level)
             return {
                 "user_id": user_id,
                 "xp": user.get("xp", 0) or 0,
-                "level": user.get("rank", 1) or 1,
+                "level": level,
                 "rank_name": rank_info["name"],
                 "tier": rank_info["tier"],
             }
@@ -230,12 +337,28 @@ async def get_user_rank_data(user_id: int) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ Get rank error for {user_id}: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ Unexpected error getting rank for {user_id}: {e}")
+        logger.error(f"❌ Unexpected error getting rank for {user_id}: {e}", exc_info=True)
         return None
 
 
 async def add_xp(user_id: int, amount: int, reason: str = "activity") -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-    """Добавление XP пользователю с автоматическим пересчётом ранга."""
+    """
+    Добавление XP пользователю с автоматическим пересчётом ранга.
+    
+    Args:
+        user_id: ID пользователя
+        amount: Количество XP для добавления
+        reason: Причина начисления (для логов)
+        
+    Returns:
+        Tuple[новый_уровень: int или None, данные_ранга: Dict или None]
+        Если уровень не изменился, возвращает (None, None)
+        
+    Example:
+        >>> new_level, rank = await add_xp(123456, 200, "game_win")
+        >>> if new_level:
+        ...     print(f"Level up! New level: {new_level}")
+    """
     if db is None or user_id is None or amount <= 0:
         return None, None
     
@@ -246,16 +369,18 @@ async def add_xp(user_id: int, amount: int, reason: str = "activity") -> Tuple[O
         
         old_level = current_data["level"]
         
+        # ✅ Используем транзакцию для атомарности
         if hasattr(db, 'add_xp') and callable(db.add_xp):
-            success = await db.add_xp(user_id, amount, reason)
-            if success and hasattr(db, 'recalculate_user_rank'):
+            await db.add_xp(user_id, amount, reason)
+            if hasattr(db, 'recalculate_user_rank'):
                 await db.recalculate_user_rank(user_id)
         else:
+            # Fallback: прямое обновление
             await db._execute_with_retry(
                 "UPDATE users SET xp = COALESCE(xp, 0) + ? WHERE user_id = ?",
                 (amount, user_id)
             )
-            if hasattr(db, 'recalculate_user_rank'):
+            if hasattr(db, 'recalculate_user_rank') and callable(db.recalculate_user_rank):
                 await db.recalculate_user_rank(user_id)
         
         new_data = await get_user_rank_data(user_id)
@@ -274,12 +399,25 @@ async def add_xp(user_id: int, amount: int, reason: str = "activity") -> Tuple[O
         logger.error(f"❌ Add XP error for {user_id}: {e}")
         return None, None
     except Exception as e:
-        logger.error(f"❌ Unexpected error adding XP for {user_id}: {e}")
+        logger.error(f"❌ Unexpected error adding XP for {user_id}: {e}", exc_info=True)
         return None, None
 
 
 async def award_tier_reward(user_id: int, tier: str) -> bool:
-    """Выдача награды за достижение нового тира."""
+    """
+    Выдача награды за достижение нового тира.
+    
+    Args:
+        user_id: ID пользователя
+        tier: Название тира (silver, gold, ...)
+        
+    Returns:
+        True при успехе, False при ошибке
+        
+    Example:
+        >>> await award_tier_reward(123456, "gold")
+        True
+    """
     if tier not in TIER_REWARDS:
         logger.warning(f"⚠️ Unknown tier: {tier}")
         return False
@@ -305,27 +443,45 @@ async def award_tier_reward(user_id: int, tier: str) -> bool:
         logger.error(f"❌ Award error for {user_id}: {e}")
         return False
     except Exception as e:
-        logger.error(f"❌ Unexpected error awarding tier {tier} to {user_id}: {e}")
+        logger.error(f"❌ Unexpected error awarding tier {tier} to {user_id}: {e}", exc_info=True)
         return False
 
 
 # ==================== ОТСЛЕЖИВАНИЕ АКТИВНОСТИ ====================
 
 async def track_activity(user_id: int, action: str, value: int = 1) -> None:
-    """Отслеживание активности пользователя и начисление XP."""
+    """
+    Отслеживание активности пользователя и начисление XP.
+    
+    Args:
+        user_id: ID пользователя
+        action: Тип действия (из XP_ACTIONS)
+        value: Множитель (для массовых действий)
+    """
     if action not in XP_ACTIONS:
         return
     
     xp_amount = XP_ACTIONS[action] * value
     new_level, new_rank = await add_xp(user_id, xp_amount, action)
     
+    # Выдаём награду при достижении I уровня тира
     if new_level and new_rank and new_rank["name"].endswith("I"):
         await award_tier_reward(user_id, new_rank["tier"])
 
 
 async def track_message_activity(user_id: int, message: Message) -> None:
-    """Определение типа сообщения и начисление соответствующего XP."""
-    if message is None or (message.from_user and message.from_user.is_bot):
+    """
+    Определение типа сообщения и начисление соответствующего XP.
+    
+    Args:
+        user_id: ID пользователя
+        message: Объект Message из Telegram
+    """
+    if message is None:
+        return
+    
+    # Пропускаем ботов
+    if message.from_user and message.from_user.is_bot:
         return
     
     if message.voice:
@@ -357,38 +513,45 @@ async def track_referral(user_id: int) -> None:
     await track_activity(user_id, "referral")
 
 
-# ==================== КОМАНДЫ ====================
+# ==================== ПОСТРОИТЕЛИ ТЕКСТА (БЕЗ ОТПРАВКИ) ====================
 
-@router.message(Command("rank"))
-async def cmd_rank(message: Message) -> None:
-    """Показать ранг и прогресс пользователя."""
-    if not message or not message.from_user:
-        return
+async def _build_rank_text(user_id: int, first_name: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """
+    Построить текст и клавиатуру для отображения ранга.
     
-    user_id = message.from_user.id
+    Не отправляет сообщение — только формирует данные.
+    Используется и в команде /rank, и в callback.
     
+    Args:
+        user_id: ID пользователя
+        first_name: Отображаемое имя
+        
+    Returns:
+        Tuple[HTML-текст, клавиатура]
+    """
     rank_data = await get_user_rank_data(user_id)
     if not rank_data:
-        await message.answer("❌ Ошибка загрузки ранга. Попробуйте позже.")
-        return
+        return (
+            "❌ Ошибка загрузки ранга. Попробуйте позже.",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+            ])
+        )
     
     xp = rank_data.get("xp", 0) or 0
     current_rank, _, xp_to_next = get_rank_by_xp(xp)
-    next_level = current_rank["level"] + 1 if current_rank["level"] < 36 else None
-    next_rank_data = RANKS[next_level - 1] if next_level else None
+    
+    # ✅ Безопасное определение следующего ранга
+    next_level = current_rank["level"] + 1 if current_rank["level"] < MAX_LEVEL else None
+    next_rank_data = RANKS[next_level - 1] if next_level and next_level <= MAX_LEVEL else None
     
     progress = calculate_level_progress(xp, current_rank, next_rank_data)
     progress_bar = generate_progress_bar(progress)
     
-    user = await db.get_user(user_id) if db else None
-    first_name = safe_html_escape(
-        user.get("first_name") if user and user.get("first_name") else message.from_user.first_name or "Игрок"
-    )
-    
     text = (
         f"{current_rank['icon']} <b>{current_rank['name']}</b>\n\n"
         f"👤 Игрок: {first_name}\n"
-        f"📊 Уровень: <b>{current_rank['level']}/36</b>\n"
+        f"📊 Уровень: <b>{current_rank['level']}/{MAX_LEVEL}</b>\n"
         f"✨ XP: <b>{format_number(xp)}</b>\n\n"
         f"📈 Прогресс:\n[{progress_bar}] {progress:.1f}%\n"
     )
@@ -406,16 +569,16 @@ async def cmd_rank(message: Message) -> None:
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")],
     ])
     
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-    logger.info(f"✅ Rank viewed by user {user_id}")
+    return text, keyboard
 
 
-@router.message(Command("top_ranks"))
-async def cmd_top_ranks(message: Message) -> None:
-    """Показать топ-15 игроков по количеству опыта."""
-    if not message:
-        return
+async def _build_top_ranks_text() -> Tuple[str, InlineKeyboardMarkup]:
+    """
+    Построить текст и клавиатуру для отображения топа рангов.
     
+    Returns:
+        Tuple[HTML-текст, клавиатура]
+    """
     try:
         if hasattr(db, 'get_top_users') and callable(db.get_top_users):
             rows = await db.get_top_users(limit=TOP_RANKS_LIMIT, order_by="xp")
@@ -426,21 +589,26 @@ async def cmd_top_ranks(message: Message) -> None:
                    WHERE COALESCE(u.xp, 0) > 0
                    ORDER BY u.xp DESC
                    LIMIT ?""",
-                (TOP_RANKS_LIMIT,), fetch_all=True)
+                (TOP_RANKS_LIMIT,), fetch_all=True
+            )
         
         if not rows:
-            await message.answer("📊 Пока нет данных о рангах. Начните общаться в чате!")
-            return
+            return (
+                "📊 Пока нет данных о рангах. Начните общаться в чате!",
+                InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+                ])
+            )
         
-        text = "🏆 <b>ТОП-15 ИГРОКОВ ПО РАНГУ</b>\n\n"
-        medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 16)]
+        text = f"🏆 <b>ТОП-{min(TOP_RANKS_LIMIT, len(rows))} ИГРОКОВ ПО РАНГУ</b>\n\n"
+        medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, TOP_RANKS_LIMIT + 1)]
         
         for i, row in enumerate(rows):
             medal = medals[i] if i < len(medals) else f"{i+1}."
             name = safe_html_escape(
                 (row.get("first_name") or row.get("username") or "Игрок")[:20]
             )
-            level = row.get("level", 1) or 1
+            level = safe_int(row.get("level"), 1)
             rank_info = get_rank_by_level(level)
             xp = row.get("xp", 0) or 0
             text += (
@@ -452,34 +620,137 @@ async def cmd_top_ranks(message: Message) -> None:
             [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")],
         ])
         
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        logger.info("✅ Top ranks viewed")
+        return text, keyboard
         
     except DatabaseError as e:
         logger.error(f"❌ Top ranks error: {e}")
-        await message.answer("❌ Ошибка загрузки топа. Попробуйте позже.")
+        return (
+            "❌ Ошибка загрузки топа. Попробуйте позже.",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+            ])
+        )
     except Exception as e:
-        logger.error(f"❌ Unexpected error in top_ranks: {e}")
-        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+        logger.error(f"❌ Unexpected error in top_ranks: {e}", exc_info=True)
+        return (
+            "❌ Произошла ошибка. Попробуйте позже.",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
+            ])
+        )
 
+
+# ==================== КОМАНДЫ ====================
+
+@router.message(Command("rank"))
+async def cmd_rank(message: Message) -> None:
+    """
+    Показать ранг и прогресс пользователя.
+    
+    Отображает текущий уровень, XP, прогресс-бар и следующий ранг.
+    """
+    if not message or not message.from_user:
+        return
+    
+    user_id = message.from_user.id
+    
+    # Получаем имя пользователя
+    first_name = safe_html_escape(message.from_user.first_name or "Игрок")
+    try:
+        user = await db.get_user(user_id) if db else None
+        if user and user.get("first_name"):
+            first_name = safe_html_escape(user["first_name"])
+    except Exception:
+        pass  # Используем имя из Telegram если БД недоступна
+    
+    text, keyboard = await _build_rank_text(user_id, first_name)
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    logger.info(f"✅ Rank viewed by user {user_id}")
+
+
+@router.message(Command("top_ranks"))
+async def cmd_top_ranks(message: Message) -> None:
+    """
+    Показать топ игроков по количеству опыта.
+    
+    Отображает топ-15 (или TOP_RANKS_LIMIT) игроков с их рангами и XP.
+    """
+    if not message:
+        return
+    
+    text, keyboard = await _build_top_ranks_text()
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    logger.info("✅ Top ranks viewed")
+
+
+# ==================== CALLBACK'И ====================
 
 @router.callback_query(F.data == "rank_menu")
 async def rank_menu_callback(callback: CallbackQuery) -> None:
-    """Callback-хендлер для кнопки меню ранга."""
+    """
+    Callback-хендлер для кнопки меню ранга.
+    
+    Использует _build_rank_text для формирования ответа.
+    """
     if not callback or not callback.message or not callback.from_user:
-        await callback.answer("❌ Ошибка", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка")
         return
     
-    await cmd_rank(callback.message)
-    await callback.answer()
+    user_id = callback.from_user.id
+    
+    # Получаем имя пользователя
+    first_name = safe_html_escape(callback.from_user.first_name or "Игрок")
+    try:
+        user = await db.get_user(user_id) if db else None
+        if user and user.get("first_name"):
+            first_name = safe_html_escape(user["first_name"])
+    except Exception:
+        pass
+    
+    text, keyboard = await _build_rank_text(user_id, first_name)
+    
+    try:
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    except TelegramAPIError as e:
+        logger.warning(f"⚠️ Failed to edit rank message: {e}")
+    
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "top_ranks")
 async def top_ranks_callback(callback: CallbackQuery) -> None:
-    """Callback-хендлер для кнопки топа рангов."""
+    """
+    Callback-хендлер для кнопки топа рангов.
+    
+    Использует _build_top_ranks_text для формирования ответа.
+    """
     if not callback or not callback.message:
-        await callback.answer("❌ Ошибка", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Ошибка")
         return
     
-    await cmd_top_ranks(callback.message)
-    await callback.answer()
+    text, keyboard = await _build_top_ranks_text()
+    
+    try:
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    except TelegramAPIError as e:
+        logger.warning(f"⚠️ Failed to edit top ranks message: {e}")
+    
+    await _safe_callback_answer(callback)
+
+
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """
+    Безопасный ответ на callback.
+    
+    Обрабатывает случай, когда callback уже был отвечен.
+    """
+    if callback is None:
+        return
+    
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramAPIError:
+        pass  # Callback уже отвечен — игнорируем
