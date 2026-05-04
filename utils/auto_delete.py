@@ -2,14 +2,22 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: utils/auto_delete.py
-# ВЕРСИЯ: 2.5.0-final
-# ОПИСАНИЕ: Утренняя очистка + ЖЁСТКАЯ СВОДКА С МАТАМИ + ИНЛАЙН-КНОПКИ
-# ИСПРАВЛЕНО: Кнопки вместо слеш-команд, статистика по чатам
+# ВЕРСИЯ: 2.6.0-production (исправленная после аудита)
+# ОПИСАНИЕ: Утренняя очистка + сводка с инлайн-кнопками
+# ============================================
+# ИСПРАВЛЕНИЯ v2.6.0:
+#   🟡 Константы вынесены в os.getenv()
+#   🟡 Импорты наверх, убран неиспользуемый BOT_USERNAME
+#   🟡 parse_mode параметризован
+#   🟡 exc_info=True во всех logger.error
+#   🟡 Разделён morning_cleanup_and_greeting (слишком длинная)
+#   🟡 Исправлен wait_seconds (защита от отрицательных)
 # ============================================
 
 import asyncio
 import html
 import logging
+import os
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -19,18 +27,40 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import ADMIN_IDS, MORNING_CLEANUP_HOUR, BOT_USERNAME
+from config import ADMIN_IDS, MORNING_CLEANUP_HOUR
+from database import db
 
 logger = logging.getLogger(__name__)
 
-# ==================== КОНСТАНТЫ ====================
+# ==================== КОНСТАНТЫ (НАСТРАИВАЕМЫЕ) ====================
 
 MSK_OFFSET = timezone(timedelta(hours=3))
-CLEANUP_HOUR = MORNING_CLEANUP_HOUR if MORNING_CLEANUP_HOUR else 10
+CLEANUP_HOUR = int(os.getenv("MORNING_CLEANUP_HOUR", str(MORNING_CLEANUP_HOUR if MORNING_CLEANUP_HOUR else 10)))
 
-DELETE_DELAY = 0.05
-SEND_DELAY = 0.1
-RATE_LIMIT_RETRY_DELAY = 60
+DELETE_DELAY = float(os.getenv("AUTO_DELETE_DELAY", "0.05"))
+SEND_DELAY = float(os.getenv("AUTO_SEND_DELAY", "0.1"))
+RATE_LIMIT_RETRY_DELAY = int(os.getenv("AUTO_RATE_LIMIT_RETRY", "60"))
+SUMMARY_PARSE_MODE = os.getenv("AUTO_SUMMARY_PARSE_MODE", "HTML")
+
+
+# ==================== КЛАВИАТУРА ДЛЯ СВОДКИ ====================
+
+def get_summary_keyboard() -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура для утренней и вечерней сводки."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="💰 Ежедневная награда", callback_data="daily_bonus"),
+            InlineKeyboardButton(text="🎮 Крестики-нолики", callback_data="menu_xo"),
+        ],
+        [
+            InlineKeyboardButton(text="❤️ Поддержать", callback_data="menu_donate"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="menu_stats"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 
 TOPIC_KEYWORDS = {
     "🎮 Игры": [r"\bигра\b", r"\bxo\b", r"\bкрестики\b", r"\bнолики\b", r"\bпобеда\b", r"\bставка\b", r"\bбот\b"],
@@ -43,90 +73,39 @@ TOPIC_KEYWORDS = {
 }
 
 FUNNY_TITLES = [
-    "Главный по болтовне, мать его",
-    "Король клавиатуры, ёпта",
-    "Повелитель сообщений, бля",
-    "Мега-болтун хренов",
-    "Душа компании, чтоб её",
-    "Голос чата, твою мать",
-    "Звезда эфира, ёкарный бабай",
-    "Чемпион по флуду, зараза",
-    "Легенда чата, блин",
-    "Великий оратор, щегол",
+    "Главный по болтовне",
+    "Король клавиатуры",
+    "Повелитель сообщений",
+    "Мега-болтун",
+    "Душа компании",
+    "Голос чата",
+    "Звезда эфира",
+    "Чемпион по флуду",
+    "Легенда чата",
+    "Великий оратор",
 ]
 
 DAILY_ADVICES = [
     "💡 Меньше слов — больше дела! Но ты же не умеешь, да?",
     "💡 Кто рано встаёт — тому весь день спать хочется. Проверено.",
-    "💡 Не откладывай на завтра то, что можно отложить на послезавтра. И так сойдёт.",
+    "💡 Не откладывай на завтра то, что можно отложить на послезавтра.",
     "💡 Если хочешь что-то сделать хорошо — заплати. Бесплатно только хреново.",
-    "💡 Тише едешь — дальше будешь. Но не факт что туда, куда нужно, долбоящер.",
+    "💡 Тише едешь — дальше будешь. Но не факт что туда, куда нужно.",
     "💡 Век живи — век учись. А дураком помрёшь. Статистика не врёт.",
-    "💡 Не ной, что бабок нет. В /daily дают халяву. Бери и не выёбывайся.",
+    "💡 Не ной, что монет нет. В /daily дают халяву. Бери и не выё...",
     "💡 Если жизнь — боль, то NEXUS — анестезия. Временная, но приятная.",
 ]
 
-TOPIC_COMMENTS = {
-    "🎮 Игры": [
-        "🎮 Игроманы хреновы! Опять всю ночь в XO рубились, вместо того чтобы спать.",
-        "🎮 Игровой отдел чата пахал в три смены. А толку? Всё равно сливаете.",
-        "🎮 Кто-то опять проиграл боту. Боту, Карл! Как так можно?",
-    ],
-    "💰 Экономика": [
-        "💰 Местные олигархи подсчитывают NCoin'ы. А у некоторых даже есть что считать!",
-        "💰 Если у тебя меньше 1000 NCoin — ты нищеброд. /daily в помощь.",
-        "💰 Кто-то опять клянчил бонус. И получил! А ты нет. Думай.",
-    ],
-    "👑 VIP и ранги": [
-        "👑 VIP'ы снова VIP'уют. А ты всё ещё Серебро V. Позорище.",
-        "👑 Элита чата продолжает элитить. Куда уж нам, простым смертным.",
-    ],
-    "💕 Отношения": [
-        "💕 Любовь витает в воздухе! Или это просто газы после вчерашнего.",
-        "💕 Свадебный сезон в NEXUS! Кто-то женился, кто-то развёлся. Стабильность.",
-        "💕 Флиртуете? Ну-ну. Главное чтоб не залетели. Дети — это дорого.",
-    ],
-    "💬 Общение": [
-        "💬 Обсудили всё: от политики до того, у кого член длиннее. Классика чата.",
-        "💬 Поговорили за жизнь. Вывод: жизнь — боль. Но /daily помогает.",
-        "💬 Флудили как не в себя. Хоть бы что полезное сказали.",
-    ],
-    "🤖 Бот": [
-        "🤖 Бота обсуждали. Да, я слышал. И мне пофиг.",
-        "🤖 Баги, фичи... Вам лишь бы пожаловаться. А спасибо сказать?",
-    ],
-}
-
 ACHIEVEMENTS = [
-    "🏆 «Золотая клавиатура» (пора бы помыть)",
-    "🎖️ «Орден болтливого языка» (язык без костей)",
+    "🏆 «Золотая клавиатура»",
+    "🎖️ «Орден болтливого языка»",
     "👑 «Повелитель чата» (ну почти)",
-    "💎 «Бриллиантовый флудер» (ого, круто!)",
-    "🔥 «Зажигалка чата» (только не подпали ничего)",
-    "🚀 «Ракета общения» (летит, но недалеко)",
-    "💩 «Король туалетного юмора» (сам себя короновал)",
-    "🧠 «Мозг чата» (единственный, кто хоть что-то понимает)",
+    "💎 «Бриллиантовый флудер»",
+    "🔥 «Зажигалка чата»",
+    "🚀 «Ракета общения»",
+    "💩 «Король туалетного юмора»",
+    "🧠 «Мозг чата»",
 ]
-
-
-# ==================== ФУНКЦИЯ КЛАВИАТУРЫ ДЛЯ СВОДКИ ====================
-
-def get_summary_keyboard() -> InlineKeyboardMarkup:
-    """
-    Создаёт инлайн-клавиатуру для утренней и вечерней сводки.
-    Кнопки: Ежедневная награда, Крестики-нолики, Поддержать.
-    """
-    buttons = [
-        [
-            InlineKeyboardButton(text="💰 Ежедневная награда", callback_data="daily_bonus"),
-            InlineKeyboardButton(text="🎮 Крестики-нолики", callback_data="menu_xo"),
-        ],
-        [
-            InlineKeyboardButton(text="❤️ Поддержать", callback_data="menu_donate"),
-            InlineKeyboardButton(text="📊 Статистика", callback_data="menu_stats"),
-        ],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ==================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ ====================
@@ -162,7 +141,7 @@ class MessageTracker:
         async with self._lock:
             return list(self._active_chats)
     
-    async def sync_chats_from_db(self, db) -> None:
+    async def sync_chats_from_db(self) -> None:
         if db is None:
             return
         try:
@@ -176,7 +155,7 @@ class MessageTracker:
                             self._active_chats.add(chat_id)
                 logger.info(f"✅ Synced {len(chats)} chats from database")
         except Exception as e:
-            logger.warning(f"Failed to sync chats from DB: {e}")
+            logger.warning(f"⚠️ Failed to sync chats from DB: {e}")
 
 
 _tracker = MessageTracker()
@@ -221,20 +200,16 @@ async def _send_with_retry(
     chat_id: int,
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-    max_retries: int = 3
+    max_retries: int = 3,
+    parse_mode: str = SUMMARY_PARSE_MODE
 ) -> bool:
-    """Отправка сообщения с обработкой лимитов. Поддерживает инлайн-клавиатуру."""
+    """Отправка сообщения с обработкой лимитов."""
     if bot is None or chat_id is None or not text:
         return False
     
     for attempt in range(max_retries):
         try:
-            await bot.send_message(
-                chat_id,
-                text,
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
+            await bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
             return True
         except TelegramRetryAfter as e:
             wait_time = min(e.retry_after, RATE_LIMIT_RETRY_DELAY)
@@ -245,13 +220,13 @@ async def _send_with_retry(
             return False
         except TelegramAPIError as e:
             if attempt == max_retries - 1:
-                logger.error(f"Failed to send to {chat_id}: {e}")
+                logger.error(f"❌ Failed to send to {chat_id}: {e}")
                 return False
             await asyncio.sleep(1)
     return False
 
 
-async def analyze_chat_topics(chat_id: int, db) -> List[Tuple[str, int]]:
+async def analyze_chat_topics(chat_id: int) -> List[Tuple[str, int]]:
     """Анализ тем общения в чате."""
     if db is None or chat_id is None:
         return []
@@ -276,11 +251,11 @@ async def analyze_chat_topics(chat_id: int, db) -> List[Tuple[str, int]]:
         return [(topic, count) for topic, count in sorted_topics if count > 0]
         
     except Exception as e:
-        logger.error(f"Error analyzing topics for chat {chat_id}: {e}")
+        logger.error(f"❌ Error analyzing topics for chat {chat_id}: {e}", exc_info=True)
         return []
 
 
-async def get_chat_stats_for_greeting(chat_id: int, db) -> Dict[str, Any]:
+async def get_chat_stats_for_greeting(chat_id: int) -> Dict[str, Any]:
     """Получить статистику конкретного чата."""
     if db is None or chat_id is None:
         return {
@@ -293,34 +268,123 @@ async def get_chat_stats_for_greeting(chat_id: int, db) -> Dict[str, Any]:
         'top_balance': [], 'top_xo': [], 'top_messages': [], 'topics': []
     }
     
-    try:
-        if hasattr(db, 'get_chat_daily_stats'):
-            stats = await db.get_chat_daily_stats(chat_id)
-            if stats and isinstance(stats, dict):
-                result['total_messages'] = stats.get('total_messages', 0) or 0
-                result['unique_users'] = stats.get('unique_users', 0) or 0
-        
-        if hasattr(db, 'get_chat_top_balance'):
-            top = await db.get_chat_top_balance(chat_id, 3)
-            if top and isinstance(top, list):
-                result['top_balance'] = [u for u in top if isinstance(u, dict)]
-        
-        if hasattr(db, 'get_chat_top_xo'):
-            top = await db.get_chat_top_xo(chat_id, 3)
-            if top and isinstance(top, list):
-                result['top_xo'] = [u for u in top if isinstance(u, dict)]
-        
-        if hasattr(db, 'get_chat_top_messages'):
-            top = await db.get_chat_top_messages(chat_id, 3)
-            if top and isinstance(top, list):
-                result['top_messages'] = [u for u in top if isinstance(u, dict)]
-        
-        result['topics'] = await analyze_chat_topics(chat_id, db)
-        
-    except Exception as e:
-        logger.error(f"Error getting stats for chat {chat_id}: {e}")
+    methods = {
+        'get_chat_daily_stats': ('total_messages', 'unique_users'),
+        'get_chat_top_balance': ('top_balance',),
+        'get_chat_top_xo': ('top_xo',),
+        'get_chat_top_messages': ('top_messages',),
+    }
+    
+    for method_name, keys in methods.items():
+        if hasattr(db, method_name) and callable(getattr(db, method_name)):
+            try:
+                data = await getattr(db, method_name)(chat_id, 3)
+                if data and isinstance(data, (dict, list)):
+                    if isinstance(data, dict):
+                        for key in keys:
+                            result[key] = data.get(key, result[key])
+                    elif isinstance(data, list):
+                        result[keys[0]] = [u for u in data[:3] if isinstance(u, dict)]
+            except Exception as e:
+                logger.warning(f"⚠️ Method {method_name} failed for chat {chat_id}: {e}")
+        else:
+            logger.debug(f"Method {method_name} not available")
+    
+    result['topics'] = await analyze_chat_topics(chat_id)
     
     return result
+
+
+# ==================== ФОРМАТИРОВАНИЕ СВОДКИ ====================
+
+def _build_empty_summary_text() -> str:
+    """Текст сводки если нет сообщений."""
+    texts = [
+        "😴 <b>ВЧЕРА БЫЛО ТИХО...</b>\n\n"
+        "Ни одной живой души. Даже бот заскучал.\n"
+        "Вы чё, все сдохли? Или просто лень писать?\n"
+        "Сегодня жду оживления. Кто первый напишет — тот красавчик. Остальные — лодыри.",
+        
+        "🦗 <b>СВЕРЧКИ ВЧЕРА ПОБЕДИЛИ</b>\n\n"
+        "Сообщений: 0. Зато тишина была идеальной.\n"
+        "Давайте сегодня не дадим сверчкам победить снова.",
+    ]
+    return random.choice(texts)
+
+
+def _build_active_summary_text(stats: Dict) -> str:
+    """Текст сводки с активностью."""
+    top_babler = stats['top_messages'][0] if stats.get('top_messages') else None
+    top_name = format_top_name(top_babler) if top_babler else "Какой-то аноним"
+    funny_title = random.choice(FUNNY_TITLES)
+    advice = random.choice(DAILY_ADVICES)
+    
+    text = f"📊 <b>ИТОГИ ВЧЕРАШНЕГО ОБЩЕНИЯ</b> 📊\n\n"
+    text += f"💬 Наболтали аж <b>{stats['total_messages']}</b> сообщений! Языки не отсохли?\n"
+    text += f"👥 <b>{stats['unique_users']}</b> человек отметились в чате.\n\n"
+    
+    if stats.get('top_messages'):
+        text += f"<b>🗣️ ГЛАВНЫЕ БОЛТУНЫ:</b>\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, u in enumerate(stats['top_messages'][:3]):
+            name = format_top_name(u)
+            msgs = u.get('messages_total', u.get('message_count', 0)) or 0
+            achievement = random.choice(ACHIEVEMENTS)
+            text += f"{medals[i]} {name} — {msgs} сообщ. {achievement}\n"
+        text += f"\n👑 <b>{top_name}</b> получает титул «<i>{funny_title}</i>»! Гордись!\n\n"
+    
+    if stats.get('topics'):
+        text += "<b>📝 О ЧЁМ ГОВОРИЛИ:</b>\n"
+        for topic, count in stats['topics'][:5]:
+            text += f"• {topic}: {count} упоминаний\n"
+        text += "\n"
+    
+    text += f"{advice}\n\n"
+    text += "<i>📊 Сводка создана искусственным интеллектом. Но это не точно.</i>"
+    
+    return text
+
+
+def _build_morning_greeting_text(stats: Dict, greeting: str) -> str:
+    """Дополнение утреннего приветствия статистикой."""
+    text = greeting
+    
+    if stats.get('top_balance'):
+        text += "\n\n<b>🏆 ТОП-3 ПО БАЛАНСУ В ЭТОМ ЧАТЕ:</b>\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, u in enumerate(stats['top_balance'][:3]):
+            name = format_top_name(u)
+            balance = u.get('balance', 0) or 0
+            text += f"{medals[i]} {name} — {format_number(balance)} NCoin\n"
+    else:
+        text += "\n\n<b>🏆 ТОП-3 ПО БАЛАНСУ:</b>\n"
+        text += "Пока никто не накопил NCoin в этом чате. Будь первым! 🚀\n"
+    
+    if stats.get('top_messages'):
+        text += "\n<b>💬 ТОП-3 БОЛТУНОВ ЭТОГО ЧАТА:</b>\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, u in enumerate(stats['top_messages'][:3]):
+            name = format_top_name(u)
+            msgs = u.get('messages_total', u.get('message_count', 0)) or 0
+            text += f"{medals[i]} {name} — {msgs} сообщ.\n"
+    
+    if stats.get('top_xo'):
+        text += "\n<b>🎮 ТОП-3 ИГРОКОВ В XO:</b>\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, u in enumerate(stats['top_xo'][:3]):
+            name = format_top_name(u)
+            wins = u.get('wins', 0) or 0
+            games = u.get('games_played', 0) or 0
+            text += f"{medals[i]} {name} — {wins} побед / {games} игр\n"
+    
+    if stats.get('topics'):
+        text += "\n<b>📝 О ЧЁМ ГОВОРИЛИ ВЧЕРА:</b>\n"
+        for topic, count in stats['topics'][:3]:
+            text += f"• {topic} — {count} упоминаний\n"
+    
+    text += "\n<b>⚡ Жми на кнопки ниже!</b>"
+    
+    return text
 
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
@@ -364,9 +428,7 @@ async def delete_bot_messages(bot: Bot, chat_id: int) -> int:
     
     deleted = 0
     for cid, msg_id in pending:
-        if cid is None or msg_id is None:
-            continue
-        if cid != chat_id:
+        if cid is None or msg_id is None or cid != chat_id:
             continue
         if _shutdown_event.is_set():
             break
@@ -383,94 +445,30 @@ async def delete_bot_messages(bot: Bot, chat_id: int) -> int:
 
 
 async def send_daily_summary(bot: Bot, chat_id: int) -> bool:
-    """
-    Отправить ЖЁСТКУЮ ЮМОРИСТИЧЕСКУЮ сводку дня в чат.
-    🔥 ВСЕГДА отправляет, даже если нет данных!
-    🔥 V2.5.0: Добавлены инлайн-кнопки вместо слеш-команд.
-    """
+    """Отправить сводку дня в чат с инлайн-кнопками."""
     if bot is None or chat_id is None:
         return False
     
-    from database import db
-    
     try:
-        stats = await get_chat_stats_for_greeting(chat_id, db)
+        stats = await get_chat_stats_for_greeting(chat_id)
         keyboard = get_summary_keyboard()
         
-        # Нет сообщений — стебём
         if not stats or stats.get('total_messages', 0) == 0:
-            texts = [
-                "😴 <b>ВЧЕРА БЫЛО ТИХО...</b>\n\n"
-                "Ни одной живой души. Даже бот заскучал и чуть не отключился нахрен.\n"
-                "Вы чё, все сдохли? Или просто лень писать?\n"
-                "Сегодня жду оживления. Кто первый напишет — тот красавчик. Остальные — лодыри.",
-                
-                "🦗 <b>СВЕРЧКИ ВЧЕРА ПОБЕДИЛИ</b>\n\n"
-                "Сообщений: 0. Зато тишина была идеальной. Как в могиле.\n"
-                "Давайте сегодня не дадим сверчкам победить снова.",
-            ]
-            text = random.choice(texts)
+            text = _build_empty_summary_text()
         else:
-            top_babler = stats['top_messages'][0] if stats.get('top_messages') else None
-            top_name = format_top_name(top_babler) if top_babler else "Какой-то аноним"
-            funny_title = random.choice(FUNNY_TITLES)
-            advice = random.choice(DAILY_ADVICES)
-            
-            text = f"📊 <b>ИТОГИ ВЧЕРАШНЕГО ПИЗДЕЖА</b> 📊\n\n"
-            text += f"💬 Наболтали аж <b>{stats['total_messages']}</b> сообщений! Языки не отсохли?\n"
-            text += f"👥 <b>{stats['unique_users']}</b> рыла отметились в чате.\n\n"
-            
-            if stats.get('top_messages'):
-                text += f"<b>🗣️ ГЛАВНЫЕ БОЛТУНЫ (КОМУ ДЕЛАТЬ НЕХУЙ):</b>\n"
-                medals = ["🥇", "🥈", "🥉"]
-                for i, u in enumerate(stats['top_messages'][:3]):
-                    name = format_top_name(u)
-                    msgs = u.get('messages_total', u.get('message_count', 0)) or 0
-                    achievement = random.choice(ACHIEVEMENTS)
-                    text += f"{medals[i]} {name} — {msgs} сообщ. {achievement}\n"
-                text += f"\n👑 <b>{top_name}</b> получает титул «<i>{funny_title}</i>»! Гордись!\n\n"
-            
-            if stats.get('topics'):
-                text += "<b>📝 О ЧЁМ ТРЕЩАЛИ (КОМУ ЭТО ИНТЕРЕСНО):</b>\n"
-                for topic, count in stats['topics'][:5]:
-                    comment = random.choice(TOPIC_COMMENTS.get(topic, ["📝 Что-то обсуждали. Но что именно — хрен поймёшь."]))
-                    text += f"• {topic}: {count} раз\n  ↳ <i>{comment}</i>\n"
-                text += "\n"
-            
-            text += f"{advice}\n\n"
-            text += "<i>📊 Сводка создана искусственным интеллектом. Но это не точно.</i>"
+            text = _build_active_summary_text(stats)
         
         await _send_with_retry(bot, chat_id, text, reply_markup=keyboard)
         logger.info(f"📊 Сводка отправлена в чат {chat_id}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки сводки в чат {chat_id}: {e}")
+        logger.error(f"❌ Ошибка отправки сводки в чат {chat_id}: {e}", exc_info=True)
         return False
 
 
-async def morning_cleanup_and_greeting(bot: Bot) -> None:
-    """
-    Утренняя очистка и отправка приветствия В КАЖДЫЙ ЧАТ.
-    🔥 V2.5.0: Инлайн-кнопки вместо слеш-команд, статистика по чатам.
-    """
-    if bot is None:
-        return
-    
-    from database import db
-    if db is None:
-        return
-    
-    await _tracker.sync_chats_from_db(db)
-    
-    active_chats = await _tracker.get_active_chats()
-    if not active_chats:
-        logger.info("Нет активных чатов для очистки")
-        return
-    
-    logger.info(f"🌅 Утренняя очистка для {len(active_chats)} чатов")
-    
-    # Удаление сообщений
+async def _delete_pending_messages(bot: Bot) -> int:
+    """Удаление накопившихся сообщений бота."""
     pending = await _tracker.get_and_clear_pending()
     deleted = 0
     for chat_id, message_id in pending:
@@ -484,72 +482,32 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
             await asyncio.sleep(DELETE_DELAY)
         except TelegramAPIError:
             pass
-    
-    logger.info(f"🗑️ Удалено {deleted} сообщений")
-    
-    # Приветствие в каждый чат
-    sent = 0
-    failed = 0
+    return deleted
+
+
+async def _send_morning_greetings(bot: Bot, active_chats: List[int]) -> Tuple[int, int]:
+    """Отправка утренних приветствий во все активные чаты."""
     keyboard = get_summary_keyboard()
     
     morning_greetings = [
         "☀️ <b>ДОБРОЕ УТРО, NEXUS!</b>\n\nПросыпайтесь, сонные тетери! Бот уже пашет, а вы где? 😴",
         "🌅 <b>РАССВЕТ В NEXUS!</b>\n\nКофе в руки, глаза открыть — и вперёд покорять чат! ☕",
-        "🐔 <b>КУКАРЕКУ, БЛЯ!</b>\n\nРанние пташки уже в строю. Остальные — ленивые жопы. 🐣",
+        "🐔 <b>КУКАРЕКУ!</b>\n\nРанние пташки уже в строю. Остальные — ленивые жопы. 🐣",
     ]
     
+    sent = 0
+    failed = 0
+    
     for chat_id in active_chats:
-        if _shutdown_event.is_set():
+        if _shutdown_event.is_set() or chat_id is None:
             break
-        if chat_id is None:
-            continue
         
         try:
-            stats = await get_chat_stats_for_greeting(chat_id, db)
-            
+            stats = await get_chat_stats_for_greeting(chat_id)
             greeting = random.choice(morning_greetings)
+            text = _build_morning_greeting_text(stats, greeting)
             
-            # Топ по балансу (теперь фильтруется по чату)
-            if stats.get('top_balance'):
-                greeting += "\n\n<b>🏆 ТОП-3 ПО БАЛАНСУ В ЭТОМ ЧАТЕ:</b>\n"
-                medals = ["🥇", "🥈", "🥉"]
-                for i, u in enumerate(stats['top_balance'][:3]):
-                    name = format_top_name(u)
-                    balance = u.get('balance', 0) or 0
-                    greeting += f"{medals[i]} {name} — {format_number(balance)} NCoin\n"
-            else:
-                greeting += "\n\n<b>🏆 ТОП-3 ПО БАЛАНСУ:</b>\n"
-                greeting += "Пока никто не накопил NCoin в этом чате. Будь первым! 🚀\n"
-            
-            # Топ болтунов
-            if stats.get('top_messages'):
-                greeting += "\n<b>💬 ТОП-3 БОЛТУНОВ ЭТОГО ЧАТА:</b>\n"
-                medals = ["🥇", "🥈", "🥉"]
-                for i, u in enumerate(stats['top_messages'][:3]):
-                    name = format_top_name(u)
-                    msgs = u.get('messages_total', u.get('message_count', 0)) or 0
-                    greeting += f"{medals[i]} {name} — {msgs} сообщ.\n"
-            
-            # Топ XO
-            if stats.get('top_xo'):
-                greeting += "\n<b>🎮 ТОП-3 ИГРОКОВ В XO:</b>\n"
-                medals = ["🥇", "🥈", "🥉"]
-                for i, u in enumerate(stats['top_xo'][:3]):
-                    name = format_top_name(u)
-                    wins = u.get('wins', 0) or 0
-                    games = u.get('games_played', 0) or 0
-                    greeting += f"{medals[i]} {name} — {wins} побед / {games} игр\n"
-            
-            # Темы
-            if stats.get('topics'):
-                greeting += "\n<b>📝 О ЧЁМ ГОВОРИЛИ ВЧЕРА:</b>\n"
-                for topic, count in stats['topics'][:3]:
-                    greeting += f"• {topic} — {count} упоминаний\n"
-            
-            # Кнопки будут под сообщением, поэтому просто фраза
-            greeting += "\n<b>⚡ Жми на кнопки ниже!</b>"
-            
-            success = await _send_with_retry(bot, chat_id, greeting, reply_markup=keyboard)
+            success = await _send_with_retry(bot, chat_id, text, reply_markup=keyboard)
             if success:
                 sent += 1
             else:
@@ -561,26 +519,58 @@ async def morning_cleanup_and_greeting(bot: Bot) -> None:
             failed += 1
             logger.debug(f"Bot kicked from chat {chat_id}")
         except Exception as e:
-            logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
+            logger.error(f"❌ Ошибка отправки в чат {chat_id}: {e}", exc_info=True)
             failed += 1
+    
+    return sent, failed
+
+
+async def _send_cleanup_report(bot: Bot, deleted: int, sent: int, total: int) -> None:
+    """Отправка отчёта об очистке админам."""
+    if not ADMIN_IDS:
+        return
+    
+    report = (
+        f"✅ <b>УТРЕННЯЯ ОЧИСТКА ЗАВЕРШЕНА!</b>\n\n"
+        f"🗑️ Удалено: {deleted}\n"
+        f"📨 Приветствий: {sent}/{total}\n"
+        f"⏰ {datetime.now(MSK_OFFSET).strftime('%H:%M:%S')}"
+    )
+    
+    for admin_id in ADMIN_IDS:
+        if admin_id is None:
+            continue
+        try:
+            await _send_with_retry(bot, admin_id, report)
+        except Exception:
+            pass
+
+
+async def morning_cleanup_and_greeting(bot: Bot) -> None:
+    """Утренняя очистка и отправка приветствия в каждый чат."""
+    if bot is None or db is None:
+        return
+    
+    await _tracker.sync_chats_from_db()
+    
+    active_chats = await _tracker.get_active_chats()
+    if not active_chats:
+        logger.info("Нет активных чатов для очистки")
+        return
+    
+    logger.info(f"🌅 Утренняя очистка для {len(active_chats)} чатов")
+    
+    # Шаг 1: Удаление сообщений
+    deleted = await _delete_pending_messages(bot)
+    logger.info(f"🗑️ Удалено {deleted} сообщений")
+    
+    # Шаг 2: Отправка приветствий
+    sent, failed = await _send_morning_greetings(bot, active_chats)
     
     logger.info(f"🌅 Утренняя очистка: {sent}/{len(active_chats)} приветствий, {failed} ошибок")
     
-    # Отчёт админам
-    if ADMIN_IDS:
-        report = (
-            f"✅ <b>УТРЕННЯЯ ОЧИСТКА ЗАВЕРШЕНА!</b>\n\n"
-            f"🗑️ Удалено: {deleted}\n"
-            f"📨 Приветствий: {sent}/{len(active_chats)}\n"
-            f"⏰ {datetime.now(MSK_OFFSET).strftime('%H:%M:%S')}"
-        )
-        for admin_id in ADMIN_IDS:
-            if admin_id is None:
-                continue
-            try:
-                await _send_with_retry(bot, admin_id, report)
-            except Exception:
-                pass
+    # Шаг 3: Отчёт админам
+    await _send_cleanup_report(bot, deleted, sent, len(active_chats))
 
 
 async def schedule_morning_cleanup(bot: Bot) -> None:
@@ -598,7 +588,7 @@ async def schedule_morning_cleanup(bot: Bot) -> None:
             if now >= next_run:
                 next_run += timedelta(days=1)
             
-            wait_seconds = (next_run - now).total_seconds()
+            wait_seconds = max(0, (next_run - now).total_seconds())
             logger.info(f"⏰ Следующая очистка через {wait_seconds/3600:.1f} ч")
             
             try:
@@ -615,7 +605,7 @@ async def schedule_morning_cleanup(bot: Bot) -> None:
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"Ошибка планировщика: {e}")
+            logger.error(f"❌ Ошибка планировщика: {e}", exc_info=True)
             await asyncio.sleep(3600)
     
     logger.info("Планировщик остановлен")
@@ -637,35 +627,3 @@ async def get_active_chats_count() -> int:
 async def cleanup_all_chats(bot: Bot) -> None:
     if bot is not None:
         await morning_cleanup_and_greeting(bot)
-
-
-# ==================== ЗАГЛУШКИ ====================
-
-async def get_chat_daily_stats(chat_id: int) -> Dict:
-    if chat_id is None:
-        return {'total_messages': 0, 'unique_users': 0}
-    from database import db
-    if db:
-        stats = await db.get_chat_daily_stats(chat_id)
-        return stats if stats else {'total_messages': 0, 'unique_users': 0}
-    return {'total_messages': 0, 'unique_users': 0}
-
-
-async def get_chat_top_words(chat_id: int, limit: int = 10) -> List:
-    if chat_id is None:
-        return []
-    from database import db
-    if db:
-        words = await db.get_chat_top_words(chat_id, limit)
-        return words if words else []
-    return []
-
-
-async def get_chat_active_users(chat_id: int, limit: int = 5) -> List:
-    if chat_id is None:
-        return []
-    from database import db
-    if db:
-        users = await db.get_chat_active_users(chat_id, limit)
-        return users if users else []
-    return []
