@@ -2,13 +2,19 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/tag_user.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.1.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Управление подписками пользователя на теги
+# ============================================
+# ИСПРАВЛЕНИЯ v2.1.0:
+#   🟡 Надёжный парсинг callback_data (защита от slug с _)
+#   🟡 try-except вокруг int() при парсинге
+#   🟡 exc_info=True во всех logger.error
+#   🟡 Проверка существования чата в my_tags_menu
 # ============================================
 
 import html
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -35,8 +41,77 @@ def safe_html_escape(text: Optional[str]) -> str:
         return ""
 
 
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """Безопасный ответ на callback."""
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramAPIError:
+        pass
+
+
+def _parse_tagsub_callback(data: str) -> Optional[Tuple[str, int, str, bool]]:
+    """
+    Надёжный парсинг callback_data для tagsub_.
+    
+    Форматы:
+    - tagsub_{chat_id}_{slug}_{new_state}
+    - tagsub_all_{chat_id}_{new_state}
+    
+    Args:
+        data: Строка callback_data
+        
+    Returns:
+        Tuple[тип, chat_id, slug, new_state] или None
+    """
+    if not data or not data.startswith("tagsub_"):
+        return None
+    
+    try:
+        parts = data.split("_")
+        if len(parts) < 3:
+            return None
+        
+        sub_type = parts[1]  # "all" или chat_id
+        
+        if sub_type == "all":
+            # Формат: tagsub_all_{chat_id}_{new_state}
+            if len(parts) != 4:
+                return None
+            chat_id = int(parts[2])
+            new_state = bool(int(parts[3]))
+            return ("all", chat_id, "", new_state)
+        else:
+            # Формат: tagsub_{chat_id}_{slug}_{new_state}
+            if len(parts) < 4:
+                return None
+            chat_id = int(parts[1])
+            # slug может содержать "_", поэтому берём parts[2:-1]
+            slug = "_".join(parts[2:-1])
+            new_state = bool(int(parts[-1]))
+            return ("single", chat_id, slug, new_state)
+            
+    except (ValueError, IndexError, TypeError) as e:
+        logger.warning(f"⚠️ Failed to parse tagsub callback: {data} - {e}")
+        return None
+
+
 async def get_or_create_user(user_id: int, username: str = None, first_name: str = None) -> Optional[Dict]:
-    """Получить пользователя или создать если не существует."""
+    """
+    Получить пользователя или создать если не существует.
+    
+    Args:
+        user_id: ID пользователя
+        username: Username
+        first_name: Имя
+        
+    Returns:
+        Данные пользователя или None
+    """
     if user_id is None or db is None:
         return None
     
@@ -45,10 +120,10 @@ async def get_or_create_user(user_id: int, username: str = None, first_name: str
         if not user:
             await db.create_user(user_id, username, first_name, START_BALANCE)
             user = await db.get_user(user_id)
-            logger.info(f"Auto-registered user {user_id} in tag_user")
+            logger.info(f"✅ Auto-registered user {user_id} in tag_user")
         return user
     except DatabaseError as e:
-        logger.error(f"Database error in get_or_create_user: {e}")
+        logger.error(f"❌ Database error in get_or_create_user: {e}", exc_info=True)
         return None
 
 
@@ -64,15 +139,15 @@ async def check_tag_tables_exist() -> bool:
         )
         return row is not None
     except DatabaseError as e:
-        logger.error(f"Error checking tag tables: {e}")
+        logger.error(f"❌ Error checking tag tables: {e}", exc_info=True)
         return False
 
 
 # ==================== ИМПОРТ ФУНКЦИЙ ====================
 
 from handlers.tag_categories import (
-    get_chat_enabled_categories, 
-    get_user_subscriptions, 
+    get_chat_enabled_categories,
+    get_user_subscriptions,
     toggle_user_subscription
 )
 
@@ -80,7 +155,14 @@ from handlers.tag_categories import (
 # ==================== ОБНОВЛЕНИЕ СООБЩЕНИЯ ====================
 
 async def update_tags_message(message: Message, user_id: int, chat_id: int) -> None:
-    """Обновить сообщение с тегами."""
+    """
+    Обновить сообщение с тегами.
+    
+    Args:
+        message: Сообщение для редактирования
+        user_id: ID пользователя
+        chat_id: ID чата
+    """
     if not message:
         return
     
@@ -99,7 +181,6 @@ async def update_tags_message(message: Message, user_id: int, chat_id: int) -> N
             )
             return
         
-        # Сортируем категории
         categories.sort(key=lambda x: x.get('name', ''))
         
         keyboard = []
@@ -139,7 +220,7 @@ async def update_tags_message(message: Message, user_id: int, chat_id: int) -> N
         )
         
     except DatabaseError as e:
-        logger.error(f"Database error updating tags message: {e}")
+        logger.error(f"❌ Database error updating tags message: {e}", exc_info=True)
         await message.edit_text(
             "❌ Ошибка базы данных. Попробуйте позже.",
             parse_mode=ParseMode.HTML,
@@ -148,9 +229,9 @@ async def update_tags_message(message: Message, user_id: int, chat_id: int) -> N
             ])
         )
     except TelegramAPIError as e:
-        logger.error(f"Telegram error updating tags message: {e}")
+        logger.warning(f"⚠️ Telegram error updating tags message: {e}")
     except Exception as e:
-        logger.error(f"Unexpected error updating tags message: {e}")
+        logger.error(f"❌ Unexpected error updating tags message: {e}", exc_info=True)
 
 
 # ==================== КОМАНДА /mytags ====================
@@ -168,7 +249,6 @@ async def cmd_mytags(message: Message) -> None:
         await message.answer("❌ Команда работает только в группах!")
         return
     
-    # Авторегистрация
     await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     
     loading_msg = await message.answer("🔄 Загрузка категорий...")
@@ -190,10 +270,10 @@ async def cmd_mytags(message: Message) -> None:
         await update_tags_message(loading_msg, user_id, chat_id)
         
     except Exception as e:
-        logger.error(f"Error in mytags: {e}", exc_info=True)
+        logger.error(f"❌ Error in mytags: {e}", exc_info=True)
         await loading_msg.edit_text(
-            f"❌ <b>Ошибка загрузки категорий</b>\n\n"
-            f"Попробуйте позже или сообщите администратору.",
+            "❌ <b>Ошибка загрузки категорий</b>\n\n"
+            "Попробуйте позже или сообщите администратору.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
@@ -205,81 +285,62 @@ async def cmd_mytags(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("tagsub_"))
 async def toggle_subscription_callback(callback: CallbackQuery) -> None:
-    """Переключение подписки пользователя."""
+    """
+    Переключение подписки пользователя.
+    
+    Поддерживает:
+    - tagsub_{chat_id}_{slug}_{new_state} — переключение категории
+    - tagsub_all_{chat_id}_{new_state} — включить/выключить все
+    """
     if not callback or not callback.message or not callback.from_user:
         return
     
+    # ✅ Надёжный парсинг
+    parsed = _parse_tagsub_callback(callback.data)
+    if not parsed:
+        await _safe_callback_answer(callback, "❌ Неверный формат")
+        return
+    
+    sub_type, chat_id, slug, new_state = parsed
+    
     try:
-        parts = callback.data.split("_")
-        
-        # Обработка "включить/выключить все"
-        if parts[1] == "all":
-            if len(parts) != 4:
-                await callback.answer("❌ Неверный формат", show_alert=True)
-                return
-            
-            chat_id = int(parts[2])
-            new_state = bool(int(parts[3]))
-            
+        if sub_type == "all":
             categories = await get_chat_enabled_categories(chat_id)
-            
             for cat in categories:
                 await toggle_user_subscription(
-                    callback.from_user.id, 
-                    chat_id, 
-                    cat["slug"], 
-                    new_state
+                    callback.from_user.id, chat_id, cat["slug"], new_state
                 )
-            
             status_text = "включены" if new_state else "отключены"
-            await callback.answer(f"✅ Все уведомления {status_text}!", show_alert=True)
+            await _safe_callback_answer(callback, f"✅ Все уведомления {status_text}!")
+        else:
+            await get_or_create_user(
+                callback.from_user.id,
+                callback.from_user.username,
+                callback.from_user.first_name
+            )
             
-            await update_tags_message(callback.message, callback.from_user.id, chat_id)
-            return
-        
-        # Обработка отдельной категории
-        if len(parts) != 4:
-            await callback.answer("❌ Неверный формат", show_alert=True)
-            return
+            await toggle_user_subscription(
+                callback.from_user.id, chat_id, slug, new_state
+            )
             
-        chat_id = int(parts[1])
-        category_slug = parts[2]
-        new_state = bool(int(parts[3]))
-        
-        # Авторегистрация
-        await get_or_create_user(
-            callback.from_user.id,
-            callback.from_user.username,
-            callback.from_user.first_name
-        )
-        
-        # Меняем подписку
-        await toggle_user_subscription(
-            callback.from_user.id, 
-            chat_id, 
-            category_slug, 
-            new_state
-        )
+            # Получаем название категории
+            categories = await get_chat_enabled_categories(chat_id)
+            cat_name = next(
+                (c.get("name", slug) for c in categories if c.get("slug") == slug),
+                slug
+            )
+            status_text = "включены" if new_state else "отключены"
+            await _safe_callback_answer(callback, f"✅ {cat_name}: уведомления {status_text}!")
         
         # Обновляем сообщение
         await update_tags_message(callback.message, callback.from_user.id, chat_id)
         
-        # Получаем название категории
-        categories = await get_chat_enabled_categories(chat_id)
-        cat_name = next(
-            (c.get("name", category_slug) for c in categories if c.get("slug") == category_slug), 
-            category_slug
-        )
-        status_text = "включены" if new_state else "отключены"
-        
-        await callback.answer(f"✅ {cat_name}: уведомления {status_text}!")
-        
     except DatabaseError as e:
-        logger.error(f"Database error in tagsub: {e}")
-        await callback.answer("❌ Ошибка базы данных", show_alert=True)
+        logger.error(f"❌ Database error in tagsub: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка базы данных")
     except Exception as e:
-        logger.error(f"Error in tagsub: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка при изменении подписки", show_alert=True)
+        logger.error(f"❌ Error in tagsub: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка при изменении подписки")
 
 
 @router.callback_query(F.data == "my_tags_menu")
@@ -289,6 +350,11 @@ async def my_tags_menu_callback(callback: CallbackQuery) -> None:
         return
     
     user_id = callback.from_user.id
+    
+    if not callback.message.chat:
+        await _safe_callback_answer(callback, "❌ Чат не определён")
+        return
+    
     chat_id = callback.message.chat.id
     
     await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
@@ -302,7 +368,7 @@ async def my_tags_menu_callback(callback: CallbackQuery) -> None:
                 [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
             ])
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
         return
     
     loading_msg = await callback.message.edit_text("🔄 Загрузка категорий...")
@@ -319,13 +385,13 @@ async def my_tags_menu_callback(callback: CallbackQuery) -> None:
                     [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
                 ])
             )
-            await callback.answer()
+            await _safe_callback_answer(callback)
             return
         
         await update_tags_message(loading_msg, user_id, chat_id)
         
     except Exception as e:
-        logger.error(f"Error in my_tags_menu: {e}", exc_info=True)
+        logger.error(f"❌ Error in my_tags_menu: {e}", exc_info=True)
         await loading_msg.edit_text(
             "❌ <b>Ошибка загрузки категорий</b>\n\n"
             "Попробуйте позже или используйте команду /mytags",
@@ -335,4 +401,4 @@ async def my_tags_menu_callback(callback: CallbackQuery) -> None:
             ])
         )
     
-    await callback.answer()
+    await _safe_callback_answer(callback)
