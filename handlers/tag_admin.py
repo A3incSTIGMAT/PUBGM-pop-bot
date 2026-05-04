@@ -2,10 +2,18 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/tag_admin.py
-# ВЕРСИЯ: 2.0.0-production
+# ВЕРСИЯ: 2.1.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Управление категориями тегов (админ-панель)
 # ============================================
+# ИСПРАВЛЕНИЯ v2.1.0:
+#   🟡 Добавлена проверка типа чата (группа/супергруппа)
+#   🟡 Проверка callback.from_user во всех обработчиках
+#   🟡 Безопасный ответ на callback
+#   🟡 exc_info=True во всех logger.error
+#   🟢 DEVELOPER_IDS с защитой от None
+# ============================================
 
+import html
 import logging
 from typing import Optional
 
@@ -16,9 +24,9 @@ from aiogram.exceptions import TelegramAPIError
 
 from config import SUPER_ADMIN_IDS, ADMIN_IDS
 from handlers.tag_categories import (
-    get_all_categories, 
-    get_chat_enabled_slugs, 
-    toggle_chat_category, 
+    get_all_categories,
+    get_chat_enabled_slugs,
+    toggle_chat_category,
     init_categories
 )
 from database import DatabaseError
@@ -28,8 +36,8 @@ router = Router()
 
 # ==================== КОНСТАНТЫ ====================
 
-# ID разработчиков (из конфига)
-DEVELOPER_IDS = SUPER_ADMIN_IDS if SUPER_ADMIN_IDS else ADMIN_IDS
+# ID разработчиков с защитой от None
+DEVELOPER_IDS = (SUPER_ADMIN_IDS or []) or (ADMIN_IDS or [])
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
@@ -39,10 +47,30 @@ def safe_html_escape(text: Optional[str]) -> str:
     if text is None:
         return ""
     try:
-        import html
         return html.escape(str(text))
     except Exception:
         return ""
+
+
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """Безопасный ответ на callback."""
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramAPIError:
+        pass
+
+
+def _is_group_chat(callback: CallbackQuery) -> bool:
+    """Проверка, что callback из группы или супергруппы."""
+    if callback is None or callback.message is None:
+        return False
+    chat = callback.message.chat
+    return chat is not None and getattr(chat, 'type', None) in ['group', 'supergroup']
 
 
 async def can_manage_tags(bot, user_id: int, chat_id: int) -> bool:
@@ -50,6 +78,14 @@ async def can_manage_tags(bot, user_id: int, chat_id: int) -> bool:
     Проверяет, может ли пользователь управлять тегами:
     - владелец чата
     - или разработчик (в любом чате, где он админ)
+    
+    Args:
+        bot: Экземпляр бота
+        user_id: ID пользователя
+        chat_id: ID чата
+        
+    Returns:
+        True если есть права на управление
     """
     if bot is None or user_id is None or chat_id is None:
         return False
@@ -67,12 +103,23 @@ async def can_manage_tags(bot, user_id: int, chat_id: int) -> bool:
         
         return False
     except TelegramAPIError as e:
-        logger.warning(f"Manage tags check failed for {user_id} in {chat_id}: {e}")
+        logger.warning(f"⚠️ Manage tags check failed for {user_id} in {chat_id}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in can_manage_tags: {e}", exc_info=True)
         return False
 
 
 def get_back_keyboard(callback_data: str = "tag_admin_menu") -> InlineKeyboardMarkup:
-    """Клавиатура с кнопкой НАЗАД."""
+    """
+    Клавиатура с кнопкой НАЗАД.
+    
+    Args:
+        callback_data: Callback для кнопки возврата
+        
+    Returns:
+        InlineKeyboardMarkup
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
     ])
@@ -83,14 +130,19 @@ def get_back_keyboard(callback_data: str = "tag_admin_menu") -> InlineKeyboardMa
 @router.callback_query(F.data == "tag_admin_menu")
 async def tag_admin_menu(callback: CallbackQuery) -> None:
     """Меню управления тегами."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
+        await _safe_callback_answer(callback, "❌ Ошибка")
+        return
+    
+    if not _is_group_chat(callback):
+        await _safe_callback_answer(callback, "❌ Управление тегами доступно только в группах!")
         return
     
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
     
     if not await can_manage_tags(callback.bot, user_id, chat_id):
-        await callback.answer("❌ Только владелец чата может управлять тегами!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Только владелец чата может управлять тегами!")
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -105,20 +157,25 @@ async def tag_admin_menu(callback: CallbackQuery) -> None:
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "tag_enable_categories")
 async def tag_enable_categories(callback: CallbackQuery) -> None:
     """Список категорий для включения/отключения."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
+        await _safe_callback_answer(callback, "❌ Ошибка")
+        return
+    
+    if not _is_group_chat(callback):
+        await _safe_callback_answer(callback, "❌ Управление тегами доступно только в группах!")
         return
     
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
     
     if not await can_manage_tags(callback.bot, user_id, chat_id):
-        await callback.answer("❌ Только владелец чата!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Только владелец чата!")
         return
     
     try:
@@ -132,7 +189,7 @@ async def tag_enable_categories(callback: CallbackQuery) -> None:
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_back_keyboard()
             )
-            await callback.answer()
+            await _safe_callback_answer(callback)
             return
         
         keyboard = []
@@ -154,35 +211,40 @@ async def tag_enable_categories(callback: CallbackQuery) -> None:
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
         
     except DatabaseError as e:
-        logger.error(f"Database error in tag_enable_categories: {e}")
-        await callback.answer("❌ Ошибка базы данных", show_alert=True)
+        logger.error(f"❌ Database error in tag_enable_categories: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка базы данных")
     except Exception as e:
-        logger.error(f"Unexpected error in tag_enable_categories: {e}")
-        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        logger.error(f"❌ Unexpected error in tag_enable_categories: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Произошла ошибка")
 
 
 @router.callback_query(F.data.startswith("toggle_cat_"))
 async def toggle_category(callback: CallbackQuery) -> None:
     """Включение/отключение категории."""
-    if not callback or not callback.message:
+    if not callback or not callback.message or not callback.from_user:
+        await _safe_callback_answer(callback, "❌ Ошибка")
+        return
+    
+    if not _is_group_chat(callback):
+        await _safe_callback_answer(callback, "❌ Управление тегами доступно только в группах!")
         return
     
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
     
-    # Извлекаем slug (может быть с дополнительными подчеркиваниями)
+    # Извлекаем slug (поддерживает slug с подчёркиваниями, например "video_call")
     parts = callback.data.split("_")
     if len(parts) < 3:
-        await callback.answer("❌ Неверный формат", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Неверный формат")
         return
     
-    category_slug = "_".join(parts[2:])  # На случай если slug содержит _
+    category_slug = "_".join(parts[2:])
     
     if not await can_manage_tags(callback.bot, user_id, chat_id):
-        await callback.answer("❌ Только владелец чата!", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Только владелец чата!")
         return
     
     try:
@@ -198,11 +260,11 @@ async def toggle_category(callback: CallbackQuery) -> None:
         await tag_enable_categories(callback)
         
     except DatabaseError as e:
-        logger.error(f"Database error in toggle_category: {e}")
-        await callback.answer("❌ Ошибка базы данных", show_alert=True)
+        logger.error(f"❌ Database error in toggle_category: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка базы данных")
     except Exception as e:
-        logger.error(f"Unexpected error in toggle_category: {e}")
-        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        logger.error(f"❌ Unexpected error in toggle_category: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Произошла ошибка")
 
 
 # ==================== КОМАНДА ДЛЯ БЫСТРОГО ДОСТУПА ====================
