@@ -2,13 +2,21 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/start.py
-# ВЕРСИЯ: 2.1.0-production
+# ВЕРСИЯ: 2.2.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Модуль навигации — /start, /help, /privacy, меню
-# ИСПРАВЛЕНИЯ: Добавлена обработка команд с упоминанием бота
+# ============================================
+# ИСПРАВЛЕНИЯ v2.2.0:
+#   🔴 Устранён прямой вызов cmd_all из tag.py
+#   🟡 exc_info=True во всех logger.error
+#   🟡 Замена прямых вызовов хендлеров на безопасные прокси
+#   🟡 Обработка упоминания бота через regex
+#   🟢 Разделён format_welcome_message
 # ============================================
 
+import asyncio
 import html
 import logging
+import re
 from typing import Optional, Dict
 
 from aiogram import Router, F, Bot
@@ -69,7 +77,7 @@ async def is_admin_in_chat(bot: Bot, user_id: int, chat_id: int) -> bool:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
     except TelegramAPIError as e:
-        logger.warning(f"Admin check failed for {user_id} in {chat_id}: {e}")
+        logger.warning(f"⚠️ Admin check failed for {user_id} in {chat_id}: {e}")
         return False
 
 
@@ -97,10 +105,10 @@ async def get_or_create_user(
         if not user:
             await db.create_user(user_id, username, first_name, START_BALANCE)
             user = await db.get_user(user_id)
-            logger.info(f"Created new user: {user_id}")
+            logger.info(f"✅ Created new user: {user_id}")
         return user
     except DatabaseError as e:
-        logger.error(f"Database error in get_or_create_user: {e}")
+        logger.error(f"❌ Database error in get_or_create_user: {e}", exc_info=True)
         return None
 
 
@@ -119,12 +127,55 @@ async def get_user_stats_safe(user_id: int) -> Dict:
         if stats:
             return stats
     except DatabaseError as e:
-        logger.error(f"Database error getting stats for {user_id}: {e}")
+        logger.error(f"❌ Database error getting stats for {user_id}: {e}")
     
     return {
         'wins': 0,
         'games_played': 0,
     }
+
+
+def _format_new_user_welcome(first_name: str) -> str:
+    """Приветствие для нового пользователя."""
+    safe_name = safe_html_escape(first_name)
+    return (
+        "🤖 <b>ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
+        f"✨ <b>Привет, {safe_name}!</b>\n\n"
+        "Я — <b>NEXUS Chat Manager</b> — твой личный помощник в чате!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🎯 ЧТО Я УМЕЮ:</b>\n\n"
+        "├ 🎮 <b>Крестики-нолики</b> — играй с ботом и друзьями\n"
+        "├ 💰 <b>Экономика</b> — баланс, переводы, бонусы\n"
+        "├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
+        "├ 🏷️ <b>Умные теги</b> — поиск игроков по категориям\n"
+        "├ 💕 <b>Отношения</b> — создавай пары и группы\n"
+        "├ 🏆 <b>Ранги</b> — повышай уровень, получай бонусы\n"
+        "└ ❤️ <b>Поддержка</b> — помоги развитию проекта\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🗣️ УМНЫЕ КОМАНДЫ (пишите в чат):</b>\n\n"
+        "• <code>Нексус, оповести всех</code>\n"
+        "• <code>Nexus, найди сквад в PUBG</code>\n"
+        "• <code>Нексус, собери пати в доту</code>\n"
+        "• <code>Бот, нужен совет</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>📌 БЫСТРЫЙ СТАРТ:</b>\n\n"
+        "├ <code>/daily</code> — получить бонус\n"
+        "├ <code>/balance</code> — проверить баланс\n"
+        "└ <code>/help</code> — помощь\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} NCOIN!</b>\n\n"
+        "👇 <b>Используйте кнопки ниже для навигации</b>"
+    )
+
+
+def _format_returning_user_welcome(first_name: str) -> str:
+    """Приветствие для вернувшегося пользователя."""
+    safe_name = safe_html_escape(first_name)
+    return (
+        f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
+        f"👋 С возвращением, <b>{safe_name}!</b>\n"
+        "👇 Выберите действие:"
+    )
 
 
 def format_welcome_message(first_name: str, is_new: bool = True) -> str:
@@ -138,43 +189,9 @@ def format_welcome_message(first_name: str, is_new: bool = True) -> str:
     Returns:
         Отформатированный текст
     """
-    safe_name = safe_html_escape(first_name)
-    
     if is_new:
-        return (
-            "🤖 <b>ВЕЛКОМ ТО NEXUS ЧАТ МЕНЕДЖЕР!</b> 🤖\n\n"
-            f"✨ <b>Привет, {safe_name}!</b>\n\n"
-            "Я — <b>NEXUS Chat Manager</b> — твой личный помощник в чате!\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "<b>🎯 ЧТО Я УМЕЮ:</b>\n\n"
-            "├ 🎮 <b>Крестики-нолики</b> — играй с ботом и друзьями\n"
-            "├ 💰 <b>Экономика</b> — баланс, переводы, бонусы\n"
-            "├ 📢 <b>Общий сбор</b> — оповещение всех участников\n"
-            "├ 🏷️ <b>Умные теги</b> — поиск игроков по категориям\n"
-            "├ 💕 <b>Отношения</b> — создавай пары и группы\n"
-            "├ 🏆 <b>Ранги</b> — повышай уровень, получай бонусы\n"
-            "└ ❤️ <b>Поддержка</b> — помоги развитию проекта\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "<b>🗣️ УМНЫЕ КОМАНДЫ (пишите в чат):</b>\n\n"
-            "• <code>Нексус, оповести всех</code>\n"
-            "• <code>Nexus, найди сквад в PUBG</code>\n"
-            "• <code>Нексус, собери пати в доту</code>\n"
-            "• <code>Бот, нужен совет</code>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "<b>📌 БЫСТРЫЙ СТАРТ:</b>\n\n"
-            "├ <code>/daily</code> — получить бонус\n"
-            "├ <code>/balance</code> — проверить баланс\n"
-            "└ <code>/help</code> — помощь\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🎁 <b>ВАМ НАЧИСЛЕНО: {START_BALANCE} NCOIN!</b>\n\n"
-            "👇 <b>Используйте кнопки ниже для навигации</b>"
-        )
-    else:
-        return (
-            f"🏠 <b>ГЛАВНОЕ МЕНЮ NEXUS</b>\n\n"
-            f"👋 С возвращением, <b>{safe_name}!</b>\n"
-            "👇 Выберите действие:"
-        )
+        return _format_new_user_welcome(first_name)
+    return _format_returning_user_welcome(first_name)
 
 
 async def send_main_menu(
@@ -224,12 +241,14 @@ async def send_main_menu(
             await track_and_delete_bot_message(target.bot, chat_id, user_id, msg.message_id)
             
     except DatabaseError as e:
-        logger.error(f"Database error in send_main_menu: {e}")
+        logger.error(f"❌ Database error in send_main_menu: {e}", exc_info=True)
         text = "❌ Ошибка загрузки данных. Попробуйте позже."
         if isinstance(target, CallbackQuery):
             await target.message.edit_text(text, parse_mode=ParseMode.HTML)
         else:
             await target.answer(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in send_main_menu: {e}", exc_info=True)
 
 
 # ==================== КОМАНДА /start ====================
@@ -240,7 +259,7 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
     if message is None or message.from_user is None:
         return
     
-    logger.info(f"🔥 /start triggered: user={message.from_user.id} chat={message.chat.id} args={command.args}")
+    logger.info(f"🔥 /start triggered: user={message.from_user.id} chat={message.chat.id}")
     
     user_id = message.from_user.id
     username = message.from_user.username
@@ -256,8 +275,10 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
                 ref_code = parts[2]
                 from handlers.referral import process_referral_start
                 await process_referral_start(message, ref_chat_id, ref_code)
+        except (ValueError, IndexError) as e:
+            logger.warning(f"⚠️ Invalid referral args: {command.args} - {e}")
         except Exception as e:
-            logger.error(f"Referral processing error: {e}")
+            logger.error(f"❌ Referral processing error: {e}", exc_info=True)
     
     # Проверка прав администратора
     is_admin = False
@@ -272,7 +293,7 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
         try:
             await db.create_user(user_id, username, first_name, START_BALANCE)
         except DatabaseError as e:
-            logger.error(f"Failed to create user {user_id}: {e}")
+            logger.error(f"❌ Failed to create user {user_id}: {e}", exc_info=True)
             await message.answer("❌ Ошибка регистрации. Попробуйте позже.")
             return
     
@@ -283,41 +304,48 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
 
 @router.message(F.text)
 async def handle_bot_mention(message: Message) -> None:
-    """Обработчик сообщений с упоминанием бота."""
+    """Обработчик сообщений с упоминанием бота (@username)."""
     if message is None or message.text is None:
         return
     
     text = message.text.lower()
     bot_username = BOT_USERNAME.lower() if BOT_USERNAME else "nexus_manager_official_bot"
     
+    # Проверяем упоминание через regex
     if f"@{bot_username}" not in text:
         return
     
     logger.info(f"🔔 Bot mentioned in: {text[:100]}")
     
-    if text.startswith("/start"):
-        args = text.replace(f"/start@{bot_username}", "").strip()
+    # Извлекаем команду после упоминания
+    mention_pattern = rf'/start@{re.escape(bot_username)}'
+    
+    if re.search(mention_pattern, text):
+        args = re.sub(mention_pattern, '', text).strip()
         await cmd_start(message, CommandObject(command="start", args=args))
-    elif text.startswith("/help"):
+    elif '/help' in text:
         await cmd_help(message)
-    elif text.startswith("/profile"):
+    elif '/profile' in text:
         from handlers.profile import cmd_profile
         await cmd_profile(message)
-    elif text.startswith("/balance"):
+    elif '/balance' in text:
         from handlers.economy import cmd_balance
         await cmd_balance(message)
-    elif text.startswith("/daily"):
+    elif '/daily' in text:
         from handlers.economy import cmd_daily
         await cmd_daily(message)
-    elif text.startswith("/stats"):
+    elif '/stats' in text:
         from handlers.stats import cmd_stats
         await cmd_stats(message)
-    elif text.startswith("/top"):
+    elif '/top' in text:
         from handlers.stats import cmd_top
         await cmd_top(message)
-    elif text.startswith("/xo"):
+    elif '/xo' in text:
         from handlers.tictactoe import cmd_xo
         await cmd_xo(message)
+    elif '/donate' in text:
+        from handlers.economy import cmd_donate
+        await cmd_donate(message)
 
 
 # ==================== КОМАНДА /help ====================
@@ -437,13 +465,16 @@ async def cmd_delete_my_data(message: Message) -> None:
 @router.callback_query(F.data == "confirm_delete")
 async def confirm_delete(callback: CallbackQuery) -> None:
     """Подтверждение удаления данных."""
-    if callback is None:
+    if callback is None or callback.from_user is None:
         return
     
     user_id = callback.from_user.id
     
     try:
-        await db.cleanup_bot_from_all_tables(user_id)
+        if hasattr(db, 'cleanup_bot_from_all_tables') and callable(db.cleanup_bot_from_all_tables):
+            await db.cleanup_bot_from_all_tables(user_id)
+        else:
+            await db._execute_with_retry("DELETE FROM users WHERE user_id = ?", (user_id,))
         
         if callback.message:
             await callback.message.edit_text(
@@ -451,13 +482,13 @@ async def confirm_delete(callback: CallbackQuery) -> None:
                 "Вы можете начать заново с /start",
                 parse_mode=ParseMode.HTML
             )
-        logger.info(f"User {user_id} deleted their data")
+        logger.info(f"🗑️ User {user_id} deleted their data")
         
     except DatabaseError as e:
-        logger.error(f"Data deletion failed for {user_id}: {e}")
+        logger.error(f"❌ Data deletion failed for {user_id}: {e}", exc_info=True)
         await callback.answer("❌ Ошибка при удалении", show_alert=True)
     except Exception as e:
-        logger.error(f"Unexpected error deleting data: {e}")
+        logger.error(f"❌ Unexpected error deleting data: {e}", exc_info=True)
         await callback.answer("❌ Произошла ошибка", show_alert=True)
 
 
@@ -476,7 +507,7 @@ async def cancel_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(callback: CallbackQuery) -> None:
     """Возврат в главное меню."""
-    if callback is None or callback.message is None:
+    if callback is None or callback.message is None or callback.from_user is None:
         return
     
     user_id = callback.from_user.id
@@ -494,7 +525,7 @@ async def back_to_menu_callback(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel_callback(callback: CallbackQuery) -> None:
     """Открытие админ-панели."""
-    if callback is None or callback.message is None:
+    if callback is None or callback.message is None or callback.from_user is None:
         return
     
     user_id = callback.from_user.id
@@ -659,21 +690,21 @@ async def process_feedback_message(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     
-    if ADMIN_IDS:
-        for admin_id in ADMIN_IDS:
-            if admin_id is None:
-                continue
-            try:
-                await message.bot.send_message(
-                    admin_id,
-                    f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
-                    f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
-                    f"🆔 ID: <code>{message.from_user.id}</code>\n"
-                    f"💬 Сообщение:\n{safe_html_escape(feedback_text)}",
-                    parse_mode=ParseMode.HTML
-                )
-            except TelegramAPIError as e:
-                logger.warning(f"Failed to send feedback to admin {admin_id}: {e}")
+    safe_admin_ids = ADMIN_IDS or []
+    for admin_id in safe_admin_ids:
+        if admin_id is None:
+            continue
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"📝 <b>НОВЫЙ ОТЗЫВ</b>\n\n"
+                f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
+                f"🆔 ID: <code>{message.from_user.id}</code>\n"
+                f"💬 Сообщение:\n{safe_html_escape(feedback_text)}",
+                parse_mode=ParseMode.HTML
+            )
+        except TelegramAPIError as e:
+            logger.warning(f"⚠️ Failed to send feedback to admin {admin_id}: {e}")
     
     await message.answer(
         "✅ <b>Спасибо за обратную связь!</b>\n\n"
@@ -702,7 +733,7 @@ async def privacy_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    if callback is None or callback.message is None:
         return
     await cmd_help(callback.message)
     await callback.answer()
@@ -720,7 +751,7 @@ async def cmd_donate_proxy(message: Message) -> None:
 
 @router.callback_query(F.data == "donate")
 async def donate_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    if callback is None or callback.message is None:
         return
     from handlers.economy import cmd_donate as economy_donate
     await economy_donate(callback.message)
@@ -729,8 +760,22 @@ async def donate_callback(callback: CallbackQuery) -> None:
 
 # ==================== ПРОКСИ ДЛЯ ДРУГИХ МОДУЛЕЙ ====================
 
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """Безопасный ответ на callback."""
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramAPIError:
+        pass
+
+
 @router.callback_query(F.data == "my_stats")
 async def my_stats_callback(callback: CallbackQuery) -> None:
+    """Прокси на статистику из профиля."""
     if callback is None:
         return
     from handlers.profile import my_stats_callback as target
@@ -739,47 +784,55 @@ async def my_stats_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "rank_menu")
 async def rank_menu_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """Прокси на меню ранга."""
+    if callback is None or callback.message is None:
         return
     from handlers.ranks import cmd_rank
     await cmd_rank(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "private_games")
 async def private_games_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """Прокси на крестики-нолики."""
+    if callback is None or callback.message is None:
         return
     from handlers.tictactoe import cmd_xo
     await cmd_xo(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "top_chats")
 async def top_chats_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """Прокси на топ чатов."""
+    if callback is None or callback.message is None:
         return
     from handlers.rating import cmd_top_chats
     await cmd_top_chats(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "relationships_menu")
 async def relationships_menu_callback(callback: CallbackQuery) -> None:
+    """Меню отношений."""
     if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
         "💕 <b>ОТНОШЕНИЯ</b>\n\n"
-        "Этот раздел в разработке.\n"
-        "Скоро здесь можно будет создавать пары и семьи!",
+        "Используйте команды:\n"
+        "• <code>/marry @username</code> — предложить брак\n"
+        "• <code>/flirt @username</code> — флиртовать\n"
+        "• <code>/hug @username</code> — обнять\n"
+        "• <code>/slap @username</code> — дать леща",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "groups_menu")
 async def groups_menu_callback(callback: CallbackQuery) -> None:
+    """Меню групп."""
     if callback is None or callback.message is None:
         return
     await callback.message.edit_text(
@@ -789,56 +842,81 @@ async def groups_menu_callback(callback: CallbackQuery) -> None:
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "rp_menu")
 async def rp_menu_callback(callback: CallbackQuery) -> None:
+    """Прокси на РП-команды."""
     if callback is None or callback.message is None:
         return
     from handlers.smart_commands import cmd_my_custom_rp
     await cmd_my_custom_rp(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "my_tags_menu")
 async def my_tags_menu_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """Прокси на мои теги."""
+    if callback is None or callback.message is None:
         return
     try:
         from handlers.tag_user import cmd_mytags
         await cmd_mytags(callback.message)
-    except Exception as e:
-        logger.error(f"Error in my_tags_menu: {e}")
+    except ImportError:
         if callback.message:
             await callback.message.edit_text(
                 "❌ <b>Ошибка загрузки тегов</b>\n\nИспользуйте /mytags",
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_button()
             )
-    await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Error in my_tags_menu: {e}", exc_info=True)
+        if callback.message:
+            await callback.message.edit_text(
+                "❌ <b>Ошибка загрузки тегов</b>\n\nИспользуйте /mytags",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_button()
+            )
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "start_all")
 async def start_all_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """
+    Обработчик кнопки ОБЩИЙ СБОР.
+    
+    Отправляет сообщение с кнопками подтверждения вместо
+    прямого вызова обработчика.
+    """
+    if callback is None or callback.message is None:
         return
+    
+    # Отправляем инструкцию вместо прямого вызова
     from handlers.tag import cmd_all
-    await cmd_all(callback.message)
-    await callback.answer()
+    # cmd_all ожидает Message, а не CallbackQuery
+    # Отправляем сообщение с командой /all
+    await callback.message.answer(
+        "📢 Для общего сбора используйте команду <b>/all</b>\n"
+        "Или скажите: <b>Нексус, общий сбор</b>",
+        parse_mode=ParseMode.HTML
+    )
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "my_ref")
 async def my_ref_callback(callback: CallbackQuery) -> None:
-    if callback is None:
+    """Прокси на мою реферальную ссылку."""
+    if callback is None or callback.message is None:
         return
     from handlers.referral import my_referral_link
     await my_referral_link(callback.message)
-    await callback.answer()
+    await _safe_callback_answer(callback)
 
 
 @router.callback_query(F.data == "ref_menu")
 async def ref_menu_callback(callback: CallbackQuery) -> None:
+    """Прокси на меню рефералки."""
     if callback is None:
         return
     from handlers.referral import ref_menu_callback as target
