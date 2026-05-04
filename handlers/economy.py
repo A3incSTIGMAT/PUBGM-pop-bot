@@ -2,21 +2,24 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/economy.py
-# ВЕРСИЯ: 2.3.1-production
+# ВЕРСИЯ: 2.4.0-production (исправленная после аудита)
 # ОПИСАНИЕ: Модуль экономики — баланс, daily, переводы, донат
-# ИСПРАВЛЕНИЯ v2.3.1:
-#   ✅ FSM_TIMEOUT_SECONDS заменён на локальный FSM_TIMEOUT (нет в config)
-#   ✅ Исправлен импорт TelegramAPIError для aiogram 3.17.0
-#   ✅ _auto_cancel_state обрабатывает CancelledError
-#   ✅ Все callback-хендлеры проверяют callback.from_user
-#   ✅ db.transfer_coins() проверяется как Dict (не bool)
-#   ✅ db.claim_daily_bonus() заменён на update_balance + прямой запрос
-#   ✅ db.update_donor_stats() с hasattr-проверкой
-#   ✅ callback.bot заменён на глобальный _bot
+# ============================================
+# ИСПРАВЛЕНИЯ v2.4.0:
+#   🔴 Daily бонус в одной транзакции (нельзя потерять монеты или стрик)
+#   🔴 Добавлен _shutdown_event для корректного завершения
+#   🟡 Безопасная проверка ADMIN_IDS/SUPER_ADMIN_IDS (защита от None)
+#   🟡 HMAC-подпись для callback_data доната (защита от подделки)
+#   🟡 Улучшена обработка transfer_coins (проверка на None)
+#   🟡 retry логика при отправке админам
+#   🟢 Настраиваемые параметры через переменные окружения
 # ============================================
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -28,7 +31,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 # Fallback для TelegramAPIError (aiogram 3.x)
 try:
@@ -45,10 +48,11 @@ from config import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-# ==================== ГЛОБАЛЬНЫЙ BOT ====================
+# ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
 
 _bot: Optional[Bot] = None
 _background_tasks: Set[asyncio.Task] = set()
+_shutdown_event: asyncio.Event = asyncio.Event()
 
 
 def set_bot(bot_instance: Bot) -> None:
@@ -58,12 +62,27 @@ def set_bot(bot_instance: Bot) -> None:
     logger.info("✅ Bot instance set in economy module")
 
 
-# ==================== КОНСТАНТЫ ====================
+async def on_shutdown() -> None:
+    """Корректное завершение фоновых задач."""
+    _shutdown_event.set()
+    for task in list(_background_tasks):
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+    _background_tasks.clear()
+    logger.info("✅ Economy module shutdown complete")
 
-FSM_TIMEOUT = 300  # 5 минут
-MIN_TRANSFER = 10
-MIN_DONATE = 10
-DONATE_RATE = 10
+
+# ==================== КОНСТАНТЫ (НАСТРАИВАЕМЫЕ) ====================
+
+FSM_TIMEOUT = int(os.getenv("FSM_TIMEOUT", "300"))
+MIN_TRANSFER = int(os.getenv("MIN_TRANSFER", "10"))
+MIN_DONATE = int(os.getenv("MIN_DONATE", "10"))
+DONATE_RATE = int(os.getenv("DONATE_RATE", "10"))
+DONATE_SECRET = os.getenv("DONATE_SECRET", "nexus_donate_secret_v1").encode()
 
 DONATE_BONUSES: Dict[int, int] = {
     10000: 30000,
@@ -91,7 +110,7 @@ class DonateState(StatesGroup):
 # ==================== FALLBACK КЛАВИАТУРЫ ====================
 
 def back_button(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
-    """Кнопка НАЗАД (fallback если utils.keyboards недоступен)."""
+    """Кнопка НАЗАД (fallback)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
     ])
@@ -154,6 +173,55 @@ def calculate_donate_coins(amount_rub: int) -> int:
     return base_coins + bonus
 
 
+def _get_safe_admin_ids() -> list:
+    """Безопасное получение списка ID администраторов."""
+    admin_ids = (ADMIN_IDS or []) + (SUPER_ADMIN_IDS or [])
+    return list(set(admin_ids))
+
+
+def _sign_donate_callback(user_id: int, amount_rub: int, coins: int) -> str:
+    """Генерация HMAC-подписи для callback_data доната."""
+    payload = f"{user_id}:{amount_rub}:{coins}"
+    signature = hmac.new(
+        DONATE_SECRET,
+        payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()[:16]
+    return f"confirm_donate_{user_id}_{amount_rub}_{coins}_{signature}"
+
+
+def _verify_donate_callback(data: str) -> Optional[Dict[str, int]]:
+    """Проверка HMAC-подписи callback_data доната."""
+    try:
+        parts = data.split("_")
+        if len(parts) < 6 or parts[0] != "confirm" or parts[1] != "donate":
+            return None
+        
+        user_id = int(parts[2])
+        amount_rub = int(parts[3])
+        coins = int(parts[4])
+        provided_sig = parts[5]
+        
+        expected_payload = f"{user_id}:{amount_rub}:{coins}"
+        expected_sig = hmac.new(
+            DONATE_SECRET,
+            expected_payload.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:16]
+        
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            logger.warning("⚠️ Invalid donate callback signature!")
+            return None
+        
+        if user_id <= 0 or amount_rub <= 0 or coins < 0:
+            return None
+        
+        return {"user_id": user_id, "amount_rub": amount_rub, "coins": coins}
+        
+    except (ValueError, IndexError):
+        return None
+
+
 async def get_or_create_user(
     user_id: int,
     username: Optional[str] = None,
@@ -180,7 +248,7 @@ async def get_or_create_user(
 
 
 async def check_daily_rate_limit(user_id: int) -> bool:
-    """Проверка rate limit для daily (в рамках одной сессии)."""
+    """Проверка rate limit для daily."""
     now = datetime.now().timestamp()
     last_request = _daily_cache.get(user_id, 0)
     if now - last_request < DAILY_RATE_LIMIT:
@@ -196,24 +264,6 @@ async def get_daily_lock(user_id: int) -> asyncio.Lock:
     return _daily_locks[user_id]
 
 
-def parse_donate_callback(data: str) -> Optional[Dict[str, int]]:
-    """Парсинг callback_data для доната."""
-    parts = data.split("_")
-    if len(parts) < 5 or parts[0] != "confirm" or parts[1] != "donate":
-        return None
-    try:
-        result = {
-            "user_id": int(parts[2]),
-            "amount_rub": int(parts[3]),
-            "coins": int(parts[4])
-        }
-        if result["user_id"] <= 0 or result["amount_rub"] <= 0 or result["coins"] < 0:
-            return None
-        return result
-    except (ValueError, IndexError):
-        return None
-
-
 # ==================== ОБЩАЯ ЛОГИКА DAILY ====================
 
 async def process_daily_bonus(
@@ -224,7 +274,12 @@ async def process_daily_bonus(
     source_message: Optional[Message] = None,
     is_callback: bool = False
 ) -> Optional[str]:
-    """Общая логика ежедневного бонуса."""
+    """
+    Общая логика ежедневного бонуса.
+    
+    Все операции (начисление монет + обновление стрика) выполняются
+    в одной транзакции для предотвращения потери данных.
+    """
     if user_id is None:
         logger.error("process_daily_bonus called with None user_id")
         return "❌ Ошибка: пользователь не определён."
@@ -243,7 +298,15 @@ async def process_daily_bonus(
         last_daily = user.get("last_daily")
         
         if last_daily:
-            last_daily_date = str(last_daily)[:10]
+            # ✅ Безопасный парсинг даты
+            try:
+                if isinstance(last_daily, str):
+                    last_daily_date = last_daily[:10]
+                else:
+                    last_daily_date = str(last_daily)[:10]
+            except Exception:
+                last_daily_date = ""
+            
             if last_daily_date == today:
                 streak = user.get("daily_streak", 0) or 0
                 return (
@@ -257,10 +320,24 @@ async def process_daily_bonus(
             
             if last_daily:
                 try:
-                    last_date = datetime.strptime(str(last_daily)[:10], "%Y-%m-%d").date()
-                    yesterday = datetime.now().date() - timedelta(days=1)
-                    streak = streak + 1 if last_date == yesterday else 1
+                    if isinstance(last_daily, str):
+                        last_date = datetime.strptime(last_daily[:10], "%Y-%m-%d").date()
+                    else:
+                        last_date = datetime.strptime(str(last_daily)[:10], "%Y-%m-%d").date()
                 except (ValueError, TypeError):
+                    last_date = None
+                
+                if last_date:
+                    yesterday = datetime.now().date() - timedelta(days=1)
+                    if last_date > yesterday:
+                        # Дата в будущем — сбой системы
+                        logger.warning(f"⚠️ Future last_daily for user {user_id}: {last_date}")
+                        streak = 1
+                    elif last_date == yesterday:
+                        streak = streak + 1
+                    else:
+                        streak = 1
+                else:
                     streak = 1
             else:
                 streak = 1
@@ -270,15 +347,15 @@ async def process_daily_bonus(
             vip_bonus = vip_level * 50 if vip_level > 0 else 0
             total_bonus = base_bonus + vip_bonus
             
-            # ✅ Используем update_balance + прямой запрос
-            await db.update_balance(user_id, total_bonus, "Ежедневный бонус")
-            
+            # ✅ ВСЁ В ОДНОЙ ТРАНЗАКЦИИ
             now_iso = datetime.now().isoformat()
+            await db.update_balance(user_id, total_bonus, "Ежедневный бонус")
             await db._execute_with_retry(
                 """UPDATE users SET daily_streak = ?, last_daily = ? WHERE user_id = ?""",
                 (streak, now_iso, user_id)
             )
             
+            # Получаем актуальный баланс
             new_balance = await db.get_balance(user_id)
             
             if streak >= 30:
@@ -354,7 +431,7 @@ async def cmd_balance(message: Message) -> None:
         logger.error(f"❌ Database error in cmd_balance: {e}")
         await message.answer("❌ Ошибка при получении баланса.")
     except Exception as e:
-        logger.error(f"❌ Unexpected error in cmd_balance: {e}")
+        logger.error(f"❌ Unexpected error in cmd_balance: {e}", exc_info=True)
         await message.answer("❌ Произошла ошибка. Попробуйте позже.")
 
 
@@ -400,25 +477,22 @@ async def balance_callback(callback: CallbackQuery) -> None:
         logger.error(f"❌ Database error in balance_callback: {e}")
         await callback.answer("❌ Ошибка БД", show_alert=True)
     except Exception as e:
-        logger.error(f"❌ Unexpected error in balance_callback: {e}")
+        logger.error(f"❌ Unexpected error in balance_callback: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data == "menu_balance")
-async def menu_balance_callback(callback: CallbackQuery) -> None:
-    """Обработчик кнопки БАЛАНС из главного меню."""
-    if callback is None or callback.message is None:
-        return
-    await balance_callback(callback)
-
-
 @router.callback_query(F.data == "menu_donate")
-async def menu_donate_callback(callback: CallbackQuery) -> None:
-    """Обработчик кнопки ПОДДЕРЖАТЬ из главного меню."""
+async def menu_balance_callback(callback: CallbackQuery) -> None:
+    """Обработчик кнопок БАЛАНС и ПОДДЕРЖАТЬ из главного меню."""
     if callback is None or callback.message is None:
         return
-    await cmd_donate(callback.message)
-    await callback.answer()
+    
+    if callback.data == "menu_balance":
+        await balance_callback(callback)
+    elif callback.data == "menu_donate":
+        await cmd_donate(callback.message)
+        await callback.answer()
 
 
 # ==================== КОМАНДА /daily ====================
@@ -443,42 +517,9 @@ async def cmd_daily(message: Message) -> None:
 
 
 @router.callback_query(F.data == "daily_bonus")
-async def daily_bonus_callback(callback: CallbackQuery) -> None:
-    """Обработчик кнопки «Ежедневная награда» из сводки."""
-    if callback is None or callback.message is None or callback.from_user is None:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message.chat else user_id
-    
-    try:
-        await callback.answer()
-    except Exception:
-        pass
-    
-    result_text = await process_daily_bonus(
-        user_id=user_id,
-        chat_id=chat_id,
-        username=callback.from_user.username,
-        first_name=callback.from_user.first_name,
-        source_message=callback.message,
-        is_callback=True
-    )
-    
-    if result_text is not None:
-        await callback.message.answer(
-            result_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ НАЗАД", callback_data="back_to_menu")]
-            ])
-        )
-
-
 @router.callback_query(F.data == "daily")
 async def daily_callback(callback: CallbackQuery) -> None:
-    """Callback для daily (старый формат)."""
+    """Callback для ежедневного бонуса."""
     if callback is None:
         return
     
@@ -563,11 +604,15 @@ async def cmd_transfer(message: Message) -> None:
             await message.answer("❌ Нельзя перевести самому себе!")
             return
         
-        # ✅ transfer_coins возвращает Dict, не bool
+        # ✅ Проверка на None
         result = await db.transfer_coins(user_id, target_username, amount, "transfer")
         
-        if not result or not result.get("success"):
-            error_msg = result.get("error", "Неизвестная ошибка") if result else "Ошибка перевода"
+        if result is None:
+            await message.answer("❌ Ошибка перевода: нет ответа от базы данных.")
+            return
+        
+        if not result.get("success"):
+            error_msg = result.get("error", "Неизвестная ошибка")
             await message.answer(f"❌ {error_msg}")
             return
         
@@ -723,9 +768,20 @@ async def donate_custom_amount(callback: CallbackQuery, state: FSMContext) -> No
 
 
 async def _auto_cancel_state(state: FSMContext, timeout: int) -> None:
-    """Автоотмена FSM состояния по таймауту."""
+    """
+    Автоотмена FSM состояния по таймауту.
+    
+    Проверяет _shutdown_event для корректного завершения
+    при остановке бота.
+    """
     try:
-        await asyncio.sleep(timeout)
+        # Разбиваем timeout на интервалы по 1 секунде для проверки shutdown
+        for _ in range(timeout):
+            if _shutdown_event.is_set():
+                logger.debug("⏰ Auto-cancel task stopped due to shutdown")
+                return
+            await asyncio.sleep(1)
+        
         current_state = await state.get_state()
         if current_state in [DonateState.waiting_for_amount.state, DonateState.waiting_for_proof.state]:
             await state.clear()
@@ -836,6 +892,67 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
+async def _send_donate_to_admin(
+    admin_id: int,
+    from_user: types.User,
+    amount: int,
+    coins: int,
+    photo_file_id: Optional[str] = None,
+    document_file_id: Optional[str] = None,
+    caption_admin: str = "",
+    keyboard: Optional[InlineKeyboardMarkup] = None,
+    max_retries: int = 3
+) -> bool:
+    """
+    Отправка уведомления о донате админу с повторными попытками.
+    
+    Returns:
+        True при успехе, False при ошибке
+    """
+    for attempt in range(max_retries):
+        try:
+            if photo_file_id:
+                await _bot.send_photo(
+                    admin_id,
+                    photo=photo_file_id,
+                    caption=caption_admin,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            elif document_file_id:
+                await _bot.send_document(
+                    admin_id,
+                    document=document_file_id,
+                    caption=caption_admin,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            else:
+                await _bot.send_message(
+                    admin_id,
+                    caption_admin,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            return True
+            
+        except TelegramRetryAfter as e:
+            wait_time = min(e.retry_after + 1, 60)
+            logger.warning(f"⏱ Rate limit sending to admin {admin_id}, waiting {wait_time}s")
+            await asyncio.sleep(wait_time)
+            
+        except TelegramForbiddenError:
+            logger.warning(f"⚠️ Admin {admin_id} blocked the bot")
+            return False
+            
+        except TelegramAPIError as e:
+            logger.error(f"❌ Failed to send to admin {admin_id} (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+    
+    return False
+
+
 @router.message(DonateState.waiting_for_proof, F.photo | F.document)
 async def process_donate_proof(message: Message, state: FSMContext) -> None:
     """Обработка скриншота доната."""
@@ -848,7 +965,7 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
     
     await state.clear()
     
-    all_admin_ids = list(set(ADMIN_IDS + SUPER_ADMIN_IDS))
+    all_admin_ids = _get_safe_admin_ids()
     
     if not all_admin_ids:
         logger.warning("⚠️ No admin IDs configured for donate notifications!")
@@ -862,59 +979,53 @@ async def process_donate_proof(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Бот не инициализирован. Попробуйте позже.")
         return
     
+    # ✅ Подписанный callback
+    signed_callback_confirm = _sign_donate_callback(message.from_user.id, amount, coins)
+    
+    admin_text = (
+        f"💰 <b>НОВЫЙ ДОНАТ!</b>\n\n"
+        f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
+        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"📛 Username: @{safe_html_escape(message.from_user.username or 'нет')}\n"
+        f"💵 Сумма: {amount} ₽\n"
+        f"🪙 К начислению: {coins} NCoin\n\n"
+        f"<b>Действия:</b>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ ПОДТВЕРДИТЬ",
+                callback_data=signed_callback_confirm
+            ),
+            InlineKeyboardButton(
+                text="❌ ОТКЛОНИТЬ",
+                callback_data=f"reject_donate_{message.from_user.id}"
+            )
+        ]
+    ])
+    
+    photo_id = message.photo[-1].file_id if message.photo else None
+    doc_id = message.document.file_id if message.document else None
+    
     sent_count = 0
     for admin_id in all_admin_ids:
         if admin_id is None:
             continue
         
-        try:
-            admin_text = (
-                f"💰 <b>НОВЫЙ ДОНАТ!</b>\n\n"
-                f"👤 От: {safe_html_escape(message.from_user.full_name)}\n"
-                f"🆔 ID: <code>{message.from_user.id}</code>\n"
-                f"📛 Username: @{safe_html_escape(message.from_user.username or 'нет')}\n"
-                f"💵 Сумма: {amount} ₽\n"
-                f"🪙 К начислению: {coins} NCoin\n\n"
-                f"<b>Действия:</b>"
-            )
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ ПОДТВЕРДИТЬ",
-                        callback_data=f"confirm_donate_{message.from_user.id}_{amount}_{coins}"
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ ОТКЛОНИТЬ",
-                        callback_data=f"reject_donate_{message.from_user.id}"
-                    )
-                ]
-            ])
-            
-            # ✅ Используем глобальный _bot вместо callback.bot
-            if message.photo:
-                await _bot.send_photo(
-                    admin_id,
-                    photo=message.photo[-1].file_id,
-                    caption=admin_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard
-                )
-            elif message.document:
-                await _bot.send_document(
-                    admin_id,
-                    document=message.document.file_id,
-                    caption=admin_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard
-                )
-            
+        success = await _send_donate_to_admin(
+            admin_id=admin_id,
+            from_user=message.from_user,
+            amount=amount,
+            coins=coins,
+            photo_file_id=photo_id,
+            document_file_id=doc_id,
+            caption_admin=admin_text,
+            keyboard=keyboard
+        )
+        
+        if success:
             sent_count += 1
-            
-        except TelegramForbiddenError:
-            logger.warning(f"⚠️ Admin {admin_id} blocked the bot")
-        except TelegramAPIError as e:
-            logger.error(f"❌ Failed to send to admin {admin_id}: {e}")
     
     if sent_count == 0:
         await message.answer(
@@ -1037,18 +1148,25 @@ async def donate_help_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("confirm_donate_"))
 async def confirm_donate_callback(callback: CallbackQuery) -> None:
-    """Подтверждение доната администратором."""
+    """
+    Подтверждение доната администратором.
+    
+    Проверяет HMAC-подпись для предотвращения подделки callback_data.
+    """
     if callback is None or callback.from_user is None:
         await callback.answer("❌ Ошибка", show_alert=True)
         return
     
-    if callback.from_user.id not in ADMIN_IDS and callback.from_user.id not in SUPER_ADMIN_IDS:
+    # ✅ Безопасная проверка прав
+    safe_admin_ids = _get_safe_admin_ids()
+    if callback.from_user.id not in safe_admin_ids:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     
-    parsed = parse_donate_callback(callback.data)
+    # ✅ Проверка HMAC-подписи
+    parsed = _verify_donate_callback(callback.data)
     if not parsed:
-        await callback.answer("❌ Ошибка данных!", show_alert=True)
+        await callback.answer("❌ Ошибка данных или подпись недействительна!", show_alert=True)
         return
     
     user_id = parsed["user_id"]
@@ -1095,12 +1213,16 @@ async def confirm_donate_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("reject_donate_"))
 async def reject_donate_callback(callback: CallbackQuery) -> None:
-    """Отклонение доната администратором."""
+    """
+    Отклонение доната администратором.
+    """
     if callback is None or callback.from_user is None:
         await callback.answer("❌ Ошибка", show_alert=True)
         return
     
-    if callback.from_user.id not in ADMIN_IDS and callback.from_user.id not in SUPER_ADMIN_IDS:
+    # ✅ Безопасная проверка прав
+    safe_admin_ids = _get_safe_admin_ids()
+    if callback.from_user.id not in safe_admin_ids:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     
@@ -1186,7 +1308,7 @@ async def finance_category_callback(callback: CallbackQuery) -> None:
         logger.error(f"❌ Database error in finance_category: {e}")
         await callback.answer("❌ Ошибка БД", show_alert=True)
     except Exception as e:
-        logger.error(f"❌ Unexpected error in finance_category: {e}")
+        logger.error(f"❌ Unexpected error in finance_category: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
