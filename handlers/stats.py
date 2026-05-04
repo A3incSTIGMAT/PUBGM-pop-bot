@@ -2,22 +2,22 @@
 # -*- coding: utf-8 -*-
 # ============================================
 # ФАЙЛ: handlers/stats.py
-# ВЕРСИЯ: 2.3.2-production (финальная)
-# ОПИСАНИЕ: Модуль статистики — оптимизированный кэш, валидация, сброс метрик
-# ИСПРАВЛЕНИЯ v2.3.2:
-#   ✅ OrderedDict для LRU-кэша (нативная поддержка)
-#   ✅ Очистка кэша по расписанию, не при каждом set()
-#   ✅ Валидация StatsConfig при импорте
-#   ✅ Обязательные поля в format_user_stats с fallback
-#   ✅ Многоточие при обрезке имён
-#   ✅ Сброс метрик StatsMetrics (ежечасный + ручной)
-#   ✅ Периодическое логирование метрик
+# ВЕРСИЯ: 2.4.0-production (исправленная после аудита)
+# ОПИСАНИЕ: Модуль статистики — оптимизированный кэш, валидация, метрики
+# ============================================
+# ИСПРАВЛЕНИЯ v2.4.0:
+#   🟡 Добавлен _shutdown_event для корректного завершения
+#   🟡 hasattr проверки для методов БД
+#   🟡 CancelledError обработка в show_top_list
+#   🟡 Безопасный доступ к callback.from_user
+#   🟢 Константы вынесены в os.getenv()
 # ============================================
 
 import asyncio
 import functools
 import html
 import logging
+import os
 import time
 from collections import OrderedDict
 from datetime import datetime
@@ -39,39 +39,32 @@ logger = logging.getLogger(__name__)
 class StatsConfig:
     """Конфигурация модуля статистики."""
     
-    TOP_LIMIT = 15              # Количество пользователей в топе
-    MAX_NAME_LENGTH = 20        # Максимальная длина имени в топе
-    TIMEOUT_STATS = 10.0        # Таймаут запроса статистики (сек)
-    TIMEOUT_TOP = 10.0          # Таймаут запроса топов (сек)
-    CACHE_TTL_STATS = 60        # Кэш персональной статистики (сек)
-    CACHE_TTL_TOP = 300         # Кэш топов (сек — 5 минут)
-    MAX_CACHE_SIZE = 100        # Максимальный размер кэша
-    CACHE_CLEANUP_INTERVAL = 60 # Очистка кэша каждые N секунд
-    METRICS_LOG_INTERVAL = 3600 # Логирование метрик каждые N секунд
-    BOT_USER_ID = "bot"         # Идентификатор бота в играх XO
+    TOP_LIMIT = int(os.getenv("STATS_TOP_LIMIT", "15"))
+    MAX_NAME_LENGTH = int(os.getenv("STATS_MAX_NAME_LENGTH", "20"))
+    TIMEOUT_STATS = float(os.getenv("STATS_TIMEOUT_STATS", "10.0"))
+    TIMEOUT_TOP = float(os.getenv("STATS_TIMEOUT_TOP", "10.0"))
+    CACHE_TTL_STATS = int(os.getenv("STATS_CACHE_TTL_STATS", "60"))
+    CACHE_TTL_TOP = int(os.getenv("STATS_CACHE_TTL_TOP", "300"))
+    MAX_CACHE_SIZE = int(os.getenv("STATS_MAX_CACHE_SIZE", "100"))
+    CACHE_CLEANUP_INTERVAL = int(os.getenv("STATS_CACHE_CLEANUP_INTERVAL", "60"))
+    METRICS_LOG_INTERVAL = int(os.getenv("STATS_METRICS_LOG_INTERVAL", "3600"))
+    BOT_USER_ID = "bot"
     
     @classmethod
     def validate(cls) -> List[str]:
-        """
-        Валидация конфигурации при старте.
-        
-        Returns:
-            Список ошибок (пустой если всё корректно)
-        """
+        """Валидация конфигурации при старте."""
         errors = []
         
-        # Проверка таймаутов и TTL
         for name in ['TIMEOUT_STATS', 'TIMEOUT_TOP', 'CACHE_TTL_STATS',
                       'CACHE_TTL_TOP', 'CACHE_CLEANUP_INTERVAL', 'METRICS_LOG_INTERVAL']:
             value = getattr(cls, name)
             if not isinstance(value, (int, float)) or value <= 0:
-                errors.append(name + " must be > 0, got " + str(value))
+                errors.append(f"{name} must be > 0, got {value}")
         
-        # Проверка лимитов
         for name in ['TOP_LIMIT', 'MAX_NAME_LENGTH', 'MAX_CACHE_SIZE']:
             value = getattr(cls, name)
             if not isinstance(value, int) or value <= 0:
-                errors.append(name + " must be > 0, got " + str(value))
+                errors.append(f"{name} must be > 0, got {value}")
         
         if cls.MAX_NAME_LENGTH < 3:
             errors.append("MAX_NAME_LENGTH should be >= 3")
@@ -79,10 +72,9 @@ class StatsConfig:
         return errors
 
 
-# Валидация при импорте
 _config_errors = StatsConfig.validate()
 if _config_errors:
-    logger.error("StatsConfig validation failed: %s", "; ".join(_config_errors))
+    logger.error("❌ StatsConfig validation failed: %s", "; ".join(_config_errors))
 
 
 # ==================== МЕТРИКИ СО СБРОСОМ ====================
@@ -151,12 +143,7 @@ class StatsMetrics:
 # ==================== ОПТИМИЗИРОВАННЫЙ LRU-КЭШ ====================
 
 class OptimizedLRUCache:
-    """
-    LRU-кэш на OrderedDict с периодической очисткой.
-    
-    ✅ OrderedDict.move_to_end() для нативного LRU
-    ✅ Очистка по расписанию (_cleanup_loop), не при каждом set()
-    """
+    """LRU-кэш на OrderedDict с периодической очисткой."""
     
     def __init__(self, max_size: int = 100, ttl: int = 60, name: str = "cache") -> None:
         self._cache: OrderedDict[str, Tuple[Any, float]] = OrderedDict()
@@ -182,7 +169,7 @@ class OptimizedLRUCache:
         if expired:
             StatsMetrics.cache_cleanups += 1
             logger.debug(
-                "Cache '%s' cleanup: removed %s expired entries, size: %s",
+                "🧹 Cache '%s' cleanup: removed %d expired, size: %d",
                 self._name, len(expired), len(self._cache)
             )
         
@@ -195,7 +182,6 @@ class OptimizedLRUCache:
         if key in self._cache:
             value, timestamp = self._cache[key]
             if time.time() - timestamp < self._ttl:
-                # Нативное LRU-перемещение
                 self._cache.move_to_end(key)
                 return value
             del self._cache[key]
@@ -204,11 +190,8 @@ class OptimizedLRUCache:
     def set(self, key: str, value: Any) -> None:
         """Сохранение в кэш."""
         self._cleanup_if_needed()
-        
-        # Удаляем старую запись если есть
         self._cache.pop(key, None)
         
-        # LRU-очистка при превышении лимита
         while len(self._cache) >= self._max_size:
             self._cache.popitem(last=False)
         
@@ -236,20 +219,26 @@ _top_cache = OptimizedLRUCache(
 )
 
 
-# ==================== ФОНОВАЯ ЗАДАЧА ЛОГИРОВАНИЯ МЕТРИК ====================
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 _metrics_log_task: Optional[asyncio.Task] = None
+_shutdown_event: asyncio.Event = asyncio.Event()
 
 
 async def _metrics_log_loop() -> None:
     """Периодическое логирование метрик."""
-    while True:
+    while not _shutdown_event.is_set():
         try:
-            await asyncio.sleep(StatsConfig.METRICS_LOG_INTERVAL)
+            # Ждём с проверкой shutdown каждую секунду
+            for _ in range(StatsConfig.METRICS_LOG_INTERVAL):
+                if _shutdown_event.is_set():
+                    return
+                await asyncio.sleep(1)
+            
             metrics = StatsMetrics.to_dict()
             logger.info(
-                "Stats metrics: requests=%s, cache_hit_rate=%s%%, "
-                "track_messages=%s, uptime=%ss",
+                "📊 Stats metrics: requests=%d, cache_hit_rate=%s%%, "
+                "track_messages=%d, uptime=%ds",
                 metrics["stats"]["requests"],
                 metrics["cache"]["hit_rate"],
                 metrics["track"]["messages"],
@@ -258,12 +247,13 @@ async def _metrics_log_loop() -> None:
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error("Metrics log error: %s", e)
+            logger.error("❌ Metrics log error: %s", e, exc_info=True)
 
 
 async def start_metrics_logging() -> None:
     """Запуск логирования метрик."""
     global _metrics_log_task
+    _shutdown_event.clear()
     if _metrics_log_task is None or _metrics_log_task.done():
         _metrics_log_task = asyncio.create_task(_metrics_log_loop())
         logger.info("✅ Stats metrics logging started")
@@ -272,6 +262,7 @@ async def start_metrics_logging() -> None:
 async def stop_metrics_logging() -> None:
     """Остановка логирования метрик."""
     global _metrics_log_task
+    _shutdown_event.set()
     if _metrics_log_task and not _metrics_log_task.done():
         _metrics_log_task.cancel()
         try:
@@ -285,29 +276,42 @@ async def stop_metrics_logging() -> None:
 # ==================== ДЕКОРАТОРЫ ====================
 
 def stats_callback(func):
-    """
-    Унифицированный декоратор для callback-обработчиков статистики.
-    """
+    """Унифицированный декоратор для callback-обработчиков статистики."""
     @functools.wraps(func)
     async def wrapper(callback: CallbackQuery, *args, **kwargs):
         if not callback or not callback.message:
             if callback:
-                await callback.answer("❌ Ошибка", show_alert=True)
+                await _safe_callback_answer(callback, "❌ Ошибка")
             return
         
         try:
             return await func(callback, *args, **kwargs)
+        except asyncio.CancelledError:
+            raise
         except DatabaseError as e:
-            logger.error("DB error in %s: %s", func.__name__, e)
-            await callback.answer("❌ Ошибка базы данных", show_alert=True)
+            logger.error("❌ DB error in %s: %s", func.__name__, e, exc_info=True)
+            await _safe_callback_answer(callback, "❌ Ошибка базы данных")
         except asyncio.TimeoutError:
-            logger.error("Timeout in %s", func.__name__)
-            await callback.answer("❌ Таймаут загрузки", show_alert=True)
+            logger.error("⏱ Timeout in %s", func.__name__)
+            await _safe_callback_answer(callback, "❌ Таймаут загрузки")
         except Exception as e:
-            logger.error("Error in %s: %s", func.__name__, e, exc_info=True)
-            await callback.answer("❌ Ошибка", show_alert=True)
+            logger.error("❌ Error in %s: %s", func.__name__, e, exc_info=True)
+            await _safe_callback_answer(callback, "❌ Ошибка")
     
     return wrapper
+
+
+async def _safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = True) -> None:
+    """Безопасный ответ на callback."""
+    if callback is None:
+        return
+    try:
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except Exception:
+        pass
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -350,14 +354,11 @@ def get_medal(position: Optional[int]) -> str:
     if position is None:
         return "—"
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    return medals.get(position, str(position) + ".")
+    return medals.get(position, f"{position}.")
 
 
 def safe_get(obj: Optional[Dict], key: str, default: Any = 0) -> Any:
-    """
-    Безопасное получение значения из словаря.
-    Гарантирует неотрицательные числа для числовых полей.
-    """
+    """Безопасное получение значения из словаря."""
     if obj is None:
         return default
     value = obj.get(key)
@@ -369,9 +370,7 @@ def safe_get(obj: Optional[Dict], key: str, default: Any = 0) -> Any:
 
 
 def escape_name(user: Optional[Dict]) -> str:
-    """
-    Форматирование имени пользователя с многоточием при обрезке.
-    """
+    """Форматирование имени пользователя с многоточием при обрезке."""
     if user is None:
         return "Пользователь"
     
@@ -390,13 +389,11 @@ def escape_name(user: Optional[Dict]) -> str:
 
 
 async def get_full_user_stats(user_id: int) -> Optional[Dict[str, Any]]:
-    """
-    Получение полной статистики пользователя с кэшированием.
-    """
+    """Получение полной статистики пользователя с кэшированием."""
     if user_id is None or db is None:
         return None
     
-    cache_key = "stats:" + str(user_id)
+    cache_key = f"stats:{user_id}"
     cached = _stats_cache.get(cache_key)
     if cached is not None:
         StatsMetrics.cache_hits += 1
@@ -405,50 +402,182 @@ async def get_full_user_stats(user_id: int) -> Optional[Dict[str, Any]]:
     StatsMetrics.cache_misses += 1
     
     try:
-        stats = await asyncio.wait_for(
-            db.get_user_stats(user_id),
-            timeout=StatsConfig.TIMEOUT_STATS
-        )
-        if stats:
-            _stats_cache.set(cache_key, stats)
-        return stats
+        if hasattr(db, 'get_user_stats') and callable(db.get_user_stats):
+            stats = await asyncio.wait_for(
+                db.get_user_stats(user_id),
+                timeout=StatsConfig.TIMEOUT_STATS
+            )
+            if stats:
+                _stats_cache.set(cache_key, stats)
+            return stats
     except asyncio.TimeoutError:
-        logger.error("Timeout getting stats for user %s", user_id)
-        return None
+        logger.error(f"⏱ Timeout getting stats for user {user_id}")
     except DatabaseError as e:
-        logger.error("DB error getting user stats for %s: %s", user_id, e)
-        return None
+        logger.error(f"❌ DB error getting user stats for {user_id}: {e}")
     except Exception as e:
-        logger.error("Unexpected error getting user stats: %s", e)
-        return None
+        logger.error(f"❌ Unexpected error getting user stats: {e}", exc_info=True)
+    
+    return None
 
 
 async def get_cached_top_users(order_by: str) -> List[Dict[str, Any]]:
-    """
-    Получение топа пользователей с кэшированием.
-    """
-    cache_key = "top:" + order_by
+    """Получение топа пользователей с кэшированием."""
+    cache_key = f"top:{order_by}"
     cached = _top_cache.get(cache_key)
     if cached is not None:
         return cached
     
     try:
-        top_users = await asyncio.wait_for(
-            db.get_top_users(limit=StatsConfig.TOP_LIMIT, order_by=order_by),
-            timeout=StatsConfig.TIMEOUT_TOP
-        )
-        if top_users:
-            _top_cache.set(cache_key, top_users)
-        return top_users or []
+        if hasattr(db, 'get_top_users') and callable(db.get_top_users):
+            top_users = await asyncio.wait_for(
+                db.get_top_users(limit=StatsConfig.TOP_LIMIT, order_by=order_by),
+                timeout=StatsConfig.TIMEOUT_TOP
+            )
+            if top_users:
+                _top_cache.set(cache_key, top_users)
+            return top_users or []
     except asyncio.TimeoutError:
-        logger.error("Timeout getting top users for %s", order_by)
-        return []
+        logger.error(f"⏱ Timeout getting top users for {order_by}")
     except DatabaseError as e:
-        logger.error("DB error getting top users: %s", e)
-        return []
+        logger.error(f"❌ DB error getting top users: {e}")
     except Exception as e:
-        logger.error("Unexpected error getting top users: %s", e)
-        return []
+        logger.error(f"❌ Unexpected error getting top users: {e}", exc_info=True)
+    
+    return []
+
+
+async def _find_user_by_username(username: str) -> Optional[Dict]:
+    """Безопасный поиск пользователя по username."""
+    if db is None:
+        return None
+    try:
+        if hasattr(db, 'get_user_by_username') and callable(db.get_user_by_username):
+            return await db.get_user_by_username(username)
+        else:
+            user = await db._execute_with_retry(
+                "SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
+                (username,), fetch_one=True
+            )
+            return dict(user) if user else None
+    except DatabaseError as e:
+        logger.error(f"❌ Error finding user @{username}: {e}")
+        return None
+
+
+# ==================== ФОРМАТИРОВАНИЕ ====================
+
+def format_user_stats(stats: Dict[str, Any]) -> str:
+    """Форматирование персональной статистики пользователя."""
+    first_name = safe_html_escape(str(stats.get("first_name") or "Пользователь"))
+    register_date = format_date(stats.get("user_register_date"))
+    days_active = safe_get(stats, "days_active", 0)
+    
+    games = safe_get(stats, "games_played", 0)
+    wins = safe_get(stats, "wins", 0)
+    losses = safe_get(stats, "losses", 0)
+    draws = safe_get(stats, "draws", 0)
+    wins_vs_bot = safe_get(stats, "wins_vs_bot", 0)
+    max_win_streak = safe_get(stats, "max_win_streak", 0)
+    winrate = (wins / games * 100) if games > 0 else 0
+    
+    media_count = (
+        safe_get(stats, "total_photos", 0) +
+        safe_get(stats, "total_videos", 0) +
+        safe_get(stats, "total_gifs", 0)
+    )
+    
+    lines = [
+        "📊 <b>СТАТИСТИКА</b>",
+        "",
+        f"👤 <b>{first_name}</b>",
+        f"📅 В боте с: {register_date} ({days_active} дней)",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "💬 <b>АКТИВНОСТЬ:</b>",
+        f"├ Всего сообщений: <b>{format_number(safe_get(stats, 'messages_total'))}</b>",
+        f"├ Сегодня: <b>{format_number(safe_get(stats, 'messages_today'))}</b>",
+        f"├ Голосовых: <b>{format_number(safe_get(stats, 'total_voice'))}</b>",
+        f"├ Стикеров: <b>{format_number(safe_get(stats, 'total_stickers'))}</b>",
+        f"└ Медиа: <b>{format_number(media_count)}</b>",
+        "",
+        "🔥 <b>СТРИК АКТИВНОСТИ:</b>",
+        f"├ Дней активности: <b>{format_number(days_active)}</b>",
+        f"├ Текущий стрик: <b>{format_number(safe_get(stats, 'current_streak'))} дней</b>",
+        f"└ Макс. стрик: <b>{format_number(safe_get(stats, 'max_streak'))} дней</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🎮 <b>КРЕСТИКИ-НОЛИКИ:</b>",
+        f"├ Игр всего: <b>{format_number(games)}</b>",
+        f"├ Побед: <b>{format_number(wins)}</b>",
+        f"├ Поражений: <b>{format_number(losses)}</b>",
+        f"├ Ничьих: <b>{format_number(draws)}</b>",
+        f"├ Винрейт: <b>{round(winrate, 1)}%</b>",
+        f"├ Побед над ботом: <b>{format_number(wins_vs_bot)}</b>",
+        f"└ Макс. винстрик: <b>{format_number(max_win_streak)}</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "💰 <b>ЭКОНОМИКА:</b>",
+        f"├ Баланс: <b>{format_number(safe_get(stats, 'balance'))} NCoin</b>",
+        f"├ Всего заработано: <b>{format_number(safe_get(stats, 'total_earned'))} NCoin</b>",
+        f"├ Всего потрачено: <b>{format_number(safe_get(stats, 'total_spent'))} NCoin</b>",
+        f"├ Daily бонусов: <b>{format_number(safe_get(stats, 'daily_claims'))} раз</b>",
+        f"└ Daily стрик: <b>{format_number(safe_get(stats, 'daily_streak'))} дней</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "💎 <b>ДОНАТ:</b>",
+        f"├ Задоначено: <b>{format_number(safe_get(stats, 'total_donated_rub'))} ₽</b>",
+        f"└ Получено NCoin: <b>{format_number(safe_get(stats, 'total_donated_coins'))}</b>",
+    ]
+    
+    return "\n".join(lines)
+
+
+def format_top_list(
+    title: str,
+    users: List[Dict[str, Any]],
+    value_key: str,
+    suffix: str = "",
+    extra_key: Optional[str] = None
+) -> str:
+    """
+    Форматирование списка топа.
+    
+    Args:
+        title: Заголовок
+        users: Список пользователей
+        value_key: Ключ для основного значения
+        suffix: Суффикс (ед. измерения)
+        extra_key: Дополнительный ключ (в скобках)
+        
+    Returns:
+        Отформатированный HTML-текст
+    """
+    if not users:
+        return f"📊 {title}\n\nПока нет данных!"
+    
+    lines = [title, "", "━━━━━━━━━━━━━━━━━━━━━", ""]
+    
+    for i, u in enumerate(users, 1):
+        if u is None:
+            continue
+        
+        medal = get_medal(i)
+        name = escape_name(u)
+        value = format_number(safe_get(u, value_key, 0))
+        
+        extra = ""
+        if extra_key:
+            extra_val = safe_get(u, extra_key, 0)
+            if extra_val > 0:
+                extra = f" ({format_number(extra_val)})"
+        
+        lines.append(f"{medal} <b>{name}</b> — {value}{suffix}{extra}")
+    
+    return "\n".join(lines)
 
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -476,114 +605,6 @@ def back_keyboard(callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ НАЗАД", callback_data=callback_data)]
     ])
-
-
-# ==================== ФОРМАТИРОВАНИЕ ====================
-
-def format_user_stats(stats: Dict[str, Any]) -> str:
-    """
-    Форматирование персональной статистики пользователя.
-    
-    ✅ Все поля имеют fallback при None
-    """
-    first_name = safe_html_escape(str(stats.get("first_name") or "Пользователь"))
-    register_date = format_date(stats.get("user_register_date"))
-    days_active = safe_get(stats, "days_active", 0)
-    
-    games = safe_get(stats, "games_played", 0)
-    wins = safe_get(stats, "wins", 0)
-    losses = safe_get(stats, "losses", 0)
-    draws = safe_get(stats, "draws", 0)
-    wins_vs_bot = safe_get(stats, "wins_vs_bot", 0)
-    max_win_streak = safe_get(stats, "max_win_streak", 0)
-    winrate = (wins / games * 100) if games > 0 else 0
-    
-    media_count = (
-        safe_get(stats, "total_photos", 0) +
-        safe_get(stats, "total_videos", 0) +
-        safe_get(stats, "total_gifs", 0)
-    )
-    
-    lines = [
-        "📊 <b>СТАТИСТИКА</b>",
-        "",
-        "👤 <b>" + first_name + "</b>",
-        "📅 В боте с: " + register_date + " (" + str(days_active) + " дней)",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "💬 <b>АКТИВНОСТЬ:</b>",
-        "├ Всего сообщений: <b>" + format_number(safe_get(stats, 'messages_total')) + "</b>",
-        "├ Сегодня: <b>" + format_number(safe_get(stats, 'messages_today')) + "</b>",
-        "├ Голосовых: <b>" + format_number(safe_get(stats, 'total_voice')) + "</b>",
-        "├ Стикеров: <b>" + format_number(safe_get(stats, 'total_stickers')) + "</b>",
-        "└ Медиа: <b>" + format_number(media_count) + "</b>",
-        "",
-        "🔥 <b>СТРИК АКТИВНОСТИ:</b>",
-        "├ Дней активности: <b>" + format_number(days_active) + "</b>",
-        "├ Текущий стрик: <b>" + format_number(safe_get(stats, 'current_streak')) + " дней</b>",
-        "└ Макс. стрик: <b>" + format_number(safe_get(stats, 'max_streak')) + " дней</b>",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "🎮 <b>КРЕСТИКИ-НОЛИКИ:</b>",
-        "├ Игр всего: <b>" + format_number(games) + "</b>",
-        "├ Побед: <b>" + format_number(wins) + "</b>",
-        "├ Поражений: <b>" + format_number(losses) + "</b>",
-        "├ Ничьих: <b>" + format_number(draws) + "</b>",
-        "├ Винрейт: <b>" + str(round(winrate, 1)) + "%</b>",
-        "├ Побед над ботом: <b>" + format_number(wins_vs_bot) + "</b>",
-        "└ Макс. винстрик: <b>" + format_number(max_win_streak) + "</b>",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "💰 <b>ЭКОНОМИКА:</b>",
-        "├ Баланс: <b>" + format_number(safe_get(stats, 'balance')) + " NCoin</b>",
-        "├ Всего заработано: <b>" + format_number(safe_get(stats, 'total_earned')) + " NCoin</b>",
-        "├ Всего потрачено: <b>" + format_number(safe_get(stats, 'total_spent')) + " NCoin</b>",
-        "├ Daily бонусов: <b>" + format_number(safe_get(stats, 'daily_claims')) + " раз</b>",
-        "└ Daily стрик: <b>" + format_number(safe_get(stats, 'daily_streak')) + " дней</b>",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "💎 <b>ДОНАТ:</b>",
-        "├ Задоначено: <b>" + format_number(safe_get(stats, 'total_donated_rub')) + " ₽</b>",
-        "└ Получено NCoin: <b>" + format_number(safe_get(stats, 'total_donated_coins')) + "</b>",
-    ]
-    
-    return "\n".join(lines)
-
-
-def format_top_list(
-    title: str,
-    users: List[Dict[str, Any]],
-    value_key: str,
-    suffix: str = "",
-    extra_key: Optional[str] = None
-) -> str:
-    """Форматирование списка топа."""
-    if not users:
-        return "📊 " + title + "\n\nПока нет данных!"
-    
-    lines = [title, "", "━━━━━━━━━━━━━━━━━━━━━", ""]
-    
-    for i, u in enumerate(users, 1):
-        if u is None:
-            continue
-        
-        medal = get_medal(i)
-        name = escape_name(u)
-        value = format_number(safe_get(u, value_key, 0))
-        
-        extra = ""
-        if extra_key:
-            extra_val = safe_get(u, extra_key, 0)
-            if extra_val > 0:
-                extra = " (" + format_number(extra_val) + ")"
-        
-        lines.append(medal + " <b>" + name + "</b> — " + value + suffix + extra)
-    
-    return "\n".join(lines)
 
 
 # ==================== ОТОБРАЖЕНИЕ ====================
@@ -637,7 +658,7 @@ async def show_user_stats(
             await target.answer(error_text, parse_mode=ParseMode.HTML)
     except DatabaseError as e:
         StatsMetrics.stats_errors += 1
-        logger.error("Database error in show_user_stats: %s", e)
+        logger.error(f"❌ Database error in show_user_stats: {e}", exc_info=True)
         error_text = "❌ Ошибка базы данных."
         if is_callback:
             await target.message.edit_text(error_text, parse_mode=ParseMode.HTML)
@@ -646,7 +667,7 @@ async def show_user_stats(
             await target.answer(error_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         StatsMetrics.stats_errors += 1
-        logger.error("Unexpected error in show_user_stats: %s", e, exc_info=True)
+        logger.error(f"❌ Unexpected error in show_user_stats: {e}", exc_info=True)
         if is_callback:
             await target.answer("❌ Ошибка", show_alert=True)
         else:
@@ -669,7 +690,7 @@ async def show_top_list(
         
         if not top_users:
             await callback.message.edit_text(
-                "📊 " + title + "\n\nПока нет данных!",
+                f"📊 {title}\n\nПока нет данных!",
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_keyboard("stats_tops")
             )
@@ -679,13 +700,15 @@ async def show_top_list(
         StatsMetrics.top_success += 1
         text = format_top_list(title, top_users, value_key, suffix, extra_key)
         
-        user_stats = await get_full_user_stats(callback.from_user.id)
-        if user_stats:
-            user_value = safe_get(user_stats, value_key, 0)
-            text += (
-                "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
-                "📊 Ваш результат: <b>" + format_number(user_value) + suffix + "</b>"
-            )
+        # Добавляем результат пользователя если он авторизован
+        if callback.from_user:
+            user_stats = await get_full_user_stats(callback.from_user.id)
+            if user_stats:
+                user_value = safe_get(user_stats, value_key, 0)
+                text += (
+                    "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 Ваш результат: <b>{format_number(user_value)}{suffix}</b>"
+                )
         
         await callback.message.edit_text(
             text, parse_mode=ParseMode.HTML,
@@ -695,11 +718,14 @@ async def show_top_list(
         
     except asyncio.TimeoutError:
         StatsMetrics.top_errors += 1
-        await callback.answer("❌ Таймаут загрузки", show_alert=True)
+        await _safe_callback_answer(callback, "❌ Таймаут загрузки")
+    except asyncio.CancelledError:
+        StatsMetrics.top_errors += 1
+        raise
     except Exception as e:
         StatsMetrics.top_errors += 1
-        logger.error("Error in show_top_list: %s", e, exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
+        logger.error(f"❌ Error in show_top_list: {e}", exc_info=True)
+        await _safe_callback_answer(callback, "❌ Ошибка")
 
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -717,7 +743,7 @@ async def cmd_stats(message: Message) -> None:
         if len(args) > 1 and args[1].startswith('@'):
             username = args[1].lstrip('@')
             if username:
-                target = await db.get_user_by_username(username)
+                target = await _find_user_by_username(username)
                 if target:
                     target_id = target.get("user_id", target_id)
     
@@ -774,7 +800,7 @@ async def stats_tops_callback(callback: CallbackQuery) -> None:
 async def top_messages_callback(callback: CallbackQuery) -> None:
     await show_top_list(
         callback,
-        "💬 <b>ТОП-" + str(StatsConfig.TOP_LIMIT) + " ПО СООБЩЕНИЯМ</b>",
+        f"💬 <b>ТОП-{StatsConfig.TOP_LIMIT} ПО СООБЩЕНИЯМ</b>",
         order_by="messages",
         value_key="messages_total",
         suffix=" сообщ."
@@ -786,7 +812,7 @@ async def top_messages_callback(callback: CallbackQuery) -> None:
 async def top_balance_callback(callback: CallbackQuery) -> None:
     await show_top_list(
         callback,
-        "💰 <b>ТОП-" + str(StatsConfig.TOP_LIMIT) + " ПО БАЛАНСУ</b>",
+        f"💰 <b>ТОП-{StatsConfig.TOP_LIMIT} ПО БАЛАНСУ</b>",
         order_by="balance",
         value_key="balance",
         suffix=" NCoin"
@@ -798,7 +824,7 @@ async def top_balance_callback(callback: CallbackQuery) -> None:
 async def top_xo_callback(callback: CallbackQuery) -> None:
     await show_top_list(
         callback,
-        "🎮 <b>ТОП-" + str(StatsConfig.TOP_LIMIT) + " ПО XO</b>",
+        f"🎮 <b>ТОП-{StatsConfig.TOP_LIMIT} ПО XO</b>",
         order_by="wins",
         value_key="wins",
         suffix=" побед",
@@ -811,7 +837,7 @@ async def top_xo_callback(callback: CallbackQuery) -> None:
 async def top_activity_callback(callback: CallbackQuery) -> None:
     await show_top_list(
         callback,
-        "🔥 <b>ТОП-" + str(StatsConfig.TOP_LIMIT) + " ПО АКТИВНОСТИ</b>",
+        f"🔥 <b>ТОП-{StatsConfig.TOP_LIMIT} ПО АКТИВНОСТИ</b>",
         order_by="activity",
         value_key="days_active",
         suffix=" дней"
@@ -823,7 +849,7 @@ async def top_activity_callback(callback: CallbackQuery) -> None:
 async def top_xp_callback(callback: CallbackQuery) -> None:
     await show_top_list(
         callback,
-        "⭐ <b>ТОП-" + str(StatsConfig.TOP_LIMIT) + " ПО XP</b>",
+        f"⭐ <b>ТОП-{StatsConfig.TOP_LIMIT} ПО XP</b>",
         order_by="xp",
         value_key="xp",
         suffix=" XP"
@@ -859,10 +885,10 @@ async def track_message(user_id: int, message: Message) -> None:
         StatsMetrics.track_messages += 1
     except DatabaseError as e:
         StatsMetrics.track_errors += 1
-        logger.error("Database error tracking activity: %s", e)
+        logger.error(f"❌ Database error tracking activity: {e}", exc_info=True)
     except Exception as e:
         StatsMetrics.track_errors += 1
-        logger.error("Unexpected error tracking activity: %s", e)
+        logger.error(f"❌ Unexpected error tracking activity: {e}", exc_info=True)
 
 
 async def track_xo_game(
@@ -878,8 +904,9 @@ async def track_xo_game(
         return
     
     try:
-        await db.update_xo_stats(user_id, result_type, bet or 0, won or 0)
+        if hasattr(db, 'update_xo_stats') and callable(db.update_xo_stats):
+            await db.update_xo_stats(user_id, result_type, bet or 0, won or 0)
     except DatabaseError as e:
-        logger.error("Database error tracking XO game: %s", e)
+        logger.error(f"❌ Database error tracking XO game: {e}", exc_info=True)
     except Exception as e:
-        logger.error("Unexpected error tracking XO game: %s", e)
+        logger.error(f"❌ Unexpected error tracking XO game: {e}", exc_info=True)
